@@ -71,24 +71,22 @@ struct Run: ParsableCommand {
 
     func run() throws {
         let id = try Create.submit(options, autoRemove: rm && detach)
-        try DaemonAPI.requireOK(DaemonAPI.post("/containers/\(DaemonAPI.path(id))/start"))
+        try DaemonAPI.requireOK(DaemonAPI.post("/containers/\(DaemonAPI.path(id))/start", timeoutSeconds: 300))
         if detach {
             print(id)
             return
         }
+        let wait = try DaemonAPI.decode(
+            WaitResponse.self,
+            from: DaemonAPI.post("/containers/\(DaemonAPI.path(id))/wait", timeoutSeconds: nil)
+        )
         try Logs.printLogs(id: id, follow: false, timestamps: false, tail: nil)
-        // MicroVM is not wired yet, so wait would block forever. Bound it and fall back to printing the ID.
-        let wait = try DaemonAPI.post("/containers/\(DaemonAPI.path(id))/wait", timeoutSeconds: 2)
-        if wait.statusCode < 400, let code = try? JSONDecoder().decode(WaitResponse.self, from: wait.body) {
-            if rm {
-                _ = try? DaemonAPI.delete("/containers/\(DaemonAPI.path(id))?force=1&v=1")
-            }
-            if code.StatusCode != 0 {
-                throw ExitCode(Int32(truncatingIfNeeded: code.StatusCode))
-            }
-            return
+        if rm {
+            _ = try? DaemonAPI.delete("/containers/\(DaemonAPI.path(id))?force=1&v=1")
         }
-        print(id)
+        if wait.StatusCode != 0 {
+            throw ExitCode(Int32(truncatingIfNeeded: wait.StatusCode))
+        }
     }
 }
 
@@ -365,7 +363,8 @@ private enum ContainerAction {
         for id in ids {
             var path = "/containers/\(DaemonAPI.path(id))/\(action)"
             if !query.isEmpty { path += "?\(query)" }
-            try DaemonAPI.requireOK(DaemonAPI.post(path))
+            let timeout = action == "start" ? 300 : 5
+            try DaemonAPI.requireOK(DaemonAPI.post(path, timeoutSeconds: timeout))
             print(id)
         }
     }

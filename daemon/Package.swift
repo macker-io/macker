@@ -27,7 +27,8 @@ let package = Package(
                 "ContainerEngine",
                 "DockerAPIAdapter",
                 .product(name: "Logging", package: "swift-log"),
-            ]
+            ],
+            exclude: ["App.entitlements"]
         ),
         .executableTarget(
             name: "cli",
@@ -44,6 +45,9 @@ let package = Package(
                 .product(name: "ContainerizationOCI", package: "containerization"),
                 .product(name: "ContainerizationExtras", package: "containerization"),
                 .product(name: "Logging", package: "swift-log"),
+            ],
+            resources: [
+                .copy("RuntimePin.json"),
             ]
         ),
         .target(

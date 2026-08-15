@@ -33,6 +33,8 @@ playground.xcworkspace
 # .swiftpm
 
 .build/
+daemon/.runtime/
+daemon/dist/
 
 # CocoaPods
 #

@@ -8,10 +8,7 @@ public actor EngineManager {
     /// Maximum container ID length, matching `Containerization.LinuxContainer`.
     public static let maxContainerIDLength = LinuxContainer.maxIDLength
 
-    public static var defaultStorePath: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("io.macker.daemon", isDirectory: true)
-    }
+    public static var defaultStorePath: URL { DaemonPaths.storeDirectory }
 
     let imageStore: ImageStore
     let eventBus = EventBus()
@@ -23,6 +20,9 @@ public actor EngineManager {
     var attachSubscribers: [String: [UUID: AsyncStream<String>.Continuation]] = [:]
     var execSubscribers: [String: [UUID: AsyncStream<String>.Continuation]] = [:]
     var volumes: [String: EngineVolume] = [:]
+    var containerManager: ContainerManager?
+    var vms: [String: LinuxContainer] = [:]
+    var waitTasks: [String: Task<Void, Never>] = [:]
 
     public init(storePath: URL? = nil) throws {
         let store = try ImageStore(path: storePath ?? Self.defaultStorePath)

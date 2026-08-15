@@ -90,9 +90,6 @@ public struct EngineContainerCreateSpec: Sendable {
 }
 
 /// Full in-process container record backing the Docker Container API.
-///
-/// Actual MicroVM boot (`LinuxContainer.create/start`) still needs a kernel and initfs.
-/// This record implements the Docker lifecycle so create/start/stop/ps/inspect/wait work.
 public struct EngineContainer: Sendable {
     public var id: String
     public var name: String

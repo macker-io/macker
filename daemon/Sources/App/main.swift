@@ -25,6 +25,17 @@ struct DaemonApp {
             logger.info(
                 "environment ok appleSilicon=\(report.isAppleSilicon) virtualization=\(report.isVirtualizationSupported) macOS=\(report.macOSVersion.majorVersion).\(report.macOSVersion.minorVersion).\(report.macOSVersion.patchVersion)"
             )
+            let runtime = await engine.runtimeStatus()
+            if let kernel = runtime.kernelPath {
+                logger.info("runtime kernel=\(kernel)")
+            } else {
+                logger.warning("runtime kernel missing — package the app or run `macker fetch-runtime`")
+            }
+            if let initfs = runtime.initfsPath {
+                logger.info("runtime initfs=\(initfs)")
+            } else {
+                logger.warning("runtime initfs missing — first container start will pull \(runtime.vminitReference)")
+            }
         } catch {
             logger.error("environment check failed: \(error.localizedDescription)")
             exit(1)
@@ -48,7 +59,7 @@ struct DaemonApp {
         _ = await serverTask.result
     }
 
-    /// `--socket <path>` or `--socket=<path>`; default `/tmp/docker-native.sock`.
+    /// `--socket <path>` or `--socket=<path>`; else `MACKER_HOST` / `DOCKER_HOST`; else the store socket.
     static func parseSocketPath(from arguments: [String]) -> String {
         if let index = arguments.firstIndex(of: "--socket"), arguments.indices.contains(index + 1) {
             return arguments[index + 1]
@@ -56,7 +67,7 @@ struct DaemonApp {
         if let combined = arguments.first(where: { $0.hasPrefix("--socket=") }) {
             return String(combined.dropFirst("--socket=".count))
         }
-        return SocketServer.defaultSocketPath
+        return DaemonPaths.socketPath()
     }
 }
 

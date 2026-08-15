@@ -15,6 +15,7 @@ public enum EngineError: Error, Sendable, LocalizedError {
     case volumeNotFound(String)
     case invalidArgument(String)
     case conflict(String)
+    case runtimeUnavailable(String)
 
     public var errorDescription: String? {
         switch self {
@@ -30,7 +31,8 @@ public enum EngineError: Error, Sendable, LocalizedError {
             .execNotFound(let reason),
             .volumeNotFound(let reason),
             .invalidArgument(let reason),
-            .conflict(let reason):
+            .conflict(let reason),
+            .runtimeUnavailable(let reason):
             return reason
         }
     }

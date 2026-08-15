@@ -49,17 +49,32 @@ struct Doctor: ParsableCommand {
 
     private func engineChecks() -> [CheckResult] {
         do {
-            let report = try RunSync.call {
+            let (report, runtime) = try RunSync.call {
                 let engine = try EngineManager()
-                return try await engine.checkEnvironment()
+                let report = try await engine.checkEnvironment()
+                let runtime = await engine.runtimeStatus()
+                return (report, runtime)
             }
-            return [
+            var checks = [
                 CheckResult(
                     status: report.isVirtualizationSupported ? .ok : .fail,
                     title: "Virtualization.framework",
                     detail: report.isVirtualizationSupported ? "supported" : "not supported"
                 )
             ]
+            if let kernel = runtime.kernelPath {
+                checks.append(CheckResult(status: .ok, title: "Guest kernel", detail: kernel))
+            } else {
+                checks.append(CheckResult(status: .warn, title: "Guest kernel", detail: "missing — first start downloads it, or run `macker fetch-runtime`"))
+            }
+            if let initfs = runtime.initfsPath {
+                checks.append(CheckResult(status: .ok, title: "initfs", detail: initfs))
+            } else if runtime.vminitPresent {
+                checks.append(CheckResult(status: .ok, title: "initfs", detail: runtime.vminitReference))
+            } else {
+                checks.append(CheckResult(status: .warn, title: "initfs / vminit", detail: "missing — first start pulls \(runtime.vminitReference)"))
+            }
+            return checks
         } catch {
             return [
                 CheckResult(
@@ -72,7 +87,7 @@ struct Doctor: ParsableCommand {
     }
 
     private func socketChecks() -> [CheckResult] {
-        let path = DaemonPaths.defaultSocketPath
+        let path = DaemonAPI.socket
         var results: [CheckResult] = []
         if FileManager.default.fileExists(atPath: path) {
             results.append(CheckResult(status: .ok, title: "Socket file", detail: path))

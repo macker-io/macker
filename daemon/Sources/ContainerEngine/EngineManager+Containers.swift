@@ -1,3 +1,4 @@
+import Containerization
 import Foundation
 
 extension EngineManager {
@@ -62,9 +63,11 @@ extension EngineManager {
         )
         containers[id] = record
         await publish(EngineEvent(type: "container", action: "create", actorID: id, attributes: ["name": name, "image": spec.image]))
-        return EngineContainerCreateResult(id: id, warnings: [
-            "MicroVM execution is not wired yet; start/stop update Docker state only",
-        ])
+        var warnings: [String] = []
+        if spec.networkMode != "none" {
+            warnings.append("container network is not attached; the MicroVM has no NIC yet")
+        }
+        return EngineContainerCreateResult(id: id, warnings: warnings)
     }
 
     public func inspectContainer(_ idOrName: String) async throws -> EngineContainer {
@@ -79,24 +82,26 @@ extension EngineManager {
         if container.state == "paused" {
             throw EngineError.conflict("cannot start a paused container: \(container.id)")
         }
+        try await bootContainer(container)
+        container = try resolveContainer(container.id)
         container.state = "running"
         container.status = "Up"
         container.startedAt = Date()
         container.finishedAt = nil
         container.exitCode = 0
-        container.logs += "container \(String(container.id.prefix(12))) started\n"
         containers[container.id] = container
+        watchVM(container.id)
         await publish(EngineEvent(type: "container", action: "start", actorID: container.id, attributes: ["name": container.name, "image": container.image]))
         return true
     }
 
     public func stopContainer(_ idOrName: String, timeoutSeconds: Int = 10) async throws -> Bool {
-        _ = timeoutSeconds
-        var container = try resolveContainer(idOrName)
+        let container = try resolveContainer(idOrName)
         if container.state == "exited" || container.state == "created" {
             return false
         }
-        try await finish(container: &container, exitCode: 0, action: "stop", status: "Exited (0)")
+        await stopVM(container.id, timeoutSeconds: timeoutSeconds)
+        await handleVMExit(id: container.id, code: 143, action: "stop")
         return true
     }
 
@@ -110,12 +115,14 @@ extension EngineManager {
     }
 
     public func killContainer(_ idOrName: String, signal: String) async throws {
-        var container = try resolveContainer(idOrName)
+        let container = try resolveContainer(idOrName)
         guard container.state == "running" || container.state == "paused" else {
             throw EngineError.conflict("container \(container.id) is not running")
         }
-        let code = signal.uppercased().contains("KILL") || signal == "9" || signal == "SIGKILL" ? 137 : 143
-        try await finish(container: &container, exitCode: code, action: "kill", status: "Exited (\(code))")
+        let parsed = (try? Signal(signal)) ?? .term
+        let code = parsed.rawValue == 9 ? 137 : 128 + Int(parsed.rawValue)
+        await stopVM(container.id, timeoutSeconds: 2, signal: parsed)
+        await handleVMExit(id: container.id, code: code, action: "kill")
         await publish(EngineEvent(type: "container", action: "die", actorID: container.id, attributes: ["exitCode": "\(code)"]))
     }
 
@@ -124,6 +131,7 @@ extension EngineManager {
         guard container.state == "running" else {
             throw EngineError.conflict("container \(container.id) is not running")
         }
+        try await pauseVM(container.id)
         container.state = "paused"
         container.status = "Paused"
         containers[container.id] = container
@@ -135,6 +143,7 @@ extension EngineManager {
         guard container.state == "paused" else {
             throw EngineError.conflict("container \(container.id) is not paused")
         }
+        try await resumeVM(container.id)
         container.state = "running"
         container.status = "Up"
         containers[container.id] = container
@@ -162,14 +171,18 @@ extension EngineManager {
 
     public func deleteContainer(_ idOrName: String, force: Bool, removeAnonymousVolumes: Bool) async throws {
         _ = removeAnonymousVolumes
-        var container = try resolveContainer(idOrName)
+        let container = try resolveContainer(idOrName)
         if container.state == "running" || container.state == "paused" {
             guard force else {
                 throw EngineError.conflict("cannot remove running container \(container.id): stop or use force")
             }
-            try await finish(container: &container, exitCode: 137, action: "kill", status: "Exited (137)")
+            await stopVM(container.id, timeoutSeconds: 1, signal: .kill)
+            await handleVMExit(id: container.id, code: 137, action: "kill")
         }
-        let anonymous = container.mounts.filter(\.anonymous).map(\.name)
+        let remaining = try? resolveContainer(container.id)
+        let anonymous = (remaining ?? container).mounts.filter(\.anonymous).map(\.name)
+        await teardownVM(container.id)
+        resetContainerFiles(container.id)
         containers[container.id] = nil
         finishWaiters(id: container.id, code: container.exitCode)
         finishAttachSubscribers(container.id, extra: nil)
@@ -186,6 +199,7 @@ extension EngineManager {
         let stopped = containers.values.filter { $0.state == "exited" || $0.state == "created" || $0.state == "dead" }
         var deleted: [String] = []
         for container in stopped {
+            resetContainerFiles(container.id)
             containers[container.id] = nil
             finishAttachSubscribers(container.id, extra: nil)
             await finishExecs(forContainer: container.id, code: 0)
@@ -240,12 +254,11 @@ extension EngineManager {
         throw EngineError.containerNotFound("No such container: \(idOrName)")
     }
 
-    private func finish(container: inout EngineContainer, exitCode: Int, action: String, status: String) async throws {
+    func finish(container: inout EngineContainer, exitCode: Int, action: String, status: String) async throws {
         container.state = "exited"
         container.status = status
         container.exitCode = exitCode
         container.finishedAt = Date()
-        container.logs += "container \(String(container.id.prefix(12))) \(action)\n"
         let id = container.id
         if container.autoRemove {
             containers[id] = nil

@@ -38,6 +38,9 @@ public struct DockerVersionResponse: Encodable, Sendable {
             Platform: .init(Name: DockerAPI.platformName),
             Components: [
                 .init(Name: "Engine", Version: DockerAPI.daemonVersion, Details: details),
+                .init(Name: "containerization", Version: RuntimePin.current.containerization, Details: nil),
+                .init(Name: "kata", Version: RuntimePin.current.kata, Details: nil),
+                .init(Name: "vminit", Version: RuntimePin.current.vminitReference, Details: nil),
             ],
             Version: DockerAPI.daemonVersion,
             ApiVersion: DockerAPI.version,

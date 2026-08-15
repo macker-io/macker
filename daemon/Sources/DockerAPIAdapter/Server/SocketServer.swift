@@ -8,7 +8,7 @@ import os
 
 /// HTTP/1.1 server bound to a UNIX domain socket (Docker Engine API transport).
 public final class SocketServer: @unchecked Sendable {
-    public static let defaultSocketPath = DaemonPaths.defaultSocketPath
+    public static var defaultSocketPath: String { DaemonPaths.defaultSocketPath }
 
     private let socketPath: String
     private let router: Router
@@ -29,6 +29,8 @@ public final class SocketServer: @unchecked Sendable {
 
     /// Binds the socket and blocks until the channel is closed (SIGINT/SIGTERM or ``stop()``).
     public func start() async throws {
+        let parent = URL(fileURLWithPath: socketPath).deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
         try? FileManager.default.removeItem(atPath: socketPath)
 
         let router = self.router

@@ -12,8 +12,8 @@ enum Invocation {
 /// Thin Docker Engine API client over the Macker UNIX socket.
 enum DaemonAPI {
     static let apiVersion = "1.41"
-    static let clientVersion = "0.1.0"
-    static var socket: String { DaemonPaths.defaultSocketPath }
+    static let clientVersion = ProductVersion.current
+    static var socket: String { DaemonPaths.socketPath() }
 
     static func get(_ path: String, timeoutSeconds: Int? = 5) throws -> UnixHTTPClient.Response {
         try UnixHTTPClient.request(method: "GET", path: prefixed(path), socketPath: socket, timeoutSeconds: timeoutSeconds)
