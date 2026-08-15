@@ -32,9 +32,13 @@ extension EngineManager {
         var manager = try await ensureManager()
         reclaimContainerRuntime(record.id)
 
-        let sink = ProcessLogSink { [id = record.id] text in
-            Task { await self.appendOutput(id: id, text: text) }
-        }
+        let stdoutSink = ProcessLogSink(hopping: { [id = record.id] data in
+            await self.appendOutput(id: id, data: data, stdout: true)
+        })
+        let stderrSink = ProcessLogSink(hopping: { [id = record.id] data in
+            await self.appendOutput(id: id, data: data, stdout: false)
+        })
+        let stdinPipe = (record.openStdin || record.tty) ? ProcessStdin() : nil
 
         var prepared = record
         let interfaces: [any Interface]
@@ -61,8 +65,9 @@ extension EngineManager {
                 if !prepared.command.isEmpty {
                     config.process.arguments = prepared.command
                 }
-                if !prepared.env.isEmpty {
-                    config.process.environmentVariables = prepared.env
+                let env = Self.mergedEnvironment(prepared.env, tty: prepared.tty)
+                if !env.isEmpty {
+                    config.process.environmentVariables = env
                 }
                 if !prepared.workingDir.isEmpty {
                     config.process.workingDirectory = prepared.workingDir
@@ -71,9 +76,12 @@ extension EngineManager {
                     config.process.user = .init(username: prepared.user)
                 }
                 config.process.terminal = prepared.tty
-                config.process.stdout = sink
+                if let stdinPipe {
+                    config.process.stdin = stdinPipe
+                }
+                config.process.stdout = stdoutSink
                 if !prepared.tty {
-                    config.process.stderr = sink
+                    config.process.stderr = stderrSink
                 }
                 config.hostname = prepared.hostname
                 config.cpus = Self.cpuCount(nanoCpus: prepared.nanoCpus)
@@ -107,6 +115,9 @@ extension EngineManager {
             throw EngineError.runtimeUnavailable("failed to start MicroVM")
         }
         vms[record.id] = linux
+        if let stdinPipe {
+            containerStdin[record.id] = stdinPipe
+        }
         do {
             try await startPortPublishers(containers[record.id] ?? prepared)
         } catch {
@@ -158,6 +169,8 @@ extension EngineManager {
     func teardownVM(_ id: String) async {
         waitTasks[id]?.cancel()
         waitTasks[id] = nil
+        containerStdin[id]?.finish()
+        containerStdin[id] = nil
         stopPortPublishers(id)
         if let linux = vms.removeValue(forKey: id) {
             try? await linux.stop()
@@ -172,15 +185,21 @@ extension EngineManager {
     }
 
     func appendOutput(id: String, text: String) {
-        guard !text.isEmpty else { return }
+        appendOutput(id: id, data: Data(text.utf8), stdout: true)
+    }
+
+    func appendOutput(id: String, data: Data, stdout: Bool) {
+        guard !data.isEmpty else { return }
+        let text = String(decoding: data, as: UTF8.self)
         if var record = containers[id] {
             record.logs += text
             containers[id] = record
             appendLogFile(id: id, text: text)
         }
         if let subscribers = attachSubscribers[id] {
+            let chunk = EngineIOChunk(data: data, stdout: stdout)
             for continuation in subscribers.values {
-                continuation.yield(text)
+                continuation.yield(chunk)
             }
         }
     }

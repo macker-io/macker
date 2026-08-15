@@ -39,6 +39,31 @@ Stop the daemon with Ctrl+C, then wipe images / containers / volumes / networks 
 make -C daemon reset
 ```
 
+## Run, attach, and exec
+
+Foreground `run` attaches live stdio (create → attach → start). `-i` keeps stdin open; `-t` allocates a guest TTY (raw host terminal + window resize). `exec` starts another process in a running MicroVM.
+
+```bash
+./.build/debug/macker run --rm alpine echo hello
+./.build/debug/macker run --rm -it alpine sh
+./.build/debug/macker run -d --name web -p 18080:80 nginx
+./.build/debug/macker exec web cat /usr/share/nginx/html/index.html
+./.build/debug/macker exec -it web sh
+echo hello | ./.build/debug/macker exec -i web cat
+```
+
+Official `nginx` does not include `wget` / `curl`. Use `cat` on the static files, or `exec` into `alpine`.
+
+| Flag | `run` / `exec` | Effect |
+| --- | --- | --- |
+| `-d` | both | Detach; `run` prints the container ID |
+| `-i` | both | Forward stdin |
+| `-t` | both | Guest PTY; host raw mode when stdin/stdout are TTYs |
+| `--rm` | `run` | Remove the container when it exits |
+| `-w` / `-e` / `-u` | `exec` | Working dir, env, user |
+
+Without `-t`, Ctrl-C on foreground `run` stops the container. `exec` without `-t` does not forward SIGINT; use `-it` for an interactive shell. `Ctrl-D` / `exit` should restore the host terminal (`stty sane` if it does not).
+
 ## Socket
 
 The daemon listens on:
@@ -76,17 +101,16 @@ vmnet NAT uses the same `com.apple.security.virtualization` entitlement as Apple
 
 ## Roadmap
 
-Daily `bridge` / `host` / `none` is in place. Network follow-ups, roughly in this order:
+Daily `bridge` / `host` / `none`, plus `run -it` / `exec`, is in place. Follow-ups, roughly in this order:
 
 | When | Item | Notes |
 | --- | --- | --- |
 | Next | Live `network connect` / `disconnect` | Today endpoints can change only while the container is stopped |
 | Next | Refresh peer names on running containers | `/etc/hosts` is written at start; later joins are invisible until restart |
+| Later | `exec` SIGINT without `-t` | Today only `run` (no TTY) maps Ctrl-C to stop |
 | Later | UDP `-p` | Port proxy is TCP only |
 | Later | `internal` networks | Flag is stored; isolation (no outbound) is incomplete |
 | Later | `macvlan` / `ipvlan` / `--net=container:` / IPv6 | Need extra vmnet / entitlements; not ad-hoc signable |
-
-Outside networking, the next large Docker gap is `exec` / `-it`.
 
 ## Make targets
 

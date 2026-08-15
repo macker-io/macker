@@ -119,7 +119,7 @@ extension Router {
         case .wait(let id):
             return await waitContainer(id)
         case .resize(let id):
-            return await resizeContainer(id)
+            return await resizeContainer(id, request: request)
         case .delete(let id):
             return await deleteContainer(id, request: request)
         case .attach(let id):
@@ -398,9 +398,13 @@ extension Router {
         }
     }
 
-    private func resizeContainer(_ id: String) async -> HTTPResponse {
+    private func resizeContainer(_ id: String, request: HTTPRequest) async -> HTTPResponse {
         do {
-            _ = try await engine.inspectContainer(id)
+            try await engine.resizeContainer(
+                id,
+                height: Int(request.query["h"] ?? "") ?? 0,
+                width: Int(request.query["w"] ?? "") ?? 0
+            )
             return HTTPResponse(status: 200)
         } catch {
             return Self.engineError(error)
@@ -534,18 +538,14 @@ extension Router {
     }
 
     static func dockerLogPayload(text: String, tty: Bool, stdout: Bool) -> Data {
-        guard !text.isEmpty else { return Data() }
+        dockerLogPayload(data: Data(text.utf8), tty: tty, stdout: stdout)
+    }
+
+    static func dockerLogPayload(data: Data, tty: Bool, stdout: Bool) -> Data {
+        guard !data.isEmpty else { return Data() }
         if tty {
-            return Data(text.utf8)
+            return data
         }
-        let bytes = Array(text.utf8)
-        var header = [UInt8](repeating: 0, count: 8)
-        header[0] = stdout ? 1 : 2
-        let size = UInt32(bytes.count)
-        header[4] = UInt8((size >> 24) & 0xff)
-        header[5] = UInt8((size >> 16) & 0xff)
-        header[6] = UInt8((size >> 8) & 0xff)
-        header[7] = UInt8(size & 0xff)
-        return Data(header + bytes)
+        return DockerStdio.frame(data, stdout: stdout)
     }
 }

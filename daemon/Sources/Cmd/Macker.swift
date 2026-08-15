@@ -17,7 +17,7 @@ struct Macker: ParsableCommand {
             Inspect.self, Save.self, Load.self, Build.self,
             Ps.self, Run.self, Create.self, Start.self, Stop.self, Restart.self, Kill.self,
             Rm.self, Pause.self, Unpause.self, Rename.self, Logs.self, Wait.self, Top.self, Stats.self,
-            Version.self, Info.self, Events.self,
+            Exec.self, Version.self, Info.self, Events.self,
             ImageGroup.self, ContainerGroup.self, VolumeGroup.self, NetworkGroup.self, SystemGroup.self,
         ]
     )

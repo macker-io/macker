@@ -1,6 +1,7 @@
 import ContainerEngine
 import Foundation
 import NIOCore
+import os
 
 extension Router {
     enum NamedExecRoute {
@@ -88,11 +89,14 @@ extension Router {
                 stream: Self.queryFlag(request.query["stream"]),
                 stdin: Self.queryFlag(request.query["stdin"])
             )
-            let stdout = Self.queryFlag(request.query["stdout"]) || !Self.queryFlag(request.query["stderr"])
+            let qOut = Self.queryFlag(request.query["stdout"])
+            let qErr = Self.queryFlag(request.query["stderr"])
             return Self.hijackResponse(
                 session,
                 request: request,
-                stdout: stdout,
+                stdout: qOut || !qErr,
+                stderr: qErr || !qOut,
+                stdin: Self.queryFlag(request.query["stdin"]),
                 kind: websocket ? .websocket : .tcp
             )
         } catch {
@@ -121,7 +125,14 @@ extension Router {
             guard let session else {
                 return HTTPResponse(status: 200)
             }
-            return Self.hijackResponse(session, request: request, stdout: true, kind: .tcp)
+            return Self.hijackResponse(
+                session,
+                request: request,
+                stdout: true,
+                stderr: true,
+                stdin: session.stdin,
+                kind: .tcp
+            )
         } catch {
             return Self.engineError(error)
         }
@@ -157,12 +168,18 @@ extension Router {
         _ session: EngineIOSession,
         request: HTTPRequest,
         stdout: Bool,
+        stderr: Bool,
+        stdin: Bool,
         kind: DockerHijack.Kind
     ) -> HTTPResponse {
         let (stream, continuation) = AsyncStream<ByteBuffer>.makeStream()
         Task {
-            for await text in session.chunks {
-                let payload = dockerLogPayload(text: text, tty: session.tty, stdout: stdout)
+            for await chunk in session.chunks {
+                if !session.tty {
+                    if chunk.stdout && !stdout { continue }
+                    if !chunk.stdout && !stderr { continue }
+                }
+                let payload = dockerLogPayload(data: chunk.data, tty: session.tty, stdout: chunk.stdout)
                 if !payload.isEmpty {
                     var buffer = ByteBuffer()
                     buffer.writeBytes(payload)
@@ -170,6 +187,27 @@ extension Router {
                 }
             }
             continuation.finish()
+        }
+
+        let demux = session.tty ? nil : StdinDemuxer()
+        let onStdin: (@Sendable (Data) async -> Void)?
+        if stdin {
+            onStdin = { data in
+                if session.tty {
+                    await session.writeStdin(data)
+                    return
+                }
+                guard let demux else { return }
+                let (chunks, closed) = demux.ingest(data)
+                for chunk in chunks {
+                    await session.writeStdin(chunk)
+                }
+                if closed {
+                    await session.close()
+                }
+            }
+        } else {
+            onStdin = nil
         }
 
         let upgrade = request.headers["upgrade"]?.lowercased() == "tcp"
@@ -195,10 +233,23 @@ extension Router {
                 DockerHijack(
                     kind: kind,
                     output: stream,
-                    onStdin: { data in await session.writeStdin(data) },
+                    onStdin: onStdin,
                     onClose: { await session.close() }
                 )
             )
         )
+    }
+}
+
+final class StdinDemuxer: @unchecked Sendable {
+    private let lock = OSAllocatedUnfairLock(initialState: Data())
+
+    func ingest(_ data: Data) -> (chunks: [Data], closed: Bool) {
+        lock.withLock { buffer in
+            buffer.append(data)
+            let pulled = DockerStdio.pullFrames(&buffer)
+            let chunks = pulled.frames.compactMap { $0.stream == 0 ? $0.payload : nil }
+            return (chunks, pulled.closed)
+        }
     }
 }

@@ -2,6 +2,7 @@ import ArgumentParser
 import ContainerEngine
 import Darwin
 import Foundation
+import os
 
 struct ContainerCreateOptions: ParsableArguments {
     @Option(help: "Assign a name to the container.")
@@ -78,22 +79,74 @@ struct Run: ParsableCommand {
 
     func run() throws {
         let id = try Create.submit(options, autoRemove: rm && detach)
-        try DaemonAPI.requireOK(DaemonAPI.post("/containers/\(DaemonAPI.path(id))/start", timeoutSeconds: 300))
         if detach {
+            try DaemonAPI.requireOK(DaemonAPI.post("/containers/\(DaemonAPI.path(id))/start", timeoutSeconds: 300))
             print(id)
             return
         }
+        try Self.attachAndStart(id: id, interactive: options.interactive, tty: options.tty)
         let wait = try DaemonAPI.decode(
             WaitResponse.self,
             from: DaemonAPI.post("/containers/\(DaemonAPI.path(id))/wait", timeoutSeconds: nil)
         )
-        try Logs.printLogs(id: id, follow: false, timestamps: false, tail: nil)
         if rm {
             _ = try? DaemonAPI.delete("/containers/\(DaemonAPI.path(id))?force=1&v=1")
         }
         if wait.StatusCode != 0 {
             throw ExitCode(Int32(truncatingIfNeeded: wait.StatusCode))
         }
+    }
+
+    private static func attachAndStart(id: String, interactive: Bool, tty: Bool) throws {
+        let query = interactive
+            ? "stream=1&stdout=1&stderr=1&stdin=1"
+            : "stream=1&stdout=1&stderr=1"
+        let gate = DispatchSemaphore(value: 0)
+        let done = DispatchSemaphore(value: 0)
+        let attachError = OSAllocatedUnfairLock<Error?>(uncheckedState: nil)
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try DaemonAPI.hijack(
+                    path: "/containers/\(DaemonAPI.path(id))/attach?\(query)",
+                    stdin: interactive,
+                    tty: tty,
+                    resizePath: tty ? "/containers/\(DaemonAPI.path(id))/resize" : nil,
+                    onUpgraded: { gate.signal() }
+                )
+            } catch {
+                attachError.withLock { $0 = error }
+                gate.signal()
+            }
+            done.signal()
+        }
+        gate.wait()
+        if let error = attachError.withLock({ $0 }) {
+            _ = try? DaemonAPI.delete("/containers/\(DaemonAPI.path(id))?force=1&v=1")
+            done.wait()
+            throw error
+        }
+        var interrupt: DispatchSourceSignal?
+        if !tty {
+            signal(SIGINT, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: SIGINT, queue: DispatchQueue.global())
+            source.setEventHandler {
+                _ = try? DaemonAPI.post("/containers/\(DaemonAPI.path(id))/stop?t=1")
+            }
+            source.resume()
+            interrupt = source
+        }
+        defer {
+            interrupt?.cancel()
+            if !tty { signal(SIGINT, SIG_DFL) }
+        }
+        do {
+            try DaemonAPI.requireOK(DaemonAPI.post("/containers/\(DaemonAPI.path(id))/start", timeoutSeconds: 300))
+        } catch {
+            _ = try? DaemonAPI.delete("/containers/\(DaemonAPI.path(id))?force=1&v=1")
+            done.wait()
+            throw error
+        }
+        done.wait()
     }
 }
 
@@ -244,6 +297,92 @@ struct Rename: ParsableCommand {
     }
 }
 
+struct Exec: ParsableCommand {
+    static let configuration = CommandConfiguration(abstract: "Run a command in a running container.")
+
+    @Flag(name: [.customShort("i"), .long], help: "Keep STDIN open.")
+    var interactive = false
+
+    @Flag(name: .shortAndLong, help: "Allocate a pseudo-TTY.")
+    var tty = false
+
+    @Flag(name: .shortAndLong, help: "Detached mode: run command in the background.")
+    var detach = false
+
+    @Option(name: .shortAndLong, help: "Username or UID.")
+    var user: String?
+
+    @Option(name: .shortAndLong, help: "Working directory inside the container.")
+    var workdir: String?
+
+    @Option(name: .shortAndLong, help: "Set environment variables.")
+    var env: [String] = []
+
+    @Flag(help: "Give extended privileges to the command.")
+    var privileged = false
+
+    @Argument(help: "Container name or ID.")
+    var container: String
+
+    @Argument(parsing: .captureForPassthrough, help: "Command to run.")
+    var command: [String] = []
+
+    func run() throws {
+        guard !command.isEmpty else {
+            throw CLIError.http("No command specified")
+        }
+        do {
+            try runExec()
+        } catch {
+            try DaemonAPI.exitWithDaemonError(error)
+        }
+    }
+
+    private func runExec() throws {
+        // Inspect first so "no such container" wins over TTY/start errors, matching Docker CLI.
+        _ = try DaemonAPI.requireOK(DaemonAPI.get("/containers/\(DaemonAPI.path(container))/json"))
+        let created = try DaemonAPI.decode(
+            ExecCreateResponse.self,
+            from: DaemonAPI.post(
+                "/containers/\(DaemonAPI.path(container))/exec",
+                body: try JSONEncoder().encode(
+                    ExecCreateBody(
+                        AttachStdin: interactive,
+                        AttachStdout: true,
+                        AttachStderr: true,
+                        Tty: tty,
+                        Env: env.isEmpty ? nil : env,
+                        Cmd: command,
+                        Privileged: privileged,
+                        User: user,
+                        WorkingDir: workdir
+                    )
+                )
+            )
+        )
+        let start = try JSONEncoder().encode(ExecStartBody(Detach: detach, Tty: tty))
+        if detach {
+            try DaemonAPI.requireOK(DaemonAPI.post("/exec/\(DaemonAPI.path(created.Id))/start", body: start))
+            return
+        }
+        try DaemonAPI.hijack(
+            path: "/exec/\(DaemonAPI.path(created.Id))/start",
+            body: start,
+            stdin: interactive,
+            tty: tty,
+            resizePath: tty ? "/exec/\(DaemonAPI.path(created.Id))/resize" : nil
+        )
+        let inspect = try DaemonAPI.decode(
+            ExecInspectResponse.self,
+            from: DaemonAPI.get("/exec/\(DaemonAPI.path(created.Id))/json")
+        )
+        if inspect.Running { return }
+        if let code = inspect.ExitCode, code != 0 {
+            throw ExitCode(Int32(truncatingIfNeeded: code))
+        }
+    }
+}
+
 struct Logs: ParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Fetch the logs of a container.")
     @Flag(name: .shortAndLong, help: "Follow log output.")
@@ -376,7 +515,7 @@ struct ContainerGroup: ParsableCommand {
         subcommands: [
             ContainerLs.self, Run.self, Create.self, Start.self, Stop.self, Restart.self, Kill.self,
             ContainerRm.self, Pause.self, Unpause.self, Rename.self, Logs.self, Wait.self, Top.self,
-            Stats.self, ContainerInspect.self, ContainerPrune.self,
+            Stats.self, Exec.self, ContainerInspect.self, ContainerPrune.self,
         ]
     )
 }
@@ -452,6 +591,32 @@ private struct CreateResponse: Decodable {
 
 private struct WaitResponse: Decodable {
     var StatusCode: Int
+}
+
+private struct ExecCreateBody: Encodable {
+    var AttachStdin: Bool
+    var AttachStdout: Bool
+    var AttachStderr: Bool
+    var Tty: Bool
+    var Env: [String]?
+    var Cmd: [String]
+    var Privileged: Bool
+    var User: String?
+    var WorkingDir: String?
+}
+
+private struct ExecCreateResponse: Decodable {
+    var Id: String
+}
+
+private struct ExecStartBody: Encodable {
+    var Detach: Bool
+    var Tty: Bool
+}
+
+private struct ExecInspectResponse: Decodable {
+    var Running: Bool
+    var ExitCode: Int?
 }
 
 private struct TopResponse: Decodable {

@@ -1,35 +1,16 @@
+import Containerization
 import Foundation
+
+import struct ContainerizationOS.Terminal
 
 extension EngineManager {
     public func createExec(_ idOrName: String, spec: EngineExecCreateSpec) async throws -> String {
-        let container = try resolveContainer(idOrName)
-        if container.state == "paused" {
-            throw EngineError.conflict("Container \(container.id) is paused, unpause the container before exec")
-        }
+        let container = try requireRunningForExec(idOrName)
         guard !spec.cmd.isEmpty else {
             throw EngineError.invalidArgument("No exec command specified")
         }
         let id = Self.makeContainerID()
-        execs[id] = EngineExec(
-            id: id,
-            containerID: container.id,
-            cmd: spec.cmd,
-            env: spec.env,
-            user: spec.user.isEmpty ? container.user : spec.user,
-            workingDir: spec.workingDir.isEmpty ? container.workingDir : spec.workingDir,
-            tty: spec.tty,
-            privileged: spec.privileged,
-            attachStdin: spec.attachStdin,
-            attachStdout: spec.attachStdout,
-            attachStderr: spec.attachStderr,
-            detachKeys: spec.detachKeys,
-            started: false,
-            running: false,
-            exitCode: nil,
-            pid: 0,
-            height: 0,
-            width: 0
-        )
+        execs[id] = EngineExec(id: id, container: container, spec: spec)
         await publish(
             EngineEvent(
                 type: "container",
@@ -50,6 +31,8 @@ extension EngineManager {
         exec.height = height
         exec.width = width
         execs[id] = exec
+        guard let process = execProcesses[id] else { return }
+        try await Self.resize(process, width: width, height: height)
     }
 
     public func startExec(_ id: String, detach: Bool, tty: Bool?) async throws -> EngineIOSession? {
@@ -57,20 +40,65 @@ extension EngineManager {
         if exec.started {
             throw EngineError.conflict("exec \(id) has already started")
         }
-        let container = try resolveContainer(exec.containerID)
-        if container.state == "paused" {
-            throw EngineError.conflict("Container \(container.id) is paused, unpause the container before exec")
-        }
-        guard container.state == "running" else {
-            throw EngineError.conflict("Container \(container.id) is not running")
-        }
         if let tty {
             exec.tty = tty
         }
+        let container = try requireRunningForExec(exec.containerID)
+        guard let linux = vms[container.id] else {
+            throw EngineError.conflict("Container \(container.id) has no running MicroVM")
+        }
+
+        let stdinPipe = exec.attachStdin ? ProcessStdin() : nil
+        let stdoutSink = ProcessLogSink(hopping: { [id] data in
+            await self.yieldExecOutput(id, data: data, stdout: true)
+        })
+        let stderrSink = ProcessLogSink(hopping: { [id] data in
+            await self.yieldExecOutput(id, data: data, stdout: false)
+        })
+
+        // Subscribe before start() so the first PTY bytes (dash/ash `# `) are not dropped.
+        var chunks: AsyncStream<EngineIOChunk>?
+        if !detach {
+            let stream = AsyncStream<EngineIOChunk>.makeStream()
+            chunks = stream.stream
+            execSubscribers[id, default: [:]][UUID()] = stream.continuation
+        }
+
+        let execConfig = exec
+        var started: LinuxProcess?
+        do {
+            let process = try await linux.exec(execConfig.id) { config in
+                Self.configure(&config, exec: execConfig, container: container, stdin: stdinPipe, stdout: stdoutSink, stderr: stderrSink)
+            }
+            started = process
+            try await process.start()
+        } catch {
+            stdinPipe?.finish()
+            if !detach {
+                finishExecSubscribers(id)
+            }
+            try? await started?.delete()
+            throw EngineError.runtimeUnavailable(Self.describeExecFailure(error, command: execConfig.cmd))
+        }
+        guard let process = started else {
+            throw EngineError.runtimeUnavailable("unable to start exec process")
+        }
+
         exec.started = true
         exec.running = true
-        exec.pid = 1
+        exec.pid = Int(process.pid)
         execs[id] = exec
+        execProcesses[id] = process
+        if let stdinPipe {
+            execStdin[id] = stdinPipe
+        }
+        if exec.tty {
+            try? await Self.resize(
+                process,
+                width: exec.width > 0 ? exec.width : 80,
+                height: exec.height > 0 ? exec.height : 24
+            )
+        }
         await publish(
             EngineEvent(
                 type: "container",
@@ -80,110 +108,51 @@ extension EngineManager {
             )
         )
 
-        let banner = "[macker] exec \(exec.cmd.joined(separator: " ")) — MicroVM not wired\n"
-        if detach {
-            await completeExec(id, code: 0)
-            return nil
+        execWaitTasks[id] = Task { [process] in
+            let code: Int
+            do {
+                code = Int(try await process.wait().exitCode)
+            } catch is CancellationError {
+                try? await process.delete()
+                return
+            } catch {
+                code = 137
+            }
+            await self.completeExec(id, code: code, fromWait: true)
+            try? await process.delete()
         }
 
-        let sessionID = UUID()
-        let (chunks, continuation) = AsyncStream<String>.makeStream()
-        execSubscribers[id, default: [:]][sessionID] = continuation
-        if exec.attachStdout || exec.attachStderr || exec.tty {
-            continuation.yield(banner)
-        }
-
-        if !exec.attachStdin {
-            await completeExec(id, code: 0)
-        }
-
+        guard let chunks else { return nil }
         let engine = self
         return EngineIOSession(
             tty: exec.tty,
+            stdin: exec.attachStdin,
             chunks: chunks,
             writeStdin: { data in
                 await engine.writeExecStdin(id, data: data)
             },
             close: {
-                await engine.completeExec(id, code: 0)
-            }
-        )
-    }
-
-    public func attachContainer(
-        _ idOrName: String,
-        logs: Bool,
-        stream: Bool,
-        stdin: Bool
-    ) async throws -> EngineIOSession {
-        let container = try resolveContainer(idOrName)
-        guard logs || stream || stdin else {
-            throw EngineError.invalidArgument("you must choose at least one of logs, stream or stdin")
-        }
-
-        let sessionID = UUID()
-        let (chunks, continuation) = AsyncStream<String>.makeStream()
-        if logs, !container.logs.isEmpty {
-            continuation.yield(container.logs)
-        }
-
-        let keepOpen = (stream || stdin) && container.isActive
-        if keepOpen {
-            attachSubscribers[container.id, default: [:]][sessionID] = continuation
-            await publish(
-                EngineEvent(
-                    type: "container",
-                    action: "attach",
-                    actorID: container.id,
-                    attributes: ["name": container.name]
-                )
-            )
-        } else {
-            continuation.finish()
-        }
-
-        let engine = self
-        let containerID = container.id
-        return EngineIOSession(
-            tty: container.tty,
-            chunks: chunks,
-            writeStdin: { data in
-                await engine.writeAttachStdin(containerID, data: data)
-            },
-            close: {
-                await engine.closeAttach(containerID, sessionID: sessionID)
+                await engine.closeExecStdin(id)
             }
         )
     }
 
     func writeExecStdin(_ id: String, data: Data) {
-        guard let exec = execs[id], exec.running else { return }
-        guard exec.attachStdout || exec.tty else { return }
-        let text = String(decoding: data, as: UTF8.self)
-        guard !text.isEmpty else { return }
-        if let subscribers = execSubscribers[id] {
-            for continuation in subscribers.values {
-                continuation.yield(text)
-            }
+        execStdin[id]?.yield(data)
+    }
+
+    func closeExecStdin(_ id: String) async {
+        execStdin[id]?.finish()
+        if let process = execProcesses[id] {
+            try? await process.closeStdin()
         }
     }
 
-    func writeAttachStdin(_ containerID: String, data: Data) {
-        _ = containerID
-        _ = data
-    }
-
-    func closeAttach(_ containerID: String, sessionID: UUID) {
-        if let continuation = attachSubscribers[containerID]?.removeValue(forKey: sessionID) {
-            continuation.finish()
+    func completeExec(_ id: String, code: Int, fromWait: Bool = false) async {
+        guard var exec = execs[id] else {
+            cleanupExecIO(id)
+            return
         }
-        if attachSubscribers[containerID]?.isEmpty == true {
-            attachSubscribers[containerID] = nil
-        }
-    }
-
-    func completeExec(_ id: String, code: Int) async {
-        guard var exec = execs[id] else { return }
         let wasRunning = exec.running
         if exec.started {
             exec.running = false
@@ -192,7 +161,10 @@ extension EngineManager {
             }
             execs[id] = exec
         }
-        finishExecSubscribers(id)
+        if !fromWait, let process = execProcesses[id] {
+            try? await process.kill(.kill)
+        }
+        cleanupExecIO(id)
         if wasRunning {
             await publish(
                 EngineEvent(
@@ -208,18 +180,120 @@ extension EngineManager {
     func finishExecs(forContainer containerID: String, code: Int) async {
         let ids = execs.values.filter { $0.containerID == containerID && $0.running }.map(\.id)
         for id in ids {
-            await completeExec(id, code: code)
+            if let process = execProcesses[id] {
+                try? await process.kill(.kill)
+            }
+            execStdin[id]?.finish()
+            if execWaitTasks[id] == nil {
+                await completeExec(id, code: code, fromWait: true)
+            }
         }
     }
 
-    func finishAttachSubscribers(_ containerID: String, extra: String?) {
-        let subscribers = attachSubscribers.removeValue(forKey: containerID) ?? [:]
-        for continuation in subscribers.values {
-            if let extra, !extra.isEmpty {
-                continuation.yield(extra)
-            }
-            continuation.finish()
+    func yieldExecOutput(_ id: String, data: Data, stdout: Bool) {
+        guard !data.isEmpty, let exec = execs[id] else { return }
+        if exec.tty {
+            guard exec.attachStdout || exec.attachStderr else { return }
+        } else if stdout {
+            guard exec.attachStdout else { return }
+        } else {
+            guard exec.attachStderr else { return }
         }
+        guard let subscribers = execSubscribers[id] else { return }
+        let chunk = EngineIOChunk(data: data, stdout: stdout)
+        for continuation in subscribers.values {
+            continuation.yield(chunk)
+        }
+    }
+
+    static func mergedEnvironment(_ base: [String], extra: [String] = [], tty: Bool) -> [String] {
+        var map: [String: String] = [:]
+        var order: [String] = []
+        func put(_ item: String) {
+            let parts = item.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            let key = String(parts[0])
+            guard !key.isEmpty else { return }
+            let value = parts.count > 1 ? String(parts[1]) : ""
+            if map[key] == nil {
+                order.append(key)
+            }
+            map[key] = value
+        }
+        for item in base { put(item) }
+        for item in extra { put(item) }
+        if map["PATH"] == nil {
+            order.insert("PATH", at: 0)
+            map["PATH"] = LinuxProcessConfiguration.defaultPath
+        }
+        if tty, map["TERM"] == nil {
+            order.append("TERM")
+            map["TERM"] = "xterm"
+        }
+        return order.map { "\($0)=\(map[$0]!)" }
+    }
+
+    func requireRunningForExec(_ idOrName: String) throws -> EngineContainer {
+        let container = try resolveContainer(idOrName)
+        if container.state == "paused" {
+            throw EngineError.conflict("Container \(container.id) is paused, unpause the container before exec")
+        }
+        guard container.state == "running" else {
+            throw EngineError.conflict("Container \(container.id) is not running")
+        }
+        return container
+    }
+
+    static func describeExecFailure(_ error: Error, command: [String] = []) -> String {
+        let raw = error.localizedDescription
+        if raw.contains("failed to find target executable") {
+            let exe = command.first ?? "unknown"
+            return "exec: \"\(exe)\": executable file not found in $PATH"
+        }
+        return "unable to start exec process: \(raw)"
+    }
+
+    private static func configure(
+        _ config: inout LinuxProcessConfiguration,
+        exec: EngineExec,
+        container: EngineContainer,
+        stdin: ProcessStdin?,
+        stdout: ProcessLogSink,
+        stderr: ProcessLogSink
+    ) {
+        config.arguments = exec.cmd
+        config.environmentVariables = mergedEnvironment(container.env, extra: exec.env, tty: exec.tty)
+        if !exec.workingDir.isEmpty {
+            config.workingDirectory = exec.workingDir
+        }
+        if !exec.user.isEmpty {
+            config.user = .init(username: exec.user)
+        }
+        config.terminal = exec.tty
+        if exec.privileged {
+            config.capabilities = .allCapabilities
+        }
+        if let stdin {
+            config.stdin = stdin
+        }
+        config.stdout = stdout
+        if !exec.tty {
+            config.stderr = stderr
+        }
+    }
+
+    private static func resize(_ process: LinuxProcess, width: Int, height: Int) async throws {
+        guard width > 0, height > 0 else { return }
+        try await process.resize(
+            to: Terminal.Size(width: UInt16(clamping: width), height: UInt16(clamping: height))
+        )
+    }
+
+    private func cleanupExecIO(_ id: String) {
+        execWaitTasks[id] = nil
+        execStdin[id]?.finish()
+        execStdin[id] = nil
+        execProcesses[id] = nil
+        finishExecSubscribers(id)
     }
 
     private func finishExecSubscribers(_ id: String) {

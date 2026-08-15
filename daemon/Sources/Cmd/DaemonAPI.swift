@@ -1,3 +1,4 @@
+import ArgumentParser
 import ContainerEngine
 import Darwin
 import Foundation
@@ -83,6 +84,49 @@ enum DaemonAPI {
             timeoutSeconds: timeoutSeconds,
             onBytes: onBytes
         )
+    }
+
+    static func hijack(
+        path: String,
+        method: String = "POST",
+        body: Data? = nil,
+        stdin: Bool,
+        tty: Bool,
+        resizePath: String? = nil,
+        onUpgraded: (() -> Void)? = nil
+    ) throws {
+        let resize: ((Int, Int) -> Void)?
+        if let resizePath {
+            resize = { height, width in
+                _ = try? post("\(resizePath)?h=\(height)&w=\(width)")
+            }
+        } else {
+            resize = nil
+        }
+        try UnixHTTPClient.hijack(
+            method: method,
+            path: prefixed(path),
+            socketPath: socket,
+            body: body,
+            stdin: stdin,
+            tty: tty,
+            resize: resize,
+            onUpgraded: onUpgraded
+        )
+    }
+
+    /// Docker CLI-shaped daemon errors (`Error response from daemon: …`).
+    static func exitWithDaemonError(_ error: Error) throws -> Never {
+        if let code = error as? ExitCode {
+            throw code
+        }
+        var text = error.localizedDescription
+        let prefix = "Error response from daemon: "
+        if !text.hasPrefix(prefix) {
+            text = prefix + text
+        }
+        fputs("\(text)\n", stderr)
+        throw ExitCode(1)
     }
 
     /// Pull/push NDJSON progress. Throws if the stream reports an error line or a non-200 status.
