@@ -1,0 +1,6 @@
+[submodule "daemon/Vendor/containerization"]
+	path = daemon/Vendor/containerization
+	url = https://github.com/apple/containerization.git
+	# Pinned to release tag 0.41.0 (commit recorded by the parent gitlink).
+	# Upgrade: (cd daemon/Vendor/containerization && git fetch --tags && git checkout <tag>)
+	# then commit the updated gitlink in this repo.

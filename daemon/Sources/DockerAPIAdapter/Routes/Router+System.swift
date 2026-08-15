@@ -1,0 +1,87 @@
+import ContainerEngine
+import Foundation
+import NIOCore
+
+extension Router {
+    static func ping(includeBody: Bool) -> HTTPResponse {
+        var body: HTTPResponseBody = .none
+        if includeBody {
+            var buffer = ByteBuffer()
+            buffer.writeString("OK")
+            body = .buffer(buffer)
+        }
+        return HTTPResponse(
+            status: 200,
+            headers: [
+                ("Content-Type", "text/plain; charset=utf-8"),
+                ("Api-Version", DockerAPI.version),
+                ("Docker-Experimental", "true"),
+                ("Cache-Control", "no-cache, no-store, must-revalidate"),
+                ("Pragma", "no-cache"),
+            ],
+            body: body
+        )
+    }
+
+    static func version() -> HTTPResponse {
+        Self.jsonOK(DockerVersionResponse.current())
+    }
+
+    func info() async -> HTTPResponse {
+        Self.jsonOK(DockerSystemInfo(await engine.systemInfo()))
+    }
+
+    func systemDataUsage() async -> HTTPResponse {
+        do {
+            return Self.jsonOK(DockerDiskUsage(try await engine.diskUsage()))
+        } catch {
+            return Self.jsonError(status: 500, message: error.localizedDescription)
+        }
+    }
+
+    func events(_ request: HTTPRequest) async -> HTTPResponse {
+        let until = Self.parseTimestamp(request.query["until"])
+        let filters = Self.parseFilters(request.query["filters"])
+        let stream = await engine.events(until: until)
+        let (out, continuation) = AsyncStream<ByteBuffer>.makeStream()
+        Task {
+            for await event in stream {
+                if Self.matches(event, filters: filters) {
+                    continuation.yield(JSONBody.encodeLine(DockerEvent(event)))
+                }
+            }
+            continuation.finish()
+        }
+        return HTTPResponse(
+            status: 200,
+            headers: [("Content-Type", "application/json")],
+            body: .stream(out)
+        )
+    }
+
+    static func auth(_ request: HTTPRequest) -> HTTPResponse {
+        if !request.body.isEmpty {
+            do {
+                _ = try JSONDecoder().decode(DockerAuthRequest.self, from: request.body)
+            } catch {
+                return jsonError(status: 400, message: "invalid auth config: \(error.localizedDescription)")
+            }
+        }
+        return Self.jsonOK(DockerAuthResponse(Status: "Login Succeeded", IdentityToken: ""))
+    }
+
+    static func matches(_ event: EngineEvent, filters: [String: [String]]) -> Bool {
+        if let types = filters["type"], !types.isEmpty, !types.contains(event.type) {
+            return false
+        }
+        if let actions = filters["event"], !actions.isEmpty, !actions.contains(event.action) {
+            return false
+        }
+        if let images = filters["image"], !images.isEmpty {
+            let name = event.attributes["name"] ?? ""
+            let hit = images.contains { name.contains($0) || event.actorID.contains($0) }
+            if !hit { return false }
+        }
+        return true
+    }
+}
