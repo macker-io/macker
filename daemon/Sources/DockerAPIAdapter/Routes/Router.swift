@@ -58,6 +58,12 @@ public struct Router: Sendable {
             return await createVolume(request)
         case ("POST", "/volumes/prune"):
             return await pruneVolumes(request)
+        case ("GET", "/networks"):
+            return await listNetworks(request)
+        case ("POST", "/networks/create"):
+            return await createNetwork(request)
+        case ("POST", "/networks/prune"):
+            return await pruneNetworks(request)
         case ("POST", "/build"), ("POST", "/build/prune"), ("POST", "/commit"):
             return Self.jsonError(status: 501, message: "image build/commit is not implemented")
         default:
@@ -69,6 +75,9 @@ public struct Router: Sendable {
             }
             if let route = Self.matchNamedVolume(method: method, path: path) {
                 return await handleNamedVolume(route, request: request)
+            }
+            if let route = Self.matchNamedNetwork(method: method, path: path) {
+                return await handleNamedNetwork(route, request: request)
             }
             if let route = Self.matchNamedImage(method: method, path: path) {
                 return await handleNamedImage(route, request: request)
@@ -126,7 +135,7 @@ public struct Router: Sendable {
     static func engineError(_ error: Error) -> HTTPResponse {
         if let error = error as? EngineError {
             switch error {
-            case .imageNotFound, .containerNotFound, .execNotFound, .volumeNotFound:
+            case .imageNotFound, .containerNotFound, .execNotFound, .volumeNotFound, .networkNotFound:
                 return jsonError(status: 404, message: error.localizedDescription)
             case .invalidReference, .invalidArgument:
                 return jsonError(status: 400, message: error.localizedDescription)

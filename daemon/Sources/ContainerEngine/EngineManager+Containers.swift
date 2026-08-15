@@ -35,6 +35,9 @@ extension EngineManager {
         let env = image.env + spec.env
         let now = Date()
         let mounts = try await resolveMounts(spec.volumeRequests)
+        let attached = try attachCreateEndpoints(spec)
+        let portBindings = attached.mode == "host" || attached.mode == "none" ? [] : spec.portBindings
+        let exposedPorts = EnginePortBinding.merging(image.exposedPorts, spec.exposedPorts)
         let record = EngineContainer(
             id: id,
             name: name,
@@ -56,16 +59,19 @@ extension EngineManager {
             autoRemove: spec.autoRemove,
             memory: spec.memory,
             nanoCpus: spec.nanoCpus,
-            networkMode: spec.networkMode,
+            networkMode: attached.mode,
             tty: spec.tty,
             openStdin: spec.openStdin,
-            mounts: mounts
+            mounts: mounts,
+            endpoints: attached.endpoints,
+            portBindings: portBindings,
+            exposedPorts: exposedPorts
         )
         containers[id] = record
         await publish(EngineEvent(type: "container", action: "create", actorID: id, attributes: ["name": name, "image": spec.image]))
-        var warnings: [String] = []
-        if spec.networkMode != "none" {
-            warnings.append("container network is not attached; the MicroVM has no NIC yet")
+        var warnings = attached.warnings
+        if attached.mode == "host", exposedPorts.isEmpty {
+            warnings.append("host network: image has no ExposedPorts; Mac localhost will not be proxied")
         }
         return EngineContainerCreateResult(id: id, warnings: warnings)
     }
@@ -199,7 +205,7 @@ extension EngineManager {
         let stopped = containers.values.filter { $0.state == "exited" || $0.state == "created" || $0.state == "dead" }
         var deleted: [String] = []
         for container in stopped {
-            resetContainerFiles(container.id)
+            reclaimContainerRuntime(container.id)
             containers[container.id] = nil
             finishAttachSubscribers(container.id, extra: nil)
             await finishExecs(forContainer: container.id, code: 0)

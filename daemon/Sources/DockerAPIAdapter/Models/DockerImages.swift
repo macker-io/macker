@@ -180,13 +180,26 @@ public struct DockerProgressLine: Encodable, Sendable {
 
     private static func bar(current: Int64, total: Int64) -> String {
         guard total > 0 else {
-            return "\(current)B"
+            return formatBytes(current)
         }
         let ratio = min(1.0, Double(current) / Double(total))
         let filled = Int((ratio * 20).rounded())
         let bar = String(repeating: "=", count: max(0, filled - 1)) + (filled > 0 ? ">" : "")
         let empty = String(repeating: " ", count: max(0, 20 - filled))
-        return "[\(bar)\(empty)]  \(current)B/\(total)B"
+        return "[\(bar)\(empty)]  \(formatBytes(current, aligningWith: total))/\(formatBytes(total))"
+    }
+
+    private static func formatBytes(_ value: Int64, aligningWith other: Int64? = nil) -> String {
+        let units: [(String, Double)] = [
+            ("GB", 1_000_000_000),
+            ("MB", 1_000_000),
+            ("kB", 1_000),
+        ]
+        let scale = max(value, other ?? value)
+        for (name, size) in units where Double(scale) >= size {
+            return String(format: "%.2f%@", Double(value) / size, name)
+        }
+        return "\(value)B"
     }
 }
 

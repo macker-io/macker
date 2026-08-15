@@ -136,7 +136,7 @@ public struct DockerSystemInfo: Encodable, Sendable {
             ["Engine", "containerization"],
         ]
         self.DockerRootDir = engine.dockerRootDir
-        self.Plugins = .init(Volume: ["local"], Network: ["bridge"], Authorization: [], Log: ["json-file"])
+        self.Plugins = .init(Volume: ["local"], Network: ["bridge", "host", "none"], Authorization: [], Log: ["json-file"])
         self.MemoryLimit = true
         self.SwapLimit = false
         self.CpuCfsPeriod = false

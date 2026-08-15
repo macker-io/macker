@@ -10,7 +10,9 @@ struct Pull: ParsableCommand {
     @Option(help: "Platform, e.g. linux/arm64.")
     var platform: String?
 
-    func run() throws {
+    func run() throws { try Self.submit(image, platform: platform) }
+
+    static func submit(_ image: String, platform: String? = nil) throws {
         let (name, tag) = DaemonAPI.splitReference(image)
         var path = "/images/create?fromImage=\(DaemonAPI.query(name))&tag=\(DaemonAPI.query(tag))"
         if let platform, !platform.isEmpty {

@@ -87,21 +87,37 @@ enum DaemonAPI {
 
     /// Pull/push NDJSON progress. Throws if the stream reports an error line or a non-200 status.
     static func streamProgress(method: String = "POST", path: String) throws {
+        let printer = ProgressPrinter()
         var failed: String?
         let status = try streamLines(method: method, path: path) { line in
             if let message = progressError(in: line) {
+                printer.finish()
                 failed = message
                 fputs("Error: \(message)\n", stderr)
                 return
             }
-            printProgress(line)
+            printer.write(line)
         }
+        printer.finish()
         if let failed {
             throw CLIError.http(failed)
         }
         if status != 200 {
             throw CLIError.http("request failed with HTTP \(status)")
         }
+    }
+
+    static func isMissingImage(_ response: UnixHTTPClient.Response) -> Bool {
+        guard response.statusCode == 404 else { return false }
+        let message: String
+        if let error = try? JSONDecoder().decode(APIError.self, from: response.body) {
+            message = error.message
+        } else if let text = String(data: response.body, encoding: .utf8) {
+            message = text
+        } else {
+            return false
+        }
+        return message.range(of: "no such image", options: .caseInsensitive) != nil
     }
 
     static func query(_ value: String) -> String {
@@ -177,13 +193,36 @@ enum DaemonAPI {
         return nil
     }
 
-    private static func printProgress(_ line: String) {
+}
+
+/// Rewrites the current TTY line for layer download bars; status lines still get a newline.
+private final class ProgressPrinter: @unchecked Sendable {
+    private let tty = isatty(STDOUT_FILENO) != 0
+    private var dirty = false
+
+    func write(_ line: String) {
         guard let progress = try? JSONDecoder().decode(ProgressLine.self, from: Data(line.utf8)) else { return }
-        if let bar = progress.progress, let id = progress.id {
-            print("\(id): \(progress.status ?? "Downloading") \(bar)")
-        } else if let text = progress.status {
-            print(progress.id.map { "\($0): \(text)" } ?? text)
+        if let bar = progress.progress {
+            let text = "\(progress.id.map { "\($0): " } ?? "")\(progress.status ?? "Downloading") \(bar)"
+            if tty {
+                fputs("\r\(text)\u{001B}[K", stdout)
+                fflush(stdout)
+                dirty = true
+            }
+            return
         }
+        guard let text = progress.status else { return }
+        finish()
+        let rendered = progress.id.map { "\($0): \(text)" } ?? text
+        fputs("\(rendered)\n", stdout)
+        fflush(stdout)
+    }
+
+    func finish() {
+        guard dirty else { return }
+        fputs("\n", stdout)
+        fflush(stdout)
+        dirty = false
     }
 }
 

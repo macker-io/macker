@@ -166,7 +166,10 @@ extension Router {
                 nanoCpus: body.HostConfig?.NanoCpus ?? 0,
                 autoRemove: body.HostConfig?.AutoRemove ?? false,
                 networkMode: body.HostConfig?.NetworkMode ?? "default",
-                volumeRequests: Self.volumeRequests(from: body)
+                volumeRequests: Self.volumeRequests(from: body),
+                portBindings: try Self.portBindings(from: body),
+                exposedPorts: try Self.exposedPorts(from: body),
+                endpointRequests: Self.endpointRequests(from: body)
             )
         } catch {
             return Self.jsonError(status: 400, message: "invalid container config: \(error.localizedDescription)")
@@ -423,6 +426,53 @@ extension Router {
             return HTTPResponse(status: 204)
         } catch {
             return Self.engineError(error)
+        }
+    }
+
+    static func exposedPorts(from body: DockerCreateContainerRequest) throws -> [EnginePortBinding] {
+        var ports: [EnginePortBinding] = []
+        for key in body.ExposedPorts?.keys.sorted() ?? [] {
+            ports.append(try EnginePortBinding.parseExposed(key))
+        }
+        for key in body.HostConfig?.PortBindings?.keys.sorted() ?? [] {
+            ports.append(try EnginePortBinding.parseExposed(key))
+        }
+        return EnginePortBinding.uniqued(ports)
+    }
+
+    static func portBindings(from body: DockerCreateContainerRequest) throws -> [EnginePortBinding] {
+        var bindings: [EnginePortBinding] = []
+        for (key, published) in body.HostConfig?.PortBindings ?? [:] {
+            let exposed = try EnginePortBinding.parseExposed(key)
+            if published.isEmpty {
+                bindings.append(
+                    EnginePortBinding(
+                        hostIP: "",
+                        hostPort: 0,
+                        containerPort: exposed.containerPort,
+                        protocolName: exposed.protocolName
+                    )
+                )
+                continue
+            }
+            for item in published {
+                let hostPort = Int(item.HostPort ?? "") ?? 0
+                bindings.append(
+                    EnginePortBinding(
+                        hostIP: item.HostIp ?? "",
+                        hostPort: hostPort,
+                        containerPort: exposed.containerPort,
+                        protocolName: exposed.protocolName
+                    )
+                )
+            }
+        }
+        return bindings
+    }
+
+    static func endpointRequests(from body: DockerCreateContainerRequest) -> [EngineEndpointRequest] {
+        (body.NetworkingConfig?.EndpointsConfig ?? [:]).map { name, config in
+            EngineEndpointRequest(network: name, aliases: config.Aliases ?? [])
         }
     }
 

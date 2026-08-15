@@ -10,6 +10,9 @@ public struct EngineContainerSummary: Sendable {
     public let state: String
     public let status: String
     public let created: Date
+    public let networkMode: String
+    public let ports: [EnginePortBinding]
+    public let endpoints: [EngineEndpoint]
 
     public init(
         id: String,
@@ -20,7 +23,10 @@ public struct EngineContainerSummary: Sendable {
         labels: [String: String] = [:],
         state: String,
         status: String,
-        created: Date
+        created: Date,
+        networkMode: String = "default",
+        ports: [EnginePortBinding] = [],
+        endpoints: [EngineEndpoint] = []
     ) {
         self.id = id
         self.names = names
@@ -31,6 +37,9 @@ public struct EngineContainerSummary: Sendable {
         self.state = state
         self.status = status
         self.created = created
+        self.networkMode = networkMode
+        self.ports = ports
+        self.endpoints = endpoints
     }
 }
 
@@ -51,6 +60,9 @@ public struct EngineContainerCreateSpec: Sendable {
     public var autoRemove: Bool
     public var networkMode: String
     public var volumeRequests: [EngineVolumeRequest]
+    public var portBindings: [EnginePortBinding]
+    public var exposedPorts: [EnginePortBinding]
+    public var endpointRequests: [EngineEndpointRequest]
 
     public init(
         name: String? = nil,
@@ -68,7 +80,10 @@ public struct EngineContainerCreateSpec: Sendable {
         nanoCpus: Int64 = 0,
         autoRemove: Bool = false,
         networkMode: String = "default",
-        volumeRequests: [EngineVolumeRequest] = []
+        volumeRequests: [EngineVolumeRequest] = [],
+        portBindings: [EnginePortBinding] = [],
+        exposedPorts: [EnginePortBinding] = [],
+        endpointRequests: [EngineEndpointRequest] = []
     ) {
         self.name = name
         self.image = image
@@ -86,6 +101,9 @@ public struct EngineContainerCreateSpec: Sendable {
         self.autoRemove = autoRemove
         self.networkMode = networkMode
         self.volumeRequests = volumeRequests
+        self.portBindings = portBindings
+        self.exposedPorts = exposedPorts
+        self.endpointRequests = endpointRequests
     }
 }
 
@@ -115,6 +133,9 @@ public struct EngineContainer: Sendable {
     public var tty: Bool
     public var openStdin: Bool
     public var mounts: [EngineMount]
+    public var endpoints: [EngineEndpoint] = []
+    public var portBindings: [EnginePortBinding] = []
+    public var exposedPorts: [EnginePortBinding] = []
 
     public var summary: EngineContainerSummary {
         EngineContainerSummary(
@@ -126,7 +147,10 @@ public struct EngineContainer: Sendable {
             labels: labels,
             state: state,
             status: status,
-            created: created
+            created: created,
+            networkMode: networkMode,
+            ports: portBindings,
+            endpoints: endpoints
         )
     }
 }

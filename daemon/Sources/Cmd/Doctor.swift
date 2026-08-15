@@ -32,6 +32,13 @@ struct Doctor: ParsableCommand {
         let macos: CheckResult = version.majorVersion >= 15
             ? CheckResult(status: .ok, title: "macOS 15+", detail: versionText)
             : CheckResult(status: .fail, title: "macOS 15+", detail: "found \(versionText)")
+        let networking: CheckResult = version.majorVersion >= 26
+            ? CheckResult(status: .ok, title: "Container networking", detail: "macOS 26+ (\(versionText))")
+            : CheckResult(
+                status: .warn,
+                title: "Container networking",
+                detail: "bridge/host require macOS 26+ (found \(versionText))"
+            )
 
         var info = utsname()
         uname(&info)
@@ -44,7 +51,7 @@ struct Doctor: ParsableCommand {
             ? CheckResult(status: .ok, title: "Apple Silicon", detail: machine)
             : CheckResult(status: .fail, title: "Apple Silicon", detail: "found \(machine)")
 
-        return [macos, silicon]
+        return [macos, networking, silicon]
     }
 
     private func engineChecks() -> [CheckResult] {

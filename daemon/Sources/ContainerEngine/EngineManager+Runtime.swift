@@ -30,46 +30,65 @@ extension EngineManager {
     func bootContainer(_ record: EngineContainer) async throws {
         let image = try await resolveImage(record.image)
         var manager = try await ensureManager()
-        resetContainerFiles(record.id)
+        reclaimContainerRuntime(record.id)
 
         let sink = ProcessLogSink { [id = record.id] text in
             Task { await self.appendOutput(id: id, text: text) }
         }
 
+        var prepared = record
+        let interfaces: [any Interface]
+        do {
+            interfaces = try allocateInterfaces(for: &prepared)
+            containers[prepared.id] = prepared
+        } catch {
+            releaseInterfaces(record.id)
+            throw error
+        }
+        let dns = dnsConfig(for: prepared)
+        let hosts = hostsFile(for: prepared)
+
         var linux: LinuxContainer?
         do {
+            // Attach virtio-net ourselves. ContainerManager's single `network:` cannot
+            // express none / host / multiple networks.
             let created = try await manager.create(
                 record.id,
                 image: image,
                 rootfsSizeInBytes: Self.defaultRootfsBytes,
                 networking: false
             ) { config in
-                if !record.command.isEmpty {
-                    config.process.arguments = record.command
+                if !prepared.command.isEmpty {
+                    config.process.arguments = prepared.command
                 }
-                if !record.env.isEmpty {
-                    config.process.environmentVariables = record.env
+                if !prepared.env.isEmpty {
+                    config.process.environmentVariables = prepared.env
                 }
-                if !record.workingDir.isEmpty {
-                    config.process.workingDirectory = record.workingDir
+                if !prepared.workingDir.isEmpty {
+                    config.process.workingDirectory = prepared.workingDir
                 }
-                if !record.user.isEmpty {
-                    config.process.user = .init(username: record.user)
+                if !prepared.user.isEmpty {
+                    config.process.user = .init(username: prepared.user)
                 }
-                config.process.terminal = record.tty
+                config.process.terminal = prepared.tty
                 config.process.stdout = sink
-                if !record.tty {
+                if !prepared.tty {
                     config.process.stderr = sink
                 }
-                config.hostname = record.hostname
-                config.cpus = Self.cpuCount(nanoCpus: record.nanoCpus)
-                config.memoryInBytes = record.memory > 0 ? UInt64(record.memory) : Self.defaultMemoryBytes
-                for mount in record.mounts where !mount.source.isEmpty && !mount.destination.isEmpty {
+                config.hostname = prepared.hostname
+                config.cpus = Self.cpuCount(nanoCpus: prepared.nanoCpus)
+                config.memoryInBytes = prepared.memory > 0 ? UInt64(prepared.memory) : Self.defaultMemoryBytes
+                for mount in prepared.mounts where !mount.source.isEmpty && !mount.destination.isEmpty {
                     var options: [String] = []
                     if !mount.rw {
                         options.append("ro")
                     }
                     config.mounts.append(.share(source: mount.source, destination: mount.destination, options: options))
+                }
+                if !interfaces.isEmpty {
+                    config.interfaces = interfaces
+                    config.dns = dns
+                    config.hosts = hosts
                 }
             }
             linux = created
@@ -79,14 +98,21 @@ extension EngineManager {
         } catch {
             try? await linux?.stop()
             vms[record.id] = nil
-            resetContainerFiles(record.id)
+            reclaimContainerRuntime(record.id)
             throw EngineError.runtimeUnavailable("failed to start MicroVM: \(error.localizedDescription)")
         }
 
         guard let linux else {
+            reclaimContainerRuntime(record.id)
             throw EngineError.runtimeUnavailable("failed to start MicroVM")
         }
         vms[record.id] = linux
+        do {
+            try await startPortPublishers(containers[record.id] ?? prepared)
+        } catch {
+            await teardownVM(record.id)
+            throw error
+        }
     }
 
     func watchVM(_ id: String) {
@@ -132,9 +158,11 @@ extension EngineManager {
     func teardownVM(_ id: String) async {
         waitTasks[id]?.cancel()
         waitTasks[id] = nil
+        stopPortPublishers(id)
         if let linux = vms.removeValue(forKey: id) {
             try? await linux.stop()
         }
+        releaseInterfaces(id)
     }
 
     func handleVMExit(id: String, code: Int, action: String) async {
@@ -160,8 +188,13 @@ extension EngineManager {
         }
     }
 
+    func reclaimContainerRuntime(_ id: String) {
+        stopPortPublishers(id)
+        releaseInterfaces(id)
+        resetContainerFiles(id)
+    }
+
     func resetContainerFiles(_ id: String) {
-        try? containerManager?.releaseNetwork(id)
         let path = imageStore.path.appendingPathComponent("containers", isDirectory: true)
             .appendingPathComponent(id, isDirectory: true)
         if FileManager.default.fileExists(atPath: path.path) {
@@ -194,6 +227,7 @@ extension EngineManager {
         _ = try await RuntimeAssets.prepare(store: imageStore)
         let kernel = try RuntimeAssets.kernel(storePath: imageStore.path)
         let initfs = try RuntimeAssets.initfsMount(storePath: imageStore.path)
+        // NICs are attached per container in `bootContainer` (`networking: false`).
         let manager = try ContainerManager(
             kernel: kernel,
             initfs: initfs,

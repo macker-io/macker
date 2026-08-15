@@ -14,12 +14,16 @@ public actor EngineManager {
     let eventBus = EventBus()
     let daemonID: String
     let volumeRoot: URL
+    let networkRoot: URL
+    let portPublisher = PortPublisher()
     var containers: [String: EngineContainer] = [:]
     var waiters: [String: [CheckedContinuation<Int, Never>]] = [:]
     var execs: [String: EngineExec] = [:]
     var attachSubscribers: [String: [UUID: AsyncStream<String>.Continuation]] = [:]
     var execSubscribers: [String: [UUID: AsyncStream<String>.Continuation]] = [:]
     var volumes: [String: EngineVolume] = [:]
+    var networks: [String: EngineNetwork] = [:]
+    let networkDataplane = NetworkDataplane()
     var containerManager: ContainerManager?
     var vms: [String: LinuxContainer] = [:]
     var waitTasks: [String: Task<Void, Never>] = [:]
@@ -32,6 +36,12 @@ public actor EngineManager {
         try FileManager.default.createDirectory(at: volumeRoot, withIntermediateDirectories: true)
         self.volumeRoot = volumeRoot
         self.volumes = Self.loadVolumes(from: volumeRoot)
+        let networkRoot = store.path.appendingPathComponent("networks", isDirectory: true)
+        try FileManager.default.createDirectory(at: networkRoot, withIntermediateDirectories: true)
+        self.networkRoot = networkRoot
+        var loaded = Self.loadNetworks(from: networkRoot)
+        try Self.ensureBuiltinNetworks(into: &loaded, root: networkRoot)
+        self.networks = loaded
     }
 
     /// Validates that this Mac can host MicroVMs via Virtualization.framework.

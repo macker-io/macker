@@ -13,6 +13,7 @@ public enum EngineError: Error, Sendable, LocalizedError {
     case containerNotFound(String)
     case execNotFound(String)
     case volumeNotFound(String)
+    case networkNotFound(String)
     case invalidArgument(String)
     case conflict(String)
     case runtimeUnavailable(String)
@@ -30,6 +31,7 @@ public enum EngineError: Error, Sendable, LocalizedError {
             .containerNotFound(let reason),
             .execNotFound(let reason),
             .volumeNotFound(let reason),
+            .networkNotFound(let reason),
             .invalidArgument(let reason),
             .conflict(let reason),
             .runtimeUnavailable(let reason):

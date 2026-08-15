@@ -1,4 +1,5 @@
 import ArgumentParser
+import ContainerEngine
 import Darwin
 import Foundation
 
@@ -26,6 +27,12 @@ struct ContainerCreateOptions: ParsableArguments {
 
     @Option(name: .shortAndLong, help: "Bind mount a volume.")
     var volume: [String] = []
+
+    @Option(name: [.customShort("p"), .customLong("publish")], help: "Publish a container's port(s) to the host.")
+    var publish: [String] = []
+
+    @Option(name: .customLong("network"), help: "Connect a container to a network (bridge, host, none, or a custom name).")
+    var network: String?
 
     @Argument(help: "Image reference.")
     var image: String
@@ -103,7 +110,9 @@ struct Create: ParsableCommand {
         var host = CreateBody.HostConfig(
             AutoRemove: autoRemove ? true : nil,
             Memory: nil,
-            Binds: options.volume.isEmpty ? nil : options.volume
+            Binds: options.volume.isEmpty ? nil : options.volume,
+            NetworkMode: options.network,
+            PortBindings: try Self.portBindings(options.publish)
         )
         if let memory = options.memory {
             host.Memory = try DaemonAPI.parseBytes(memory)
@@ -122,11 +131,43 @@ struct Create: ParsableCommand {
         if let name = options.name, !name.isEmpty {
             path += "?name=\(DaemonAPI.query(name))"
         }
-        let created = try DaemonAPI.decode(CreateResponse.self, from: DaemonAPI.post(path, body: JSONEncoder().encode(body)))
+        let payload = try JSONEncoder().encode(body)
+        let created: CreateResponse
+        if let existing = try Self.create(path: path, payload: payload) {
+            created = existing
+        } else {
+            let (name, tag) = DaemonAPI.splitReference(options.image)
+            print("Unable to find image '\(name):\(tag)' locally")
+            try Pull.submit(options.image)
+            guard let retry = try Self.create(path: path, payload: payload) else {
+                throw CLIError.http("No such image: \(options.image)")
+            }
+            created = retry
+        }
         for warning in created.Warnings ?? [] {
             fputs("WARNING: \(warning)\n", stderr)
         }
         return created.Id
+    }
+
+    private static func create(path: String, payload: Data) throws -> CreateResponse? {
+        let response = try DaemonAPI.post(path, body: payload)
+        if DaemonAPI.isMissingImage(response) {
+            return nil
+        }
+        return try DaemonAPI.decode(CreateResponse.self, from: response)
+    }
+
+    private static func portBindings(_ specs: [String]) throws -> [String: [CreateBody.PortBinding]]? {
+        guard !specs.isEmpty else { return nil }
+        var mapped: [String: [CreateBody.PortBinding]] = [:]
+        for spec in specs {
+            let binding = try EnginePortBinding.parsePublish(spec)
+            mapped[binding.dockerKey, default: []].append(
+                .init(HostIp: binding.hostIP, HostPort: binding.hostPort == 0 ? "" : String(binding.hostPort))
+            )
+        }
+        return mapped
     }
 }
 
@@ -272,14 +313,15 @@ struct Inspect: ParsableCommand {
     func run() throws { try Self.inspect(names, prefer: .auto) }
 
     enum Kind {
-        case auto, image, container, volume
+        case auto, image, container, volume, network
 
         var searchOrder: [Kind] {
             switch self {
-            case .image: [.image, .container, .volume]
-            case .container: [.container, .image, .volume]
-            case .volume: [.volume, .container, .image]
-            case .auto: [.container, .image, .volume]
+            case .image: [.image, .container, .volume, .network]
+            case .container: [.container, .image, .volume, .network]
+            case .volume: [.volume, .container, .image, .network]
+            case .network: [.network, .container, .image, .volume]
+            case .auto: [.container, .image, .volume, .network]
             }
         }
 
@@ -288,6 +330,7 @@ struct Inspect: ParsableCommand {
             case .container: "/containers/\(DaemonAPI.path(name))/json"
             case .image: "/images/\(DaemonAPI.path(name))/json"
             case .volume: "/volumes/\(DaemonAPI.path(name))"
+            case .network: "/networks/\(DaemonAPI.path(name))"
             case .auto: nil
             }
         }
@@ -392,6 +435,13 @@ private struct CreateBody: Encodable {
         var AutoRemove: Bool?
         var Memory: Int64?
         var Binds: [String]?
+        var NetworkMode: String?
+        var PortBindings: [String: [PortBinding]]?
+    }
+
+    struct PortBinding: Encodable {
+        var HostIp: String
+        var HostPort: String
     }
 }
 

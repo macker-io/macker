@@ -7,7 +7,7 @@ macOS-native Linux containers. The daemon speaks the Docker Engine API over a UN
 | `app/` | SwiftUI GUI (`io.macker.app`) |
 | `daemon/` | SPM package: `App` (daemon) and `macker` (CLI) |
 
-Requirements: Apple Silicon, macOS 15+.
+Requirements: Apple Silicon, macOS 15+ (MicroVMs). Container networking (`bridge` / `host`) requires macOS 26+.
 
 ## Local debug
 
@@ -29,7 +29,7 @@ cd daemon
 ./.build/debug/macker run --rm hello-world
 ```
 
-`run` does not pull for you. First `start` can take a while (unpack rootfs + boot the VM).
+`run` / `create` pull the image if it is missing locally. First `start` can take a while (unpack rootfs + boot the VM).
 
 Stop the daemon with Ctrl+C, then wipe images / containers / volumes / networks (keeps kernel and initfs):
 
@@ -46,6 +46,45 @@ The daemon listens on:
 Override with `--socket`, `MACKER_HOST`, or `DOCKER_HOST` (`unix://…` or an absolute path).
 
 `/var/run/docker.sock` is Docker’s name. Only `macker setup` (optionally `--force`) creates a symlink to `macker.sock`. Leave it alone if it already points at Podman or Docker Desktop.
+
+## Networking
+
+Each container is a MicroVM with its own kernel, so this is not Linux `bridge` + `veth`. The Docker names still apply:
+
+| `--network` | What Macker does |
+| --- | --- |
+| `bridge` (default) | virtio-net on a vmnet NAT network (`172.17.0.0/16`). Same-network containers can reach each other by name (`/etc/hosts`). `-p` publishes TCP on the Mac via a userspace proxy. |
+| `host` | NAT NIC like bridge. `-p` is ignored. Image `EXPOSE` (and create `ExposedPorts`) are published 1:1 on the Mac (`80` → `localhost:80`). Guest `127.0.0.1` is **not** the Mac loopback. |
+| `none` | No NIC. |
+
+`macker network ls|create|rm|inspect|connect|disconnect|prune` works. Builtin `bridge` / `host` / `none` cannot be removed. `connect` / `disconnect` only apply while the container is stopped.
+
+```bash
+./.build/debug/macker network ls
+./.build/debug/macker run --rm alpine wget -qO- https://example.com
+./.build/debug/macker run -d --name web -p 18080:80 nginx
+curl http://127.0.0.1:18080
+./.build/debug/macker run -d --name hostweb --network host nginx
+curl http://127.0.0.1:80
+```
+
+Host-mode `curl localhost:80` uses the image `EXPOSE` 1:1 proxy, not `-p`. Binding Mac port 80 fails if something else already owns it.
+
+vmnet NAT uses the same `com.apple.security.virtualization` entitlement as Apple’s containerization examples. `com.apple.vm.networking` is restricted; claiming it on an ad-hoc signed daemon gets the process SIGKILL’d at launch.
+
+## Roadmap
+
+Daily `bridge` / `host` / `none` is in place. Network follow-ups, roughly in this order:
+
+| When | Item | Notes |
+| --- | --- | --- |
+| Next | Live `network connect` / `disconnect` | Today endpoints can change only while the container is stopped |
+| Next | Refresh peer names on running containers | `/etc/hosts` is written at start; later joins are invisible until restart |
+| Later | UDP `-p` | Port proxy is TCP only |
+| Later | `internal` networks | Flag is stored; isolation (no outbound) is incomplete |
+| Later | `macvlan` / `ipvlan` / `--net=container:` / IPv6 | Need extra vmnet / entitlements; not ad-hoc signable |
+
+Outside networking, the next large Docker gap is `exec` / `-it`.
 
 ## Make targets
 
@@ -78,7 +117,7 @@ Make targets call these. They are not only for local debug.
 
 | Script | Used by | Role |
 | --- | --- | --- |
-| `sign-app.sh` | `make app` / `sign` | Ad-hoc sign the debug daemon (Virtualization entitlement) |
+| `sign-app.sh` | `make app` / `sign` | Ad-hoc sign the debug daemon (`com.apple.security.virtualization`) |
 | `fetch-runtime.sh` | `make fetch-runtime`; packaging if `.runtime` is missing | Install kernel/initfs into the store; optional staging dir |
 | `reset-store.sh` | `make reset` | Wipe engine state; keep `runtime/`, `initfs.ext4`, `daemon-id` |
 | `package.sh` | `make bundle` / `pkg` | Release `.app` (`package.sh`) or `.app`+`.pkg` (`package.sh pkg`) |

@@ -77,7 +77,7 @@ extension EngineManager {
         summaries.reserveCapacity(groups.count)
         for (digest, members) in groups {
             guard let primary = members.first else { continue }
-            let tags = members.flatMap { Self.displayTags(for: $0.reference) }
+            let tags = Self.uniqueDisplayTags(members.map(\.reference))
             let repoDigests = members.map { "\(Self.repository(from: $0.reference))@\(digest)" }
             summaries.append(
                 EngineImageSummary(
@@ -108,7 +108,7 @@ extension EngineManager {
     public func inspectImage(name: String) async throws -> EngineImageInspect {
         let image = try await resolveImage(name)
         let siblings = try await imageStore.list().filter { $0.digest == image.digest }
-        let tags = siblings.flatMap { Self.displayTags(for: $0.reference) }
+        let tags = Self.uniqueDisplayTags(siblings.map(\.reference))
         let repoDigests = siblings.map { "\(Self.repository(from: $0.reference))@\(image.digest)" }
 
         let platform = await Self.preferredPlatform(for: image)
@@ -130,7 +130,8 @@ extension EngineManager {
             user: config?.config?.user ?? "",
             workingDir: config?.config?.workingDir ?? "",
             labels: config?.config?.labels ?? [:],
-            layers: config?.rootfs.diffIDs ?? []
+            layers: config?.rootfs.diffIDs ?? [],
+            exposedPorts: await Self.exposedPorts(of: image, platform: platform)
         )
     }
 
@@ -210,17 +211,35 @@ extension EngineManager {
         if image.reference == name { return true }
         if image.digest == name { return true }
         if image.digest.hasSuffix(name) { return true }
-        if displayTags(for: image.reference).contains(name) { return true }
-        if !name.contains(":"), displayTags(for: image.reference).contains("\(name):latest") { return true }
+        if Self.aliases(for: image.reference).contains(name) { return true }
+        if !name.contains(":"), Self.aliases(for: image.reference).contains("\(name):latest") { return true }
         return false
     }
 
-    static func displayTags(for reference: String) -> [String] {
+    /// Names that resolve to this reference. Short Hub names stay valid for `run`/`rmi`;
+    /// they are not extra `RepoTags` in `images` / inspect.
+    static func aliases(for reference: String) -> [String] {
         var tags = [reference]
-        for prefix in ["docker.io/library/", "registry-1.docker.io/library/"] where reference.hasPrefix(prefix) {
-            tags.append(String(reference.dropFirst(prefix.count)))
+        if reference.hasPrefix("docker.io/library/") {
+            tags.append(String(reference.dropFirst("docker.io/library/".count)))
+        }
+        if reference.hasPrefix("registry-1.docker.io/library/") {
+            tags.append(String(reference.dropFirst("registry-1.docker.io/library/".count)))
+        }
+        if reference.hasPrefix("docker.io/") {
+            tags.append(String(reference.dropFirst("docker.io/".count)))
         }
         return tags
+    }
+
+    /// One row per stored tag. Prefer the fully-qualified name when a Hub short alias is also stored.
+    static func uniqueDisplayTags(_ references: [String]) -> [String] {
+        let stored = Array(Set(references))
+        return stored.filter { tag in
+            !stored.contains { other in
+                other != tag && aliases(for: other).contains(tag)
+            }
+        }.sorted()
     }
 
     static func repository(from reference: String) -> String {
@@ -263,6 +282,23 @@ extension EngineManager {
         return total
     }
 
+    /// Docker stores `ExposedPorts` on the image config; OCI ImageConfig drops that field.
+    static func exposedPorts(of image: Containerization.Image, platform: Platform) async -> [EnginePortBinding] {
+        guard let manifest = try? await image.manifest(for: platform),
+            let content = try? await image.getContent(digest: manifest.config.digest),
+            let blob: ImageExposedPortsBlob = try? content.decode()
+        else {
+            return []
+        }
+        var ports: [EnginePortBinding] = []
+        for key in blob.config?.ExposedPorts?.keys.sorted() ?? [] {
+            if let parsed = try? EnginePortBinding.parseExposed(key) {
+                ports.append(parsed)
+            }
+        }
+        return ports
+    }
+
     public func imageHistory(name: String) async throws -> [EngineImageHistoryItem] {
         let image = try await resolveImage(name)
         let platform = await Self.preferredPlatform(for: image)
@@ -270,7 +306,7 @@ extension EngineManager {
         let history = config.history ?? []
         let diffIDs = config.rootfs.diffIDs
         var layerIndex = 0
-        let tags = Self.displayTags(for: image.reference)
+        let tags = [image.reference]
 
         return history.enumerated().map { offset, item in
             let empty = item.emptyLayer ?? false
@@ -518,6 +554,16 @@ private struct HubSearchResponse: Decodable {
             case isOfficial = "is_official"
             case isAutomated = "is_automated"
         }
+    }
+}
+
+private struct ImageExposedPortsBlob: Decodable {
+    var config: Config?
+
+    struct Config: Decodable {
+        var ExposedPorts: [String: Empty]?
+
+        struct Empty: Decodable {}
     }
 }
 

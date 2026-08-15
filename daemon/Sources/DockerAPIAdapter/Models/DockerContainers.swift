@@ -17,7 +17,19 @@ public struct DockerContainerSummary: Encodable, Sendable {
     public let NetworkSettings: NetworkSettings
     public let Mounts: [Mount]
 
-    public struct Port: Encodable, Sendable {}
+    public struct Port: Encodable, Sendable {
+        public let IP: String
+        public let PrivatePort: Int
+        public let PublicPort: Int
+        public let `Type`: String
+
+        public init(_ binding: EnginePortBinding) {
+            self.IP = binding.hostIP.isEmpty ? "0.0.0.0" : binding.hostIP
+            self.PrivatePort = binding.containerPort
+            self.PublicPort = binding.hostPort
+            self.`Type` = binding.protocolName
+        }
+    }
 
     public struct Mount: Encodable, Sendable {
         public let `Type`: String
@@ -49,7 +61,39 @@ public struct DockerContainerSummary: Encodable, Sendable {
         public let Networks: [String: EndpointSettings]
     }
 
-    public struct EndpointSettings: Encodable, Sendable {}
+    public struct EndpointSettings: Encodable, Sendable {
+        public let IPAMConfig: EmptyObject?
+        public let Links: [String]?
+        public let Aliases: [String]
+        public let NetworkID: String
+        public let EndpointID: String
+        public let Gateway: String
+        public let IPAddress: String
+        public let IPPrefixLen: Int
+        public let IPv6Gateway: String
+        public let GlobalIPv6Address: String
+        public let GlobalIPv6PrefixLen: Int
+        public let MacAddress: String
+        public let DriverOpts: [String: String]?
+
+        public struct EmptyObject: Encodable, Sendable {}
+
+        public init(_ endpoint: EngineEndpoint) {
+            self.IPAMConfig = nil
+            self.Links = nil
+            self.Aliases = endpoint.aliases
+            self.NetworkID = endpoint.networkID
+            self.EndpointID = String(endpoint.networkID.prefix(12)) + String(endpoint.ipv4Address.filter { $0 != "." }.suffix(12))
+            self.Gateway = endpoint.gateway
+            self.IPAddress = endpoint.ipv4Address
+            self.IPPrefixLen = endpoint.ipv4Prefix
+            self.IPv6Gateway = ""
+            self.GlobalIPv6Address = ""
+            self.GlobalIPv6PrefixLen = 0
+            self.MacAddress = endpoint.macAddress
+            self.DriverOpts = nil
+        }
+    }
 
     public init(_ engine: EngineContainerSummary) {
         self.Id = engine.id
@@ -58,12 +102,14 @@ public struct DockerContainerSummary: Encodable, Sendable {
         self.ImageID = engine.imageID
         self.Command = engine.command
         self.Created = Int64(engine.created.timeIntervalSince1970)
-        self.Ports = []
+        self.Ports = engine.ports.map(Port.init)
         self.Labels = engine.labels
         self.State = engine.state
         self.Status = engine.status
-        self.HostConfig = .init(NetworkMode: "default")
-        self.NetworkSettings = .init(Networks: [:])
+        self.HostConfig = .init(NetworkMode: engine.networkMode)
+        self.NetworkSettings = .init(
+            Networks: Dictionary(uniqueKeysWithValues: engine.endpoints.map { ($0.networkName, EndpointSettings($0)) })
+        )
         self.Mounts = []
     }
 }
@@ -80,7 +126,9 @@ public struct DockerCreateContainerRequest: Decodable, Sendable {
     public let Tty: Bool?
     public let OpenStdin: Bool?
     public let Volumes: [String: EmptyObject]?
+    public let ExposedPorts: [String: EmptyObject]?
     public let HostConfig: HostConfig?
+    public let NetworkingConfig: NetworkingConfig?
 
     public struct EmptyObject: Decodable, Sendable {}
 
@@ -91,6 +139,11 @@ public struct DockerCreateContainerRequest: Decodable, Sendable {
         public let NetworkMode: String?
         public let Binds: [String]?
         public let Mounts: [DockerMountConfig]?
+        public let PortBindings: [String: [DockerPortBinding]]?
+    }
+
+    public struct NetworkingConfig: Decodable, Sendable {
+        public let EndpointsConfig: [String: DockerEndpointConfig]?
     }
 }
 
@@ -99,6 +152,18 @@ public struct DockerMountConfig: Decodable, Sendable {
     public let Source: String?
     public let Target: String?
     public let ReadOnly: Bool?
+}
+
+public struct DockerPortBinding: Codable, Sendable {
+    public let HostIp: String?
+    public let HostPort: String?
+}
+
+public struct DockerEndpointConfig: Decodable, Sendable {
+    public let Aliases: [String]?
+    public let IPAMConfig: EmptyObject?
+
+    public struct EmptyObject: Decodable, Sendable {}
 }
 
 /// Docker sends Cmd/Entrypoint as either a string or an array of strings.
@@ -166,6 +231,7 @@ public struct DockerContainerInspect: Encodable, Sendable {
         public let Memory: Int64
         public let NanoCpus: Int64
         public let AutoRemove: Bool
+        public let PortBindings: [String: [DockerPortBinding]]
     }
 
     public struct Config: Encodable, Sendable {
@@ -178,9 +244,19 @@ public struct DockerContainerInspect: Encodable, Sendable {
         public let Labels: [String: String]
         public let Tty: Bool
         public let OpenStdin: Bool
+        public let ExposedPorts: [String: EmptyObject]
+
+        public struct EmptyObject: Encodable, Sendable {}
     }
 
     public struct NetworkSettings: Encodable, Sendable {
+        public let Bridge: String
+        public let SandboxID: String
+        public let Ports: [String: [DockerPortBinding]?]
+        public let Gateway: String
+        public let IPAddress: String
+        public let IPPrefixLen: Int
+        public let MacAddress: String
         public let Networks: [String: DockerContainerSummary.EndpointSettings]
     }
 
@@ -212,7 +288,8 @@ public struct DockerContainerInspect: Encodable, Sendable {
             NetworkMode: container.networkMode,
             Memory: container.memory,
             NanoCpus: container.nanoCpus,
-            AutoRemove: container.autoRemove
+            AutoRemove: container.autoRemove,
+            PortBindings: Self.portBindings(container.portBindings)
         )
         self.Config = .init(
             Hostname: container.hostname,
@@ -223,10 +300,49 @@ public struct DockerContainerInspect: Encodable, Sendable {
             WorkingDir: container.workingDir,
             Labels: container.labels,
             Tty: container.tty,
-            OpenStdin: container.openStdin
+            OpenStdin: container.openStdin,
+            ExposedPorts: Dictionary(uniqueKeysWithValues: container.exposedPorts.map { ($0.dockerKey, .init()) })
         )
-        self.NetworkSettings = .init(Networks: [:])
+        let primary = container.endpoints.first
+        self.NetworkSettings = .init(
+            Bridge: container.networkMode == "bridge" ? "bridge" : "",
+            SandboxID: String(container.id.prefix(12)),
+            Ports: Self.publishedPorts(container.portBindings),
+            Gateway: primary?.gateway ?? "",
+            IPAddress: primary?.ipv4Address ?? "",
+            IPPrefixLen: primary?.ipv4Prefix ?? 0,
+            MacAddress: primary?.macAddress ?? "",
+            Networks: Dictionary(uniqueKeysWithValues: container.endpoints.map {
+                ($0.networkName, DockerContainerSummary.EndpointSettings($0))
+            })
+        )
         self.Mounts = container.mounts.map(DockerContainerSummary.Mount.init)
+    }
+
+    private static func portBindings(_ bindings: [EnginePortBinding]) -> [String: [DockerPortBinding]] {
+        var mapped: [String: [DockerPortBinding]] = [:]
+        for binding in bindings {
+            mapped[binding.dockerKey, default: []].append(
+                DockerPortBinding(
+                    HostIp: binding.hostIP,
+                    HostPort: binding.hostPort == 0 ? "" : String(binding.hostPort)
+                )
+            )
+        }
+        return mapped
+    }
+
+    private static func publishedPorts(_ bindings: [EnginePortBinding]) -> [String: [DockerPortBinding]?] {
+        var mapped: [String: [DockerPortBinding]] = [:]
+        for binding in bindings {
+            mapped[binding.dockerKey, default: []].append(
+                DockerPortBinding(
+                    HostIp: binding.hostIP.isEmpty ? "0.0.0.0" : binding.hostIP,
+                    HostPort: String(binding.hostPort)
+                )
+            )
+        }
+        return mapped.mapValues { .some($0) }
     }
 }
 
