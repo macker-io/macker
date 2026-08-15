@@ -31,6 +31,8 @@ cd daemon
 
 `run` / `create` pull the image if it is missing locally. First `start` can take a while (unpack rootfs + boot the VM).
 
+Container records survive daemon restart (`ps -a`). MicroVMs do not: a graceful stop marks them `Exited (143)`; a crash marks them `Exited (255)`. `--rm` containers that were running are removed on restore. `ps` hides stopped containers.
+
 Stop the daemon with Ctrl+C, then wipe images / containers / volumes / networks (keeps kernel and initfs):
 
 ```bash
@@ -132,7 +134,7 @@ Daemon data lives in `~/Library/Application Support/io.macker.daemon/`:
 
 - `macker.sock` — API socket (removed when the daemon exits)
 - `runtime/vmlinux`, `initfs.ext4` — guest kernel and initfs
-- `content/`, `volumes/`, `containers/`, `networks/` — engine state (`make reset`)
+- `content/`, `volumes/`, `containers/`, `networks/` — engine state (`make reset`). Container metadata is `containers/<id>.json`; MicroVM disks under `containers/<id>/` are recreated on each start.
 
 Guest versions are pinned in `daemon/Sources/ContainerEngine/RuntimePin.json` (`containerization`, `kata`). `daemon/.runtime/` is a packaging cache only (gitignored), not the runtime store.
 

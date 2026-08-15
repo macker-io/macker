@@ -28,7 +28,7 @@ extension EngineManager {
 
     /// Docker `GET /system/df`.
     public func diskUsage() async throws -> EngineDiskUsage {
-        let images = try await listImages()
+        let images = try await listImages(all: true)
         var seen = Set<String>()
         var layersSize: Int64 = 0
         for image in try await imageStore.list() {

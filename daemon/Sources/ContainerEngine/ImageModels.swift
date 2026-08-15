@@ -13,6 +13,8 @@ public struct EngineImageSummary: Sendable {
     public let repoDigests: [String]
     public let created: Date
     public let size: Int64
+
+    public var isDangling: Bool { repoTags.isEmpty }
 }
 
 /// Low-level inspect payload mapped to Docker `GET /images/{name}/json`.

@@ -13,6 +13,7 @@ public actor EngineManager {
     let imageStore: ImageStore
     let eventBus = EventBus()
     let daemonID: String
+    let containerRoot: URL
     let volumeRoot: URL
     let networkRoot: URL
     let portPublisher = PortPublisher()
@@ -32,6 +33,12 @@ public actor EngineManager {
         let store = try ImageStore(path: storePath ?? Self.defaultStorePath)
         self.imageStore = store
         self.daemonID = Self.loadOrCreateDaemonID(in: store.path)
+        let containerRoot = store.path.appendingPathComponent("containers", isDirectory: true)
+        try FileManager.default.createDirectory(at: containerRoot, withIntermediateDirectories: true)
+        self.containerRoot = containerRoot
+        var loadedContainers = Self.loadContainers(from: containerRoot)
+        Self.restoreContainers(&loadedContainers, root: containerRoot)
+        self.containers = loadedContainers
         let volumeRoot = store.path.appendingPathComponent("volumes", isDirectory: true)
         try FileManager.default.createDirectory(at: volumeRoot, withIntermediateDirectories: true)
         self.volumeRoot = volumeRoot

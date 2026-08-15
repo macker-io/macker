@@ -103,7 +103,7 @@ extension EngineManager {
     public func connectNetwork(_ idOrName: String, spec: EngineNetworkConnectSpec) async throws {
         let network = try resolveNetwork(idOrName)
         var container = try resolveContainer(spec.container)
-        if container.state == "running" || container.state == "paused" {
+        if container.isActive {
             throw EngineError.notImplemented("connecting a running container is not implemented")
         }
         if container.endpoints.contains(where: { $0.networkID == network.id }) {
@@ -114,7 +114,7 @@ extension EngineManager {
         if container.networkMode == "none", network.driver != "none" {
             container.networkMode = network.name
         }
-        containers[container.id] = container
+        saveContainer(container)
         await publish(
             EngineEvent(
                 type: "network",
@@ -128,13 +128,13 @@ extension EngineManager {
     public func disconnectNetwork(_ idOrName: String, container idOrContainer: String, force: Bool) async throws {
         let network = try resolveNetwork(idOrName)
         var container = try resolveContainer(idOrContainer)
-        if !force, container.state == "running" || container.state == "paused" {
+        if !force, container.isActive {
             throw EngineError.notImplemented("disconnecting a running container is not implemented")
         }
         guard container.endpoints.contains(where: { $0.networkID == network.id }) else {
             throw EngineError.conflict("container \(container.name) is not connected to \(network.name)")
         }
-        if force, container.state == "running" || container.state == "paused" {
+        if force, container.isActive {
             await stopVM(container.id, timeoutSeconds: 1, signal: .kill)
             await handleVMExit(id: container.id, code: 137, action: "kill")
             container = try resolveContainer(container.id)
@@ -147,7 +147,7 @@ extension EngineManager {
         } else if let primary = container.endpoints.first {
             container.networkMode = primary.networkName
         }
-        containers[container.id] = container
+        saveContainer(container)
         await publish(
             EngineEvent(
                 type: "network",
@@ -295,7 +295,7 @@ extension EngineManager {
             )
         }
         updated.portBindings = published
-        containers[record.id] = updated
+        saveContainer(updated)
     }
 
     func stopPortPublishers(_ containerID: String) {

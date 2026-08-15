@@ -127,7 +127,7 @@ extension EngineManager {
             continuation.yield(container.logs)
         }
 
-        let keepOpen = (stream || stdin) && (container.state == "running" || container.state == "paused")
+        let keepOpen = (stream || stdin) && container.isActive
         if keepOpen {
             attachSubscribers[container.id, default: [:]][sessionID] = continuation
             await publish(

@@ -62,7 +62,8 @@ extension Router {
     func imagesJSON(_ request: HTTPRequest) async -> HTTPResponse {
         do {
             let filters = Self.parseFilters(request.query["filters"])
-            return Self.jsonOK(try await engine.listImages(filters: filters).map(DockerImageSummary.init))
+            let images = try await engine.listImages(all: Self.queryFlag(request.query["all"]), filters: filters)
+            return Self.jsonOK(images.map(DockerImageSummary.init))
         } catch {
             return Self.jsonError(status: 500, message: error.localizedDescription)
         }

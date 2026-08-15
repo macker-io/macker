@@ -40,7 +40,7 @@ extension EngineManager {
         let interfaces: [any Interface]
         do {
             interfaces = try allocateInterfaces(for: &prepared)
-            containers[prepared.id] = prepared
+            saveContainer(prepared)
         } catch {
             releaseInterfaces(record.id)
             throw error
@@ -167,12 +167,8 @@ extension EngineManager {
 
     func handleVMExit(id: String, code: Int, action: String) async {
         await teardownVM(id)
-        guard var record = containers[id] else { return }
-        guard record.state == "running" || record.state == "paused" else { return }
-        if record.autoRemove {
-            resetContainerFiles(id)
-        }
-        try? await finish(container: &record, exitCode: code, action: action, status: "Exited (\(code))")
+        guard var record = containers[id], record.isActive else { return }
+        await finish(container: &record, exitCode: code, action: action)
     }
 
     func appendOutput(id: String, text: String) {
@@ -180,6 +176,7 @@ extension EngineManager {
         if var record = containers[id] {
             record.logs += text
             containers[id] = record
+            appendLogFile(id: id, text: text)
         }
         if let subscribers = attachSubscribers[id] {
             for continuation in subscribers.values {
@@ -195,11 +192,7 @@ extension EngineManager {
     }
 
     func resetContainerFiles(_ id: String) {
-        let path = imageStore.path.appendingPathComponent("containers", isDirectory: true)
-            .appendingPathComponent(id, isDirectory: true)
-        if FileManager.default.fileExists(atPath: path.path) {
-            try? FileManager.default.removeItem(at: path)
-        }
+        Self.removeRuntimeDirectory(id, root: containerRoot)
     }
 
     func pauseVM(_ id: String) async throws {

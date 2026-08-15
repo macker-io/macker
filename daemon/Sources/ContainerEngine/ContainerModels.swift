@@ -107,8 +107,8 @@ public struct EngineContainerCreateSpec: Sendable {
     }
 }
 
-/// Full in-process container record backing the Docker Container API.
-public struct EngineContainer: Sendable {
+/// Full container record backing the Docker Container API. Persisted as `{store}/containers/{id}.json`.
+public struct EngineContainer: Sendable, Codable {
     public var id: String
     public var name: String
     public var image: String
@@ -120,12 +120,11 @@ public struct EngineContainer: Sendable {
     public var hostname: String
     public var labels: [String: String]
     public var state: String
-    public var status: String
     public var created: Date
     public var startedAt: Date?
     public var finishedAt: Date?
     public var exitCode: Int
-    public var logs: String
+    public var logs: String = ""
     public var autoRemove: Bool
     public var memory: Int64
     public var nanoCpus: Int64
@@ -137,6 +136,32 @@ public struct EngineContainer: Sendable {
     public var portBindings: [EnginePortBinding] = []
     public var exposedPorts: [EnginePortBinding] = []
 
+    enum CodingKeys: String, CodingKey {
+        case id, name, image, imageID, command, env, workingDir, user, hostname, labels
+        case state, created, startedAt, finishedAt, exitCode, autoRemove, memory, nanoCpus
+        case networkMode, tty, openStdin, mounts, endpoints, portBindings, exposedPorts
+    }
+
+    public var isActive: Bool { state == "running" || state == "paused" }
+
+    /// Docker `ps` STATUS: `Up 3 minutes`, `Exited (0) 10 seconds ago`.
+    public var dockerStatus: String {
+        switch state {
+        case "created":
+            return "Created"
+        case "running":
+            return "Up \(Self.humanDuration(since: startedAt ?? created))"
+        case "paused":
+            return "Up \(Self.humanDuration(since: startedAt ?? created)) (Paused)"
+        case "dead":
+            return "Dead"
+        default:
+            let body = "Exited (\(exitCode))"
+            guard let finishedAt else { return body }
+            return "\(body) \(Self.humanDuration(since: finishedAt)) ago"
+        }
+    }
+
     public var summary: EngineContainerSummary {
         EngineContainerSummary(
             id: id,
@@ -146,12 +171,31 @@ public struct EngineContainer: Sendable {
             command: command.joined(separator: " "),
             labels: labels,
             state: state,
-            status: status,
+            status: dockerStatus,
             created: created,
             networkMode: networkMode,
             ports: portBindings,
             endpoints: endpoints
         )
+    }
+
+    static func humanDuration(since date: Date) -> String {
+        let seconds = max(0, Int(Date().timeIntervalSince(date)))
+        if seconds < 1 { return "Less than a second" }
+        if seconds < 60 { return seconds == 1 ? "1 second" : "\(seconds) seconds" }
+        let minutes = seconds / 60
+        if minutes == 1 { return "About a minute" }
+        if minutes < 60 { return "\(minutes) minutes" }
+        let hours = Int((Double(seconds) / 3600.0).rounded())
+        if hours == 1 { return "About an hour" }
+        if hours < 48 { return "\(hours) hours" }
+        let days = hours / 24
+        if days < 14 { return "\(days) days" }
+        let weeks = days / 7
+        if weeks < 8 { return "\(weeks) weeks" }
+        let months = days / 30
+        if months < 24 { return "\(months) months" }
+        return "\(days / 365) years"
     }
 }
 

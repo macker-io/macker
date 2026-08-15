@@ -55,6 +55,7 @@ struct DaemonApp {
 
         await signals.wait()
         logger.info("shutdown signal received, stopping")
+        await engine.shutdown()
         await server.stop()
         _ = await serverTask.result
     }

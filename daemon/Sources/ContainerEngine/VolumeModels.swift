@@ -61,7 +61,7 @@ public struct EngineVolumeRequest: Sendable {
     }
 }
 
-public struct EngineMount: Sendable {
+public struct EngineMount: Sendable, Codable {
     public var type: String
     public var name: String
     public var source: String

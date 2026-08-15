@@ -32,13 +32,21 @@ struct Push: ParsableCommand {
     }
 }
 
+struct ImageListOptions: ParsableArguments {
+    @Flag(name: .shortAndLong, help: "Show all images (default hides dangling images).")
+    var all = false
+}
+
 struct Images: ParsableCommand {
     static let configuration = CommandConfiguration(abstract: "List images.")
 
-    func run() throws { try Self.list() }
+    @OptionGroup var options: ImageListOptions
 
-    static func list() throws {
-        let images = try DaemonAPI.decode([ImageSummary].self, from: DaemonAPI.get("/images/json"))
+    func run() throws { try Self.list(all: options.all) }
+
+    static func list(all: Bool = false) throws {
+        let path = all ? "/images/json?all=1" : "/images/json"
+        let images = try DaemonAPI.decode([ImageSummary].self, from: DaemonAPI.get(path))
         var rows: [[String]] = []
         for image in images {
             let tags = image.RepoTags?.filter { !$0.isEmpty } ?? []
@@ -180,7 +188,10 @@ struct ImageGroup: ParsableCommand {
 
 struct ImageLs: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "ls", abstract: "List images.")
-    func run() throws { try Images.list() }
+
+    @OptionGroup var options: ImageListOptions
+
+    func run() throws { try Images.list(all: options.all) }
 }
 
 struct ImageRm: ParsableCommand {

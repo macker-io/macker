@@ -3,10 +3,7 @@ import Foundation
 
 extension EngineManager {
     public func listContainers(all: Bool = true, filters: [String: [String]] = [:]) -> [EngineContainerSummary] {
-        var items = containers.values.map(\.summary)
-        if !all {
-            items = items.filter { $0.state == "running" || $0.state == "paused" }
-        }
+        var items = containers.values.filter { all || $0.isActive }.map(\.summary)
         if let names = filters["name"], !names.isEmpty {
             items = items.filter { item in names.contains { needle in item.names.contains { $0.contains(needle) } } }
         }
@@ -50,7 +47,6 @@ extension EngineManager {
             hostname: spec.hostname.isEmpty ? String(id.prefix(12)) : spec.hostname,
             labels: spec.labels,
             state: "created",
-            status: "Created",
             created: now,
             startedAt: nil,
             finishedAt: nil,
@@ -67,6 +63,7 @@ extension EngineManager {
             portBindings: portBindings,
             exposedPorts: exposedPorts
         )
+        try persistContainer(record)
         containers[id] = record
         await publish(EngineEvent(type: "container", action: "create", actorID: id, attributes: ["name": name, "image": spec.image]))
         var warnings = attached.warnings
@@ -91,11 +88,10 @@ extension EngineManager {
         try await bootContainer(container)
         container = try resolveContainer(container.id)
         container.state = "running"
-        container.status = "Up"
         container.startedAt = Date()
         container.finishedAt = nil
         container.exitCode = 0
-        containers[container.id] = container
+        saveContainer(container)
         watchVM(container.id)
         await publish(EngineEvent(type: "container", action: "start", actorID: container.id, attributes: ["name": container.name, "image": container.image]))
         return true
@@ -112,7 +108,7 @@ extension EngineManager {
     }
 
     public func restartContainer(_ idOrName: String, timeoutSeconds: Int = 10) async throws {
-        if (try? resolveContainer(idOrName).state) == "running" || (try? resolveContainer(idOrName).state) == "paused" {
+        if (try? resolveContainer(idOrName))?.isActive == true {
             _ = try await stopContainer(idOrName, timeoutSeconds: timeoutSeconds)
         }
         _ = try await startContainer(idOrName)
@@ -122,7 +118,7 @@ extension EngineManager {
 
     public func killContainer(_ idOrName: String, signal: String) async throws {
         let container = try resolveContainer(idOrName)
-        guard container.state == "running" || container.state == "paused" else {
+        guard container.isActive else {
             throw EngineError.conflict("container \(container.id) is not running")
         }
         let parsed = (try? Signal(signal)) ?? .term
@@ -139,8 +135,7 @@ extension EngineManager {
         }
         try await pauseVM(container.id)
         container.state = "paused"
-        container.status = "Paused"
-        containers[container.id] = container
+        saveContainer(container)
         await publish(EngineEvent(type: "container", action: "pause", actorID: container.id, attributes: ["name": container.name]))
     }
 
@@ -151,8 +146,7 @@ extension EngineManager {
         }
         try await resumeVM(container.id)
         container.state = "running"
-        container.status = "Up"
-        containers[container.id] = container
+        saveContainer(container)
         await publish(EngineEvent(type: "container", action: "unpause", actorID: container.id, attributes: ["name": container.name]))
     }
 
@@ -161,7 +155,7 @@ extension EngineManager {
         let name = try uniqueName(newName)
         let old = container.name
         container.name = name
-        containers[container.id] = container
+        saveContainer(container)
         await publish(EngineEvent(type: "container", action: "rename", actorID: container.id, attributes: ["name": name, "oldName": old]))
     }
 
@@ -176,9 +170,8 @@ extension EngineManager {
     }
 
     public func deleteContainer(_ idOrName: String, force: Bool, removeAnonymousVolumes: Bool) async throws {
-        _ = removeAnonymousVolumes
         let container = try resolveContainer(idOrName)
-        if container.state == "running" || container.state == "paused" {
+        if container.isActive {
             guard force else {
                 throw EngineError.conflict("cannot remove running container \(container.id): stop or use force")
             }
@@ -188,11 +181,10 @@ extension EngineManager {
         let remaining = try? resolveContainer(container.id)
         let anonymous = (remaining ?? container).mounts.filter(\.anonymous).map(\.name)
         await teardownVM(container.id)
-        resetContainerFiles(container.id)
-        containers[container.id] = nil
         finishWaiters(id: container.id, code: container.exitCode)
         finishAttachSubscribers(container.id, extra: nil)
         await finishExecs(forContainer: container.id, code: container.exitCode)
+        forgetContainer(container.id)
         if removeAnonymousVolumes {
             for name in anonymous where !name.isEmpty {
                 try? await deleteVolume(name, force: true)
@@ -205,13 +197,12 @@ extension EngineManager {
         let stopped = containers.values.filter { $0.state == "exited" || $0.state == "created" || $0.state == "dead" }
         var deleted: [String] = []
         for container in stopped {
-            reclaimContainerRuntime(container.id)
-            containers[container.id] = nil
             finishAttachSubscribers(container.id, extra: nil)
             await finishExecs(forContainer: container.id, code: 0)
             for (id, exec) in execs where exec.containerID == container.id {
                 execs[id] = nil
             }
+            forgetContainer(container.id)
             deleted.append(container.id)
             await publish(EngineEvent(type: "container", action: "destroy", actorID: container.id, attributes: ["name": container.name]))
         }
@@ -231,13 +222,13 @@ extension EngineManager {
         if let nanoCpus {
             container.nanoCpus = nanoCpus
         }
-        containers[container.id] = container
+        saveContainer(container)
         await publish(EngineEvent(type: "container", action: "update", actorID: container.id, attributes: ["name": container.name]))
     }
 
     public func containerTop(_ idOrName: String) async throws -> EngineContainerTop {
         let container = try resolveContainer(idOrName)
-        guard container.state == "running" || container.state == "paused" else {
+        guard container.isActive else {
             throw EngineError.conflict("container \(container.id) is not running")
         }
         let cmd = container.command.joined(separator: " ")
@@ -260,16 +251,15 @@ extension EngineManager {
         throw EngineError.containerNotFound("No such container: \(idOrName)")
     }
 
-    func finish(container: inout EngineContainer, exitCode: Int, action: String, status: String) async throws {
+    func finish(container: inout EngineContainer, exitCode: Int, action: String) async {
         container.state = "exited"
-        container.status = status
         container.exitCode = exitCode
         container.finishedAt = Date()
         let id = container.id
         if container.autoRemove {
-            containers[id] = nil
+            forgetContainer(id)
         } else {
-            containers[id] = container
+            saveContainer(container)
         }
         finishWaiters(id: id, code: exitCode)
         finishAttachSubscribers(id, extra: "container \(String(id.prefix(12))) \(action)\n")
@@ -296,5 +286,129 @@ extension EngineManager {
             throw EngineError.conflict("Conflict. The container name \"/\(name)\" is already in use")
         }
         return name
+    }
+
+    public func shutdown() async {
+        let ids = containers.values.filter(\.isActive).map(\.id)
+        for id in ids {
+            _ = try? await stopContainer(id, timeoutSeconds: 10)
+        }
+    }
+
+    func saveContainer(_ container: EngineContainer) {
+        containers[container.id] = container
+        try? persistContainer(container)
+    }
+
+    func forgetContainer(_ id: String) {
+        stopPortPublishers(id)
+        releaseInterfaces(id)
+        containers[id] = nil
+        removeContainerFiles(id)
+    }
+
+    static func loadContainers(from root: URL) -> [String: EngineContainer] {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let items = try? FileManager.default.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return [:]
+        }
+
+        var loaded: [String: EngineContainer] = [:]
+        for file in items where file.pathExtension == "json" {
+            guard let data = try? Data(contentsOf: file),
+                var container = try? decoder.decode(EngineContainer.self, from: data)
+            else {
+                continue
+            }
+            let logFile = Self.logURL(id: container.id, root: root)
+            container.logs = (try? String(contentsOf: logFile, encoding: .utf8)) ?? ""
+            loaded[container.id] = container
+        }
+        return loaded
+    }
+
+    static func restoreContainers(_ containers: inout [String: EngineContainer], root: URL) {
+        let now = Date()
+        var removed: [String] = []
+        for (id, var container) in containers {
+            guard container.isActive else { continue }
+            if container.autoRemove {
+                removed.append(id)
+                continue
+            }
+            container.state = "exited"
+            container.exitCode = 255
+            container.finishedAt = now
+            containers[id] = container
+            try? persistContainer(container, root: root)
+            removeRuntimeDirectory(id, root: root)
+        }
+        for id in removed {
+            containers[id] = nil
+            removeContainerFiles(id, root: root)
+        }
+    }
+
+    private func persistContainer(_ container: EngineContainer) throws {
+        try Self.persistContainer(container, root: containerRoot)
+    }
+
+    private static func persistContainer(_ container: EngineContainer, root: URL) throws {
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
+        try encoder.encode(container).write(to: stateURL(id: container.id, root: root), options: .atomic)
+    }
+
+    private func removeContainerFiles(_ id: String) {
+        Self.removeContainerFiles(id, root: containerRoot)
+    }
+
+    private static func removeContainerFiles(_ id: String, root: URL) {
+        let fm = FileManager.default
+        for url in [stateURL(id: id, root: root), logURL(id: id, root: root)] {
+            if fm.fileExists(atPath: url.path) {
+                try? fm.removeItem(at: url)
+            }
+        }
+        removeRuntimeDirectory(id, root: root)
+    }
+
+    static func removeRuntimeDirectory(_ id: String, root: URL) {
+        let path = runtimeURL(id: id, root: root)
+        if FileManager.default.fileExists(atPath: path.path) {
+            try? FileManager.default.removeItem(at: path)
+        }
+    }
+
+    func appendLogFile(id: String, text: String) {
+        let url = Self.logURL(id: id, root: containerRoot)
+        let data = Data(text.utf8)
+        if !FileManager.default.fileExists(atPath: url.path) {
+            FileManager.default.createFile(atPath: url.path, contents: data)
+            return
+        }
+        guard let handle = try? FileHandle(forWritingTo: url) else { return }
+        defer { try? handle.close() }
+        _ = try? handle.seekToEnd()
+        try? handle.write(contentsOf: data)
+    }
+
+    private static func stateURL(id: String, root: URL) -> URL {
+        root.appendingPathComponent("\(id).json")
+    }
+
+    private static func logURL(id: String, root: URL) -> URL {
+        root.appendingPathComponent("\(id).log")
+    }
+
+    private static func runtimeURL(id: String, root: URL) -> URL {
+        root.appendingPathComponent(id, isDirectory: true)
     }
 }

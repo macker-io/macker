@@ -66,7 +66,8 @@ extension EngineManager {
     }
 
     /// Local OCI images grouped by digest, with size / created metadata.
-    public func listImages(filters: [String: [String]] = [:]) async throws -> [EngineImageSummary] {
+    /// `all: false` hides dangling (untagged) images, matching `GET /images/json`.
+    public func listImages(all: Bool = true, filters: [String: [String]] = [:]) async throws -> [EngineImageSummary] {
         let images = try await imageStore.list()
         var groups: [String: [Containerization.Image]] = [:]
         for image in images {
@@ -100,7 +101,9 @@ extension EngineManager {
             }
         }
         if FilterMatch.isTrue(filters["dangling"]) {
-            result = result.filter(\.repoTags.isEmpty)
+            result = result.filter(\.isDangling)
+        } else if FilterMatch.isFalse(filters["dangling"]) || !all {
+            result = result.filter { !$0.isDangling }
         }
         return result
     }
