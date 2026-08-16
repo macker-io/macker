@@ -36,14 +36,8 @@ extension EngineManager {
             throw EngineError.invalidArgument("you must choose at least one of logs, stream or stdin")
         }
 
-        let replay: [EngineIOChunk]
-        if logs, !container.logs.isEmpty {
-            replay = [EngineIOChunk(data: Data(container.logs.utf8), stdout: true)]
-        } else {
-            replay = []
-        }
-
         let keepOpen = stream || stdin
+        let replay = attachReplay(container, includeLogs: logs, includeCurrentLine: keepOpen)
         if keepOpen {
             if container.state == "paused" {
                 throw EngineError.conflict("You cannot attach to a paused container, unpause it first")
@@ -95,6 +89,24 @@ extension EngineManager {
             stdin: stdin,
             chunks: chunks
         )
+    }
+
+    /// Historical logs, then the in-progress TTY line. Live attach only sees
+    /// bytes that arrive after subscribe, so without this replay a reattach
+    /// sits blank until the shell prints again.
+    private func attachReplay(
+        _ container: EngineContainer,
+        includeLogs: Bool,
+        includeCurrentLine: Bool
+    ) -> [EngineIOChunk] {
+        var chunks: [EngineIOChunk] = []
+        if includeLogs, !container.logs.isEmpty {
+            chunks.append(EngineIOChunk(data: Data(container.logs.utf8), stdout: true))
+        }
+        if includeCurrentLine, container.tty, let line = ttySessions[container.id]?.currentLine, !line.isEmpty {
+            chunks.append(EngineIOChunk(data: line, stdout: true))
+        }
+        return chunks
     }
 
     private func finishedSession(

@@ -9,10 +9,16 @@ import Foundation
 ///
 /// Attach keeps live control sequences (so the prompt can redraw) but drops DSR
 /// queries and the extra blank line after `^C`. Logs are cooked into plain text.
+///
+/// `currentLine` is that same cooked in-progress line. A new attach client has
+/// no PTY history, so the engine replays it (usually the shell prompt).
 struct TTYSession: Sendable {
     private var pending = Data()
     private var collapse = IntrCollapse()
     private var cooker = Cooker()
+
+    /// Cooked bytes still on the current line (no trailing newline).
+    var currentLine: Data { cooker.currentLine }
 
     mutating func ingest(_ data: Data) -> (attach: Data, log: String) {
         let stripped = DeviceStatus.strip(data, pending: &pending)
@@ -140,6 +146,8 @@ private struct Cooker: Sendable {
     private enum Mode { case text, esc, csi, osc }
     private var mode = Mode.text
     private var oscEsc = false
+
+    var currentLine: Data { Data(line) }
 
     mutating func ingest(_ data: Data) -> String {
         var out = Data()

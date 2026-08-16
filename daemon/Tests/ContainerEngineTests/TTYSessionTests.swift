@@ -24,7 +24,30 @@ struct TTYSessionTests {
         let output = session.ingest(Data("/ # \u{1b}[6n".utf8))
         #expect(String(decoding: output.attach, as: UTF8.self) == "/ # ")
         #expect(output.log.isEmpty)
+        #expect(String(decoding: session.currentLine, as: UTF8.self) == "/ # ")
         #expect(session.finish() == "/ # ")
+        #expect(session.currentLine.isEmpty)
+    }
+
+    @Test func currentLineTracksPromptAcrossRedraw() {
+        var session = TTYSession()
+        _ = session.ingest(Data("/ # \u{1b}[6n".utf8))
+        #expect(String(decoding: session.currentLine, as: UTF8.self) == "/ # ")
+
+        _ = session.ingest(Data("ls\r\n".utf8))
+        #expect(session.currentLine.isEmpty)
+
+        _ = session.ingest(Data("\r/ # \u{1b}[J\u{1b}[6n".utf8))
+        #expect(String(decoding: session.currentLine, as: UTF8.self) == "/ # ")
+    }
+
+    @Test func currentLineIncludesTypedTextAndDropsColor() {
+        var session = TTYSession()
+        _ = session.ingest(Data("\u{1b}[32m/ #\u{1b}[0m ".utf8))
+        #expect(String(decoding: session.currentLine, as: UTF8.self) == "/ # ")
+
+        _ = session.ingest(Data("ls".utf8))
+        #expect(String(decoding: session.currentLine, as: UTF8.self) == "/ # ls")
     }
 
     @Test func ingestCollapsesDoubleNewlineAfterCtrlC() {
