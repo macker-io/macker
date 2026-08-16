@@ -213,6 +213,26 @@ public struct EngineContainerTop: Sendable {
     public let processes: [[String]]
 }
 
+public struct EngineContainerStats: Sendable {
+    public var read: Date
+    public var id: String
+    public var name: String
+    public var cpuTotal: UInt64
+    public var cpuSystem: UInt64
+    public var preCPUTotal: UInt64
+    public var preCPUSystem: UInt64
+    public var onlineCPUs: Int
+    public var memoryUsage: UInt64
+    public var memoryLimit: UInt64
+    public var networks: [String: EngineNetworkIO]
+    public var pids: Int
+}
+
+public struct EngineNetworkIO: Sendable {
+    public var rxBytes: UInt64
+    public var txBytes: UInt64
+}
+
 public struct EngineContainerWaitResult: Sendable {
     public let statusCode: Int
 }

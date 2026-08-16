@@ -239,16 +239,59 @@ extension EngineManager {
         await publish(EngineEvent(type: "container", action: "update", actorID: container.id, attributes: ["name": container.name]))
     }
 
-    public func containerTop(_ idOrName: String) async throws -> EngineContainerTop {
+    public func containerTop(_ idOrName: String, psArgs: String? = nil) async throws -> EngineContainerTop {
         let container = try resolveContainer(idOrName)
         guard container.isActive else {
             throw EngineError.conflict("container \(container.id) is not running")
         }
-        let cmd = container.command.joined(separator: " ")
-        return EngineContainerTop(
-            titles: ["UID", "PID", "PPID", "C", "STIME", "TTY", "TIME", "CMD"],
-            processes: [["root", "1", "0", "0", "00:00", "?", "00:00:00", cmd]]
+        switch GuestProc.topSource(psArgs) {
+        case .guestPS(let command):
+            let result = try await runGuest(container.id, command: command)
+            guard !result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw EngineError.runtimeUnavailable("exec: \"ps\": no process table")
+            }
+            return GuestProc.parsePS(result.stdout)
+        case .proc:
+            return try await readGuestProcessTable(container.id)
+        }
+    }
+
+    public func containerStats(_ idOrName: String) async throws -> EngineContainerStats {
+        let container = try resolveContainer(idOrName)
+        if container.state == "paused" {
+            if let last = lastStats[container.id] {
+                return last
+            }
+            throw EngineError.conflict("cannot retrieve stats from a paused container")
+        }
+        guard container.state == "running" else {
+            throw EngineError.conflict("container \(container.id) is not running")
+        }
+        var snapshot = try await readGuestSnapshot(container.id)
+        if statsSamples[container.id] == nil {
+            statsSamples[container.id] = (snapshot.busyJiffies, snapshot.totalJiffies)
+            try await Task.sleep(for: .milliseconds(200))
+            snapshot = try await readGuestSnapshot(container.id)
+        }
+        let previous = statsSamples[container.id]
+        statsSamples[container.id] = (snapshot.busyJiffies, snapshot.totalJiffies)
+        let limit = container.memory > 0 ? UInt64(container.memory) : max(snapshot.memoryTotal, 1)
+        let stats = EngineContainerStats(
+            read: Date(),
+            id: container.id,
+            name: "/\(container.name)",
+            cpuTotal: GuestProc.cpuNanoseconds(jiffies: snapshot.busyJiffies),
+            cpuSystem: GuestProc.cpuNanoseconds(jiffies: snapshot.totalJiffies),
+            preCPUTotal: GuestProc.cpuNanoseconds(jiffies: previous?.busy ?? 0),
+            preCPUSystem: GuestProc.cpuNanoseconds(jiffies: previous?.total ?? 0),
+            onlineCPUs: snapshot.onlineCPUs,
+            memoryUsage: snapshot.memoryUsage,
+            memoryLimit: limit,
+            networks: snapshot.networks.mapValues { EngineNetworkIO(rxBytes: $0.rxBytes, txBytes: $0.txBytes) },
+            pids: snapshot.pids
         )
+        lastStats[container.id] = stats
+        return stats
     }
 
     func resolveContainer(_ idOrName: String) throws -> EngineContainer {
@@ -318,6 +361,8 @@ extension EngineManager {
         releaseInterfaces(id)
         containers[id] = nil
         ttySessions[id] = nil
+        statsSamples[id] = nil
+        lastStats[id] = nil
         removeContainerFiles(id)
     }
 

@@ -381,36 +381,73 @@ public struct DockerUpdateContainerResponse: Encodable, Sendable {
 
 public struct DockerContainerStats: Encodable, Sendable {
     public let read: String
+    public let preread: String
+    public let id: String
+    public let name: String
     public let cpu_stats: CPUStats
     public let precpu_stats: CPUStats
     public let memory_stats: MemoryStats
     public let networks: [String: NetworkStats]
+    public let pids_stats: PidsStats
 
     public struct CPUStats: Encodable, Sendable {
         public let cpu_usage: CPUUsage
-        public let system_cpu_usage: Int
+        public let system_cpu_usage: UInt64
         public let online_cpus: Int
     }
 
     public struct CPUUsage: Encodable, Sendable {
-        public let total_usage: Int
+        public let total_usage: UInt64
     }
 
     public struct MemoryStats: Encodable, Sendable {
-        public let usage: Int64
-        public let limit: Int64
+        public let usage: UInt64
+        public let limit: UInt64
     }
 
     public struct NetworkStats: Encodable, Sendable {
-        public let rx_bytes: Int
-        public let tx_bytes: Int
+        public let rx_bytes: UInt64
+        public let tx_bytes: UInt64
+        public let rx_packets: UInt64
+        public let tx_packets: UInt64
+        public let rx_errors: UInt64
+        public let tx_errors: UInt64
+        public let rx_dropped: UInt64
+        public let tx_dropped: UInt64
     }
 
-    public init(memoryLimit: Int64) {
-        self.read = ISO8601DateFormatter().string(from: Date())
-        self.cpu_stats = .init(cpu_usage: .init(total_usage: 0), system_cpu_usage: 0, online_cpus: 1)
-        self.precpu_stats = .init(cpu_usage: .init(total_usage: 0), system_cpu_usage: 0, online_cpus: 1)
-        self.memory_stats = .init(usage: 0, limit: memoryLimit > 0 ? memoryLimit : 1_073_741_824)
-        self.networks = [:]
+    public struct PidsStats: Encodable, Sendable {
+        public let current: Int
+    }
+
+    public init(_ stats: EngineContainerStats) {
+        self.read = ISO8601.string(from: stats.read)
+        self.preread = ISO8601.string(from: stats.read.addingTimeInterval(-1))
+        self.id = stats.id
+        self.name = stats.name
+        self.cpu_stats = .init(
+            cpu_usage: .init(total_usage: stats.cpuTotal),
+            system_cpu_usage: stats.cpuSystem,
+            online_cpus: stats.onlineCPUs
+        )
+        self.precpu_stats = .init(
+            cpu_usage: .init(total_usage: stats.preCPUTotal),
+            system_cpu_usage: stats.preCPUSystem,
+            online_cpus: stats.onlineCPUs
+        )
+        self.memory_stats = .init(usage: stats.memoryUsage, limit: stats.memoryLimit)
+        self.networks = stats.networks.mapValues {
+            .init(
+                rx_bytes: $0.rxBytes,
+                tx_bytes: $0.txBytes,
+                rx_packets: 0,
+                tx_packets: 0,
+                rx_errors: 0,
+                tx_errors: 0,
+                rx_dropped: 0,
+                tx_dropped: 0
+            )
+        }
+        self.pids_stats = .init(current: stats.pids)
     }
 }

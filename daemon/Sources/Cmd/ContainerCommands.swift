@@ -530,20 +530,73 @@ struct Wait: ParsableCommand {
 
 struct Top: ParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Display the running processes of a container.")
+
+    @Option(name: .customLong("ps-args"), help: "Arguments to pass to ps.")
+    var psArgs: String?
+
     @Argument var container: String
+
     func run() throws {
-        let top = try DaemonAPI.decode(TopResponse.self, from: DaemonAPI.get("/containers/\(DaemonAPI.path(container))/top"))
+        var path = "/containers/\(DaemonAPI.path(container))/top"
+        if let psArgs {
+            path += "?ps_args=\(DaemonAPI.query(psArgs))"
+        }
+        let top = try DaemonAPI.decode(TopResponse.self, from: DaemonAPI.get(path))
         Table.print(headers: top.Titles, rows: top.Processes)
     }
 }
 
 struct Stats: ParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Display container resource usage statistics.")
-    @Argument var containers: [String]
+    static let configuration = CommandConfiguration(abstract: "Display a live stream of container resource usage statistics.")
+
+    @Flag(name: .customLong("no-stream"), help: "Disable streaming stats and only pull the first result.")
+    var noStream = false
+
+    @Argument var containers: [String] = []
+
     func run() throws {
-        for id in containers {
-            try DaemonAPI.printJSON(try DaemonAPI.requireOK(DaemonAPI.get("/containers/\(DaemonAPI.path(id))/stats")).body)
+        let ids = try Self.resolve(containers)
+        guard !ids.isEmpty else {
+            Table.print(headers: Self.headers, rows: [])
+            return
         }
+        if noStream {
+            Table.print(headers: Self.headers, rows: try ids.map { try Self.row(for: $0) })
+            return
+        }
+        var printed = 0
+        while true {
+            let rows = try ids.map { try Self.row(for: $0) }
+            Self.redraw(headers: Self.headers, rows: rows, previousRows: printed)
+            printed = 1 + rows.count
+            Thread.sleep(forTimeInterval: 1)
+        }
+    }
+
+    private static let headers = [
+        "CONTAINER ID", "NAME", "CPU %", "MEM USAGE / LIMIT", "MEM %", "NET I/O", "PIDS",
+    ]
+
+    private static func resolve(_ names: [String]) throws -> [String] {
+        if !names.isEmpty { return names }
+        let running = try DaemonAPI.decode([ContainerSummary].self, from: DaemonAPI.get("/containers/json"))
+        return running.map(\.Id)
+    }
+
+    private static func row(for id: String) throws -> [String] {
+        let stats = try DaemonAPI.decode(
+            StatsResponse.self,
+            from: DaemonAPI.get("/containers/\(DaemonAPI.path(id))/stats?stream=0", timeoutSeconds: 15)
+        )
+        return stats.row
+    }
+
+    private static func redraw(headers: [String], rows: [[String]], previousRows: Int) {
+        if previousRows > 0, isatty(STDOUT_FILENO) != 0 {
+            fputs("\u{001B}[\(previousRows)A", stdout)
+        }
+        Table.print(headers: headers, rows: rows)
+        fflush(stdout)
     }
 }
 
@@ -739,4 +792,56 @@ private struct ExecInspectResponse: Decodable {
 private struct TopResponse: Decodable {
     var Titles: [String]
     var Processes: [[String]]
+}
+
+private struct StatsResponse: Decodable {
+    var id: String
+    var name: String
+    var cpu_stats: CPU
+    var precpu_stats: CPU
+    var memory_stats: Memory
+    var networks: [String: Net]?
+    var pids_stats: Pids?
+
+    struct CPU: Decodable {
+        var cpu_usage: Usage
+        var system_cpu_usage: UInt64?
+        var online_cpus: Int?
+        struct Usage: Decodable { var total_usage: UInt64 }
+    }
+
+    struct Memory: Decodable {
+        var usage: UInt64
+        var limit: UInt64
+    }
+
+    struct Net: Decodable {
+        var rx_bytes: UInt64
+        var tx_bytes: UInt64
+    }
+
+    struct Pids: Decodable {
+        var current: Int
+    }
+
+    var row: [String] {
+        let cpuDelta = Double(cpu_stats.cpu_usage.total_usage) - Double(precpu_stats.cpu_usage.total_usage)
+        let sysDelta = Double(cpu_stats.system_cpu_usage ?? 0) - Double(precpu_stats.system_cpu_usage ?? 0)
+        let cpus = Double(max(cpu_stats.online_cpus ?? 1, 1))
+        let cpuPercent = sysDelta > 0 ? cpuDelta / sysDelta * cpus * 100 : 0
+        let limit = max(memory_stats.limit, 1)
+        let memPercent = Double(memory_stats.usage) / Double(limit) * 100
+        let rx = networks?.values.reduce(UInt64(0)) { $0 + $1.rx_bytes } ?? 0
+        let tx = networks?.values.reduce(UInt64(0)) { $0 + $1.tx_bytes } ?? 0
+        let name = self.name.hasPrefix("/") ? String(self.name.dropFirst()) : self.name
+        return [
+            Format.shortID(id),
+            name,
+            String(format: "%.2f%%", cpuPercent),
+            "\(Format.size(Int64(clamping: memory_stats.usage))) / \(Format.size(Int64(clamping: limit)))",
+            String(format: "%.2f%%", memPercent),
+            "\(Format.size(Int64(clamping: rx))) / \(Format.size(Int64(clamping: tx)))",
+            "\(pids_stats?.current ?? 0)",
+        ]
+    }
 }

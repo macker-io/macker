@@ -95,11 +95,11 @@ extension Router {
         case .inspect(let id):
             return await inspectContainer(id)
         case .top(let id):
-            return await topContainer(id)
+            return await topContainer(id, request: request)
         case .logs(let id):
             return await logsContainer(id, request: request)
         case .stats(let id):
-            return await statsContainer(id)
+            return await statsContainer(id, request: request)
         case .start(let id):
             return await startContainer(id)
         case .stop(let id):
@@ -215,9 +215,9 @@ extension Router {
         }
     }
 
-    private func topContainer(_ id: String) async -> HTTPResponse {
+    private func topContainer(_ id: String, request: HTTPRequest) async -> HTTPResponse {
         do {
-            let top = try await engine.containerTop(id)
+            let top = try await engine.containerTop(id, psArgs: request.query["ps_args"])
             return HTTPResponse(
                 status: 200,
                 headers: [("Content-Type", "application/json")],
@@ -281,13 +281,44 @@ extension Router {
         }
     }
 
-    private func statsContainer(_ id: String) async -> HTTPResponse {
+    private func statsContainer(_ id: String, request: HTTPRequest) async -> HTTPResponse {
+        let oneShot = Self.queryFlag(request.query["one-shot"])
+        let stream: Bool
+        if oneShot {
+            stream = false
+        } else if request.query["stream"] == nil {
+            stream = true
+        } else {
+            stream = Self.queryFlag(request.query["stream"])
+        }
         do {
-            let container = try await engine.inspectContainer(id)
+            if !stream {
+                let stats = try await engine.containerStats(id)
+                return HTTPResponse(
+                    status: 200,
+                    headers: [("Content-Type", "application/json")],
+                    body: .buffer(JSONBody.encode(DockerContainerStats(stats)))
+                )
+            }
+            let (chunks, continuation) = AsyncStream<ByteBuffer>.makeStream()
+            let engine = self.engine
+            let task = Task {
+                while !Task.isCancelled {
+                    do {
+                        let stats = try await engine.containerStats(id)
+                        continuation.yield(JSONBody.encodeLine(DockerContainerStats(stats)))
+                    } catch {
+                        continuation.finish()
+                        return
+                    }
+                    try? await Task.sleep(for: .seconds(1))
+                }
+                continuation.finish()
+            }
             return HTTPResponse(
                 status: 200,
                 headers: [("Content-Type", "application/json")],
-                body: .buffer(JSONBody.encode(DockerContainerStats(memoryLimit: container.memory)))
+                body: .stream(.init(chunks, onClose: { task.cancel() }))
             )
         } catch {
             return Self.engineError(error)

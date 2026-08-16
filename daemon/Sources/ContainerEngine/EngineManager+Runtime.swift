@@ -172,6 +172,8 @@ extension EngineManager {
         containerStdin[id]?.finish()
         containerStdin[id] = nil
         ttySessions[id] = nil
+        statsSamples[id] = nil
+        lastStats[id] = nil
         stopPortPublishers(id)
         if let linux = vms.removeValue(forKey: id) {
             try? await linux.stop()

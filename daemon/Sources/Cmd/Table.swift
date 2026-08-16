@@ -2,6 +2,8 @@ import Foundation
 
 enum Table {
     static func print(headers: [String], rows: [[String]]) {
+        let headers = headers.map(oneLine)
+        let rows = rows.map { $0.map(oneLine) }
         var widths = headers.map(\.count)
         for row in rows {
             for (index, cell) in row.enumerated() where index < widths.count {
@@ -18,6 +20,13 @@ enum Table {
         for row in rows {
             line(row)
         }
+    }
+
+    private static func oneLine(_ text: String) -> String {
+        text.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 }
 
