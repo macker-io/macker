@@ -4,10 +4,11 @@ import NIOCore
 import os
 
 extension Router {
-    enum NamedExecRoute {
+    enum NamedExecRoute: Equatable {
         case start(String)
         case inspect(String)
         case resize(String)
+        case kill(String)
     }
 
     static func matchNamedExec(method: String, path: String) -> NamedExecRoute? {
@@ -29,6 +30,8 @@ extension Router {
             return .inspect(id)
         case ("POST", "resize"):
             return .resize(id)
+        case ("POST", "kill"):
+            return .kill(id)
         default:
             return nil
         }
@@ -42,6 +45,8 @@ extension Router {
             return await inspectExec(id)
         case .resize(let id):
             return await resizeExec(id, request: request)
+        case .kill(let id):
+            return await killExec(id, request: request)
         }
     }
 
@@ -159,6 +164,15 @@ extension Router {
                 width: Int(request.query["w"] ?? "") ?? 0
             )
             return HTTPResponse(status: 201)
+        } catch {
+            return Self.engineError(error)
+        }
+    }
+
+    private func killExec(_ id: String, request: HTTPRequest) async -> HTTPResponse {
+        do {
+            try await engine.killExec(id, signal: Self.querySignal(request.query["signal"]))
+            return HTTPResponse(status: 204)
         } catch {
             return Self.engineError(error)
         }

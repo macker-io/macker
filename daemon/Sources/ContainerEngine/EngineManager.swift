@@ -88,6 +88,10 @@ public actor EngineManager {
         await eventBus.publish(event)
     }
 
+    static func parsedKillSignal(_ raw: String) -> Signal {
+        (try? Signal(raw)) ?? .term
+    }
+
     static func makeContainerID() -> String {
         let hex = (UUID().uuidString + UUID().uuidString)
             .replacingOccurrences(of: "-", with: "")

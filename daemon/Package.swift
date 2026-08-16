@@ -55,6 +55,7 @@ let package = Package(
             name: "ContainerEngineTests",
             dependencies: [
                 "ContainerEngine",
+                "DockerAPIAdapter",
                 .product(name: "ContainerizationOCI", package: "containerization"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
             ]

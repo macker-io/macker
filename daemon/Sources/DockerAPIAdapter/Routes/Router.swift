@@ -134,6 +134,11 @@ public struct Router: Sendable {
         return ["1", "true", "True", "TRUE", "yes"].contains(raw)
     }
 
+    static func querySignal(_ raw: String?) -> String {
+        guard let raw, !raw.isEmpty else { return "SIGKILL" }
+        return raw
+    }
+
     static func engineError(_ error: Error) -> HTTPResponse {
         if let error = error as? EngineError {
             switch error {

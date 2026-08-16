@@ -121,7 +121,7 @@ extension EngineManager {
         guard container.isActive else {
             throw EngineError.conflict("container \(container.id) is not running")
         }
-        let parsed = (try? Signal(signal)) ?? .term
+        let parsed = Self.parsedKillSignal(signal)
         let code = parsed.rawValue == 9 ? 137 : 128 + Int(parsed.rawValue)
         await stopVM(container.id, timeoutSeconds: 2, signal: parsed)
         await handleVMExit(id: container.id, code: code, action: "kill")

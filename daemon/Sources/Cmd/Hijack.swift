@@ -2,6 +2,52 @@ import ContainerEngine
 import Darwin
 import Foundation
 
+/// Host-side signal proxy for non-TTY sessions. TTY sessions get Ctrl-C as stdin `0x03`.
+struct ProcessSignalProxy {
+    static let forwarded: [(Int32, String)] = [
+        (SIGINT, "SIGINT"),
+        (SIGTERM, "SIGTERM"),
+        (SIGHUP, "SIGHUP"),
+        (SIGQUIT, "SIGQUIT"),
+    ]
+
+    private let sources: [DispatchSourceSignal]
+    private let posixSignals: [Int32]
+
+    init(enabled: Bool, killPath: String) {
+        self.init(enabled: enabled) { name in
+            _ = try? DaemonAPI.post("\(killPath)?signal=\(name)")
+        }
+    }
+
+    init(
+        enabled: Bool,
+        signals: [(Int32, String)] = forwarded,
+        handle: @escaping (String) -> Void
+    ) {
+        guard enabled else {
+            sources = []
+            posixSignals = []
+            return
+        }
+        posixSignals = signals.map(\.0)
+        sources = signals.map { sig, name in
+            signal(sig, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: sig, queue: DispatchQueue.global())
+            source.setEventHandler { handle(name) }
+            source.resume()
+            return source
+        }
+    }
+
+    func restore() {
+        sources.forEach { $0.cancel() }
+        for sig in posixSignals {
+            signal(sig, SIG_DFL)
+        }
+    }
+}
+
 enum TerminalIO {
     static func makeRaw() -> () -> Void {
         var original = termios()

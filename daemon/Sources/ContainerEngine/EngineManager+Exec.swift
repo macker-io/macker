@@ -35,6 +35,14 @@ extension EngineManager {
         try await Self.resize(process, width: width, height: height)
     }
 
+    public func killExec(_ id: String, signal: String) async throws {
+        let exec = try resolveExec(id)
+        guard exec.started, exec.running, let process = execProcesses[id] else {
+            throw EngineError.conflict("exec \(id) is not running")
+        }
+        try await process.kill(Self.parsedKillSignal(signal))
+    }
+
     public func startExec(_ id: String, detach: Bool, tty: Bool?) async throws -> EngineIOSession? {
         var exec = try resolveExec(id)
         if exec.started {

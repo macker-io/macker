@@ -64,7 +64,7 @@ Official `nginx` does not include `wget` / `curl`. Use `cat` on the static files
 | `--rm` | `run` | Remove the container when it exits |
 | `-w` / `-e` / `-u` | `exec` | Working dir, env, user |
 
-Without `-t`, Ctrl-C on foreground `run` stops the container. `attach` without a TTY proxies SIGINT/SIGTERM/SIGHUP/SIGQUIT; with a TTY, `ctrl-p ctrl-q` detaches and leaves the container running. `exec` without `-t` does not forward SIGINT; use `-it` for an interactive shell. `Ctrl-D` / `exit` should restore the host terminal (`stty sane` if it does not).
+Without `-t`, Ctrl-C on foreground `run` stops the container. `attach` without a TTY proxies SIGINT/SIGTERM/SIGHUP/SIGQUIT; with a TTY, `ctrl-p ctrl-q` detaches and leaves the container running. `exec` without `-t` proxies the same signals to the exec process, not the container. `Ctrl-D` / `exit` should restore the host terminal (`stty sane` if it does not).
 
 ## Socket
 

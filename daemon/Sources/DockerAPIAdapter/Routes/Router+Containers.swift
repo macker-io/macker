@@ -356,7 +356,7 @@ extension Router {
 
     private func killContainer(_ id: String, request: HTTPRequest) async -> HTTPResponse {
         do {
-            try await engine.killContainer(id, signal: request.query["signal"] ?? "SIGKILL")
+            try await engine.killContainer(id, signal: Self.querySignal(request.query["signal"]))
             return HTTPResponse(status: 204)
         } catch {
             return Self.engineError(error)

@@ -125,20 +125,10 @@ struct Run: ParsableCommand {
             done.wait()
             throw error
         }
-        var interrupt: DispatchSourceSignal?
-        if !tty {
-            signal(SIGINT, SIG_IGN)
-            let source = DispatchSource.makeSignalSource(signal: SIGINT, queue: DispatchQueue.global())
-            source.setEventHandler {
-                _ = try? DaemonAPI.post("/containers/\(DaemonAPI.path(id))/stop?t=1")
-            }
-            source.resume()
-            interrupt = source
+        let interrupt = ProcessSignalProxy(enabled: !tty, signals: [(SIGINT, "SIGINT")]) { _ in
+            _ = try? DaemonAPI.post("/containers/\(DaemonAPI.path(id))/stop?t=1")
         }
-        defer {
-            interrupt?.cancel()
-            if !tty { signal(SIGINT, SIG_DFL) }
-        }
+        defer { interrupt.restore() }
         do {
             try DaemonAPI.requireOK(DaemonAPI.post("/containers/\(DaemonAPI.path(id))/start", timeoutSeconds: 300))
         } catch {
@@ -365,6 +355,11 @@ struct Exec: ParsableCommand {
             try DaemonAPI.requireOK(DaemonAPI.post("/exec/\(DaemonAPI.path(created.Id))/start", body: start))
             return
         }
+        let proxy = ProcessSignalProxy(
+            enabled: !tty,
+            killPath: "/exec/\(DaemonAPI.path(created.Id))/kill"
+        )
+        defer { proxy.restore() }
         try DaemonAPI.hijack(
             path: "/exec/\(DaemonAPI.path(created.Id))/start",
             body: start,
@@ -428,19 +423,11 @@ struct Attach: ParsableCommand {
             keys = nil
         }
 
-        var proxied: [DispatchSourceSignal] = []
-        if sigProxy, !tty {
-            proxied = Self.proxySignals(container)
-        }
-        defer {
-            proxied.forEach { $0.cancel() }
-            if !proxied.isEmpty {
-                signal(SIGINT, SIG_DFL)
-                signal(SIGTERM, SIG_DFL)
-                signal(SIGHUP, SIG_DFL)
-                signal(SIGQUIT, SIG_DFL)
-            }
-        }
+        let proxy = ProcessSignalProxy(
+            enabled: sigProxy && !tty,
+            killPath: "/containers/\(DaemonAPI.path(container))/kill"
+        )
+        defer { proxy.restore() }
 
         do {
             try DaemonAPI.hijack(
@@ -462,24 +449,6 @@ struct Attach: ParsableCommand {
             throw code
         } catch {
             try DaemonAPI.exitWithDaemonError(error)
-        }
-    }
-
-    private static func proxySignals(_ id: String) -> [DispatchSourceSignal] {
-        let mapped: [(Int32, String)] = [
-            (SIGINT, "SIGINT"),
-            (SIGTERM, "SIGTERM"),
-            (SIGHUP, "SIGHUP"),
-            (SIGQUIT, "SIGQUIT"),
-        ]
-        return mapped.map { sig, name in
-            signal(sig, SIG_IGN)
-            let source = DispatchSource.makeSignalSource(signal: sig, queue: DispatchQueue.global())
-            source.setEventHandler {
-                _ = try? DaemonAPI.post("/containers/\(DaemonAPI.path(id))/kill?signal=\(name)")
-            }
-            source.resume()
-            return source
         }
     }
 }
