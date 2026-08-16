@@ -219,7 +219,7 @@ extension EngineManager {
                 containerID: container.id,
                 tty: tty,
                 stdin: false,
-                includeExitNotice: false
+                kind: .logs
             )
         } else {
             live = nil
@@ -317,6 +317,7 @@ extension EngineManager {
         stopPortPublishers(id)
         releaseInterfaces(id)
         containers[id] = nil
+        ttySessions[id] = nil
         removeContainerFiles(id)
     }
 
@@ -339,7 +340,11 @@ extension EngineManager {
                 continue
             }
             let logFile = Self.logURL(id: container.id, root: root)
-            container.logs = (try? String(contentsOf: logFile, encoding: .utf8)) ?? ""
+            let raw = (try? String(contentsOf: logFile, encoding: .utf8)) ?? ""
+            container.logs = container.tty ? TTYSession.cook(raw) : raw
+            if container.tty, container.logs != raw {
+                try? container.logs.write(to: logFile, atomically: true, encoding: .utf8)
+            }
             loaded[container.id] = container
         }
         return loaded

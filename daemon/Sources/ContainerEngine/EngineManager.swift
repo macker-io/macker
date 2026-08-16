@@ -26,6 +26,7 @@ public actor EngineManager {
     var containerStdin: [String: ProcessStdin] = [:]
     var attachSubscribers: [String: [UUID: EngineIOSubscriber]] = [:]
     var execSubscribers: [String: [UUID: AsyncStream<EngineIOChunk>.Continuation]] = [:]
+    var ttySessions: [String: TTYSession] = [:]
     var volumes: [String: EngineVolume] = [:]
     var networks: [String: EngineNetwork] = [:]
     let networkDataplane = NetworkDataplane()

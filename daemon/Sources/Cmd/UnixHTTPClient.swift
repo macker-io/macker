@@ -75,7 +75,8 @@ enum UnixHTTPClient {
         stdin: Bool,
         tty: Bool,
         resize: ((Int, Int) -> Void)? = nil,
-        onUpgraded: (() -> Void)? = nil
+        onUpgraded: (() -> Void)? = nil,
+        detachKeys: [UInt8]? = nil
     ) throws {
         var reader = try HTTPReader(socketPath: socketPath, timeoutSeconds: nil)
         var restoreTTY: (() -> Void)?
@@ -108,17 +109,18 @@ enum UnixHTTPClient {
         if raw {
             restoreTTY = TerminalIO.makeRaw()
         }
+        onUpgraded?()
+
+        let fd = reader.socketFD
+        if stdin {
+            HijackIO.copyStdin(to: fd, mux: !tty, detachKeys: detachKeys)
+        }
+
         if tty, let resize {
             winch = TerminalIO.watchResize(resize)
             if let size = TerminalIO.windowSize() {
                 resize(size.height, size.width)
             }
-        }
-        onUpgraded?()
-
-        let fd = reader.socketFD
-        if stdin {
-            HijackIO.copyStdin(to: fd, mux: !tty)
         }
 
         var pending = Data()

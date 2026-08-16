@@ -41,11 +41,13 @@ make -C daemon reset
 
 ## Run, attach, and exec
 
-Foreground `run` attaches live stdio (create → attach → start). `-i` keeps stdin open; `-t` allocates a guest TTY (raw host terminal + window resize). `exec` starts another process in a running MicroVM.
+Foreground `run` attaches live stdio (create → attach → start). `-i` keeps stdin open; `-t` allocates a guest TTY (raw host terminal + window resize). `attach` reconnects to a running container. `exec` starts another process in a running MicroVM.
 
 ```bash
 ./.build/debug/macker run --rm alpine echo hello
 ./.build/debug/macker run --rm -it alpine sh
+./.build/debug/macker run -dit --name sh alpine sh
+./.build/debug/macker attach sh
 ./.build/debug/macker run -d --name web -p 18080:80 nginx
 ./.build/debug/macker exec web cat /usr/share/nginx/html/index.html
 ./.build/debug/macker exec -it web sh
@@ -62,7 +64,7 @@ Official `nginx` does not include `wget` / `curl`. Use `cat` on the static files
 | `--rm` | `run` | Remove the container when it exits |
 | `-w` / `-e` / `-u` | `exec` | Working dir, env, user |
 
-Without `-t`, Ctrl-C on foreground `run` stops the container. `exec` without `-t` does not forward SIGINT; use `-it` for an interactive shell. `Ctrl-D` / `exit` should restore the host terminal (`stty sane` if it does not).
+Without `-t`, Ctrl-C on foreground `run` stops the container. `attach` without a TTY proxies SIGINT/SIGTERM/SIGHUP/SIGQUIT; with a TTY, `ctrl-p ctrl-q` detaches and leaves the container running. `exec` without `-t` does not forward SIGINT; use `-it` for an interactive shell. `Ctrl-D` / `exit` should restore the host terminal (`stty sane` if it does not).
 
 ## Socket
 
@@ -101,16 +103,7 @@ vmnet NAT uses the same `com.apple.security.virtualization` entitlement as Apple
 
 ## Roadmap
 
-Daily `bridge` / `host` / `none`, plus `run -it` / `exec`, is in place. Follow-ups, roughly in this order:
-
-| When | Item | Notes |
-| --- | --- | --- |
-| Next | Live `network connect` / `disconnect` | Today endpoints can change only while the container is stopped |
-| Next | Refresh peer names on running containers | `/etc/hosts` is written at start; later joins are invisible until restart |
-| Later | `exec` SIGINT without `-t` | Today only `run` (no TTY) maps Ctrl-C to stop |
-| Later | UDP `-p` | Port proxy is TCP only |
-| Later | `internal` networks | Flag is stored; isolation (no outbound) is incomplete |
-| Later | `macvlan` / `ipvlan` / `--net=container:` / IPv6 | Need extra vmnet / entitlements; not ad-hoc signable |
+Daily `bridge` / `host` / `none`, plus `run -it` / `exec`, is in place. Command completeness, gaps, and the implementation order are in [docs/cli-status.md](docs/cli-status.md).
 
 ## Make targets
 

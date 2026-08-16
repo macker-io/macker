@@ -93,7 +93,8 @@ enum DaemonAPI {
         stdin: Bool,
         tty: Bool,
         resizePath: String? = nil,
-        onUpgraded: (() -> Void)? = nil
+        onUpgraded: (() -> Void)? = nil,
+        detachKeys: [UInt8]? = nil
     ) throws {
         let resize: ((Int, Int) -> Void)?
         if let resizePath {
@@ -111,7 +112,8 @@ enum DaemonAPI {
             stdin: stdin,
             tty: tty,
             resize: resize,
-            onUpgraded: onUpgraded
+            onUpgraded: onUpgraded,
+            detachKeys: detachKeys
         )
     }
 

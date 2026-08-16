@@ -383,6 +383,107 @@ struct Exec: ParsableCommand {
     }
 }
 
+struct Attach: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Attach local standard input, output, and error streams to a running container."
+    )
+
+    @Flag(name: .customLong("no-stdin"), help: "Do not attach STDIN.")
+    var noStdin = false
+
+    @Flag(name: .customLong("sig-proxy"), inversion: .prefixedNo, help: "Proxy received signals to the process.")
+    var sigProxy = true
+
+    @Option(name: .customLong("detach-keys"), help: "Override the key sequence for detaching a container.")
+    var detachKeys: String?
+
+    @Argument var container: String
+
+    func run() throws {
+        let info: AttachInspect
+        do {
+            info = try DaemonAPI.decode(
+                AttachInspect.self,
+                from: DaemonAPI.get("/containers/\(DaemonAPI.path(container))/json")
+            )
+        } catch {
+            try DaemonAPI.exitWithDaemonError(error)
+        }
+        if info.State.Paused == true {
+            throw CLIError.http("You cannot attach to a paused container, unpause it first")
+        }
+        if info.State.Running != true {
+            throw CLIError.http("You cannot attach to a stopped container, start it first")
+        }
+
+        let tty = info.Config.Tty == true
+        let stdin = !noStdin && info.Config.OpenStdin == true
+        var query = "stream=1&stdout=1&stderr=1"
+        if stdin { query += "&stdin=1" }
+
+        let keys: [UInt8]?
+        if stdin {
+            keys = try detachKeys.map(DetachKeys.parse) ?? DetachKeys.default
+        } else {
+            keys = nil
+        }
+
+        var proxied: [DispatchSourceSignal] = []
+        if sigProxy, !tty {
+            proxied = Self.proxySignals(container)
+        }
+        defer {
+            proxied.forEach { $0.cancel() }
+            if !proxied.isEmpty {
+                signal(SIGINT, SIG_DFL)
+                signal(SIGTERM, SIG_DFL)
+                signal(SIGHUP, SIG_DFL)
+                signal(SIGQUIT, SIG_DFL)
+            }
+        }
+
+        do {
+            try DaemonAPI.hijack(
+                path: "/containers/\(DaemonAPI.path(container))/attach?\(query)",
+                stdin: stdin,
+                tty: tty,
+                resizePath: tty ? "/containers/\(DaemonAPI.path(container))/resize" : nil,
+                detachKeys: keys
+            )
+            let after = try DaemonAPI.decode(
+                AttachInspect.self,
+                from: DaemonAPI.get("/containers/\(DaemonAPI.path(container))/json")
+            )
+            if after.State.Running == true { return }
+            if let code = after.State.ExitCode, code != 0 {
+                throw ExitCode(Int32(truncatingIfNeeded: code))
+            }
+        } catch let code as ExitCode {
+            throw code
+        } catch {
+            try DaemonAPI.exitWithDaemonError(error)
+        }
+    }
+
+    private static func proxySignals(_ id: String) -> [DispatchSourceSignal] {
+        let mapped: [(Int32, String)] = [
+            (SIGINT, "SIGINT"),
+            (SIGTERM, "SIGTERM"),
+            (SIGHUP, "SIGHUP"),
+            (SIGQUIT, "SIGQUIT"),
+        ]
+        return mapped.map { sig, name in
+            signal(sig, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: sig, queue: DispatchQueue.global())
+            source.setEventHandler {
+                _ = try? DaemonAPI.post("/containers/\(DaemonAPI.path(id))/kill?signal=\(name)")
+            }
+            source.resume()
+            return source
+        }
+    }
+}
+
 struct Logs: ParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Fetch the logs of a container.")
     @Flag(name: .shortAndLong, help: "Follow log output.")
@@ -515,7 +616,7 @@ struct ContainerGroup: ParsableCommand {
         subcommands: [
             ContainerLs.self, Run.self, Create.self, Start.self, Stop.self, Restart.self, Kill.self,
             ContainerRm.self, Pause.self, Unpause.self, Rename.self, Logs.self, Wait.self, Top.self,
-            Stats.self, Exec.self, ContainerInspect.self, ContainerPrune.self,
+            Stats.self, Attach.self, Exec.self, ContainerInspect.self, ContainerPrune.self,
         ]
     )
 }
@@ -587,6 +688,22 @@ private struct CreateBody: Encodable {
 private struct CreateResponse: Decodable {
     var Id: String
     var Warnings: [String]?
+}
+
+private struct AttachInspect: Decodable {
+    var Config: Config
+    var State: State
+
+    struct Config: Decodable {
+        var Tty: Bool?
+        var OpenStdin: Bool?
+    }
+
+    struct State: Decodable {
+        var Running: Bool?
+        var Paused: Bool?
+        var ExitCode: Int?
+    }
 }
 
 private struct WaitResponse: Decodable {

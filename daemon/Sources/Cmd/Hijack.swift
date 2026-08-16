@@ -40,24 +40,37 @@ enum TerminalIO {
 }
 
 enum HijackIO {
-    static func copyStdin(to fd: Int32, mux: Bool) {
+    static func copyStdin(to fd: Int32, mux: Bool, detachKeys: [UInt8]? = nil) {
         DispatchQueue.global(qos: .userInitiated).async {
+            var scanner = DetachScanner(keys: detachKeys ?? [])
             var buf = [UInt8](repeating: 0, count: 4096)
             while true {
                 let n = buf.withUnsafeMutableBytes { raw in
                     Darwin.read(STDIN_FILENO, raw.baseAddress, raw.count)
                 }
-                if n <= 0 { break }
-                var payload = Data(buf.prefix(n))
-                if mux {
-                    payload = DockerStdio.stdinFrame(payload)
+                if n < 0 && errno == EINTR { continue }
+                if n <= 0 {
+                    let rest = scanner.flush()
+                    if !rest.isEmpty, !writePayload(Data(rest), to: fd, mux: mux) { return }
+                    break
                 }
-                if !writeFD(fd, payload) { break }
+                let bytes = Array(buf.prefix(n))
+                let (out, detach) = scanner.ingest(bytes)
+                if !out.isEmpty, !writePayload(Data(out), to: fd, mux: mux) { return }
+                if detach {
+                    _ = Darwin.shutdown(fd, SHUT_RDWR)
+                    return
+                }
             }
             if mux {
                 _ = writeFD(fd, DockerStdio.stdinFrame(Data()))
             }
         }
+    }
+
+    @discardableResult
+    private static func writePayload(_ data: Data, to fd: Int32, mux: Bool) -> Bool {
+        writeFD(fd, mux ? DockerStdio.stdinFrame(data) : data)
     }
 
     static func writeOutput(_ data: Data, tty: Bool, pending: inout Data) {
@@ -87,5 +100,60 @@ enum HijackIO {
             }
             return true
         }
+    }
+}
+
+enum DetachKeys {
+    static let `default`: [UInt8] = [0x10, 0x11]
+
+    static func parse(_ spec: String) throws -> [UInt8] {
+        let parts = spec.split(separator: ",", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+        guard !parts.isEmpty, parts.allSatisfy({ !$0.isEmpty }) else {
+            throw CLIError.http("invalid detach keys: \(spec)")
+        }
+        return try parts.map { token in
+            if token.hasPrefix("ctrl-") {
+                let letter = token.dropFirst(5)
+                guard letter.count == 1, let scalar = letter.utf8.first, (97...122).contains(scalar) else {
+                    throw CLIError.http("invalid detach keys: \(spec)")
+                }
+                return scalar - 96
+            }
+            guard token.utf8.count == 1, let scalar = token.utf8.first else {
+                throw CLIError.http("invalid detach keys: \(spec)")
+            }
+            return scalar
+        }
+    }
+}
+
+private struct DetachScanner {
+    let keys: [UInt8]
+    private var pending: [UInt8] = []
+
+    init(keys: [UInt8]) {
+        self.keys = keys
+    }
+
+    mutating func ingest(_ bytes: [UInt8]) -> (emitted: [UInt8], detach: Bool) {
+        guard !keys.isEmpty else { return (bytes, false) }
+        var emitted: [UInt8] = []
+        for byte in bytes {
+            pending.append(byte)
+            if pending.elementsEqual(keys) {
+                return (emitted, true)
+            }
+            while !pending.isEmpty && !keys.starts(with: pending) {
+                emitted.append(pending.removeFirst())
+            }
+        }
+        return (emitted, false)
+    }
+
+    mutating func flush() -> [UInt8] {
+        let rest = pending
+        pending = []
+        return rest
     }
 }

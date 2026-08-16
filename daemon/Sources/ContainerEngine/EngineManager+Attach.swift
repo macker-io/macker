@@ -3,10 +3,17 @@ import Foundation
 
 import struct ContainerizationOS.Terminal
 
-/// Fan-out target for live container output. Attach gets the Docker exit notice; `logs -f` does not.
+/// Fan-out target for live container output.
 struct EngineIOSubscriber: Sendable {
+    enum Kind: Sendable {
+        /// Live stdio. TTY stays close to the PTY; includes the Docker exit notice.
+        case attach
+        /// `logs -f`. TTY is cooked so DSR queries never hit the client's terminal.
+        case logs
+    }
+
     let continuation: AsyncStream<EngineIOChunk>.Continuation
-    let includeExitNotice: Bool
+    let kind: Kind
 }
 
 extension EngineManager {
@@ -29,18 +36,26 @@ extension EngineManager {
             throw EngineError.invalidArgument("you must choose at least one of logs, stream or stdin")
         }
 
-        var replay: [EngineIOChunk] = []
+        let replay: [EngineIOChunk]
         if logs, !container.logs.isEmpty {
-            replay.append(EngineIOChunk(data: Data(container.logs.utf8), stdout: true))
+            replay = [EngineIOChunk(data: Data(container.logs.utf8), stdout: true)]
+        } else {
+            replay = []
         }
 
         let keepOpen = stream || stdin
         if keepOpen {
+            if container.state == "paused" {
+                throw EngineError.conflict("You cannot attach to a paused container, unpause it first")
+            }
+            if container.state == "exited" || container.state == "dead" {
+                throw EngineError.conflict("You cannot attach to a stopped container, start it first")
+            }
             let session = subscribeAttach(
                 containerID: container.id,
                 tty: container.tty,
                 stdin: stdin && container.openStdin,
-                includeExitNotice: true,
+                kind: .attach,
                 replay: replay
             )
             await publish(
@@ -54,26 +69,14 @@ extension EngineManager {
             return session
         }
 
-        let sessionID = UUID()
-        let (chunks, continuation) = AsyncStream<EngineIOChunk>.makeStream()
-        for chunk in replay {
-            continuation.yield(chunk)
-        }
-        continuation.finish()
-        return ioSession(
-            containerID: container.id,
-            sessionID: sessionID,
-            tty: container.tty,
-            stdin: false,
-            chunks: chunks
-        )
+        return finishedSession(containerID: container.id, tty: container.tty, replay: replay)
     }
 
     func subscribeAttach(
         containerID: String,
         tty: Bool,
         stdin: Bool,
-        includeExitNotice: Bool,
+        kind: EngineIOSubscriber.Kind,
         replay: [EngineIOChunk] = []
     ) -> EngineIOSession {
         let sessionID = UUID()
@@ -83,13 +86,33 @@ extension EngineManager {
         }
         attachSubscribers[containerID, default: [:]][sessionID] = EngineIOSubscriber(
             continuation: continuation,
-            includeExitNotice: includeExitNotice
+            kind: kind
         )
         return ioSession(
             containerID: containerID,
             sessionID: sessionID,
             tty: tty,
             stdin: stdin,
+            chunks: chunks
+        )
+    }
+
+    private func finishedSession(
+        containerID: String,
+        tty: Bool,
+        replay: [EngineIOChunk]
+    ) -> EngineIOSession {
+        let sessionID = UUID()
+        let (chunks, continuation) = AsyncStream<EngineIOChunk>.makeStream()
+        for chunk in replay {
+            continuation.yield(chunk)
+        }
+        continuation.finish()
+        return ioSession(
+            containerID: containerID,
+            sessionID: sessionID,
+            tty: tty,
+            stdin: false,
             chunks: chunks
         )
     }
@@ -131,7 +154,7 @@ extension EngineManager {
     func finishAttachSubscribers(_ containerID: String, extra: String?) {
         let subscribers = attachSubscribers.removeValue(forKey: containerID) ?? [:]
         for subscriber in subscribers.values {
-            if subscriber.includeExitNotice, let extra, !extra.isEmpty {
+            if subscriber.kind == .attach, let extra, !extra.isEmpty {
                 subscriber.continuation.yield(EngineIOChunk(data: Data(extra.utf8), stdout: true))
             }
             subscriber.continuation.finish()

@@ -51,6 +51,10 @@ let package = Package(
                 .copy("RuntimePin.json"),
             ]
         ),
+        .testTarget(
+            name: "ContainerEngineTests",
+            dependencies: ["ContainerEngine"]
+        ),
         .target(
             name: "DockerAPIAdapter",
             dependencies: [

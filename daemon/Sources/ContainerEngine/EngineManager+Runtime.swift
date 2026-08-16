@@ -171,6 +171,7 @@ extension EngineManager {
         waitTasks[id] = nil
         containerStdin[id]?.finish()
         containerStdin[id] = nil
+        ttySessions[id] = nil
         stopPortPublishers(id)
         if let linux = vms.removeValue(forKey: id) {
             try? await linux.stop()
@@ -190,17 +191,34 @@ extension EngineManager {
 
     func appendOutput(id: String, data: Data, stdout: Bool) {
         guard !data.isEmpty else { return }
-        let text = String(decoding: data, as: UTF8.self)
-        if var record = containers[id] {
-            record.logs += text
-            containers[id] = record
-            appendLogFile(id: id, text: text)
+        let tty = containers[id]?.tty == true
+        let attachData: Data
+        let logText: String
+        if tty {
+            var session = ttySessions[id] ?? TTYSession()
+            let output = session.ingest(data)
+            ttySessions[id] = session
+            attachData = output.attach
+            logText = output.log
+        } else {
+            attachData = data
+            logText = String(decoding: data, as: UTF8.self)
         }
-        if let subscribers = attachSubscribers[id] {
-            let chunk = EngineIOChunk(data: data, stdout: stdout)
-            for subscriber in subscribers.values {
-                subscriber.continuation.yield(chunk)
+        if !logText.isEmpty, var record = containers[id] {
+            record.logs += logText
+            containers[id] = record
+            appendLogFile(id: id, text: logText)
+        }
+        guard let subscribers = attachSubscribers[id] else { return }
+        for subscriber in subscribers.values {
+            let payload: Data
+            if subscriber.kind == .logs, tty {
+                payload = Data(logText.utf8)
+            } else {
+                payload = attachData
             }
+            guard !payload.isEmpty else { continue }
+            subscriber.continuation.yield(EngineIOChunk(data: payload, stdout: stdout))
         }
     }
 
