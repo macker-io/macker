@@ -311,32 +311,21 @@ extension EngineManager {
     public func imageHistory(name: String) async throws -> [EngineImageHistoryItem] {
         let image = try await resolveImage(name)
         let platform = await Self.preferredPlatform(for: image)
-        let config = try await image.config(for: platform)
-        let history = config.history ?? []
-        let diffIDs = config.rootfs.diffIDs
-        var layerIndex = 0
-        let tags = [image.reference]
-
-        return history.enumerated().map { offset, item in
-            let empty = item.emptyLayer ?? false
-            let id: String
-            if empty {
-                id = "<missing>"
-            } else if layerIndex < diffIDs.count {
-                id = diffIDs[layerIndex]
-                layerIndex += 1
-            } else {
-                id = image.digest
-            }
-            return EngineImageHistoryItem(
-                id: id,
-                created: Int64((ISO8601.parse(item.created ?? "") ?? Date(timeIntervalSince1970: 0)).timeIntervalSince1970),
-                createdBy: item.createdBy ?? "",
-                tags: offset == history.count - 1 ? tags : [],
-                size: 0,
-                comment: item.comment ?? ""
-            )
+        let manifest = try await image.manifest(for: platform)
+        let configBlob = try await image.getContent(digest: manifest.config.digest)
+        let config: ContainerizationOCI.Image = try configBlob.decode()
+        var layerSizes: [Int64] = []
+        layerSizes.reserveCapacity(manifest.layers.count)
+        for layer in manifest.layers {
+            let content: Content? = ImageLayerSize.isGzip(layer.mediaType) ? try? await image.getContent(digest: layer.digest) : nil
+            layerSizes.append(ImageLayerSize.uncompressed(layer, content: content))
         }
+        return EngineImageHistoryItem.from(
+            history: config.history ?? [],
+            layerSizes: layerSizes,
+            imageDigest: image.digest,
+            tags: [image.reference]
+        )
     }
 
     public func tagImage(name: String, repo: String, tag: String?) async throws {

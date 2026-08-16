@@ -1,3 +1,4 @@
+import ContainerizationOCI
 import Foundation
 
 /// Progress event yielded by ``EngineManager/pullImage(name:tag:platform:)``.
@@ -50,6 +51,69 @@ public struct EngineImageHistoryItem: Sendable {
     public let tags: [String]
     public let size: Int64
     public let comment: String
+
+    /// Docker `GET /images/{name}/history`: newest first; only the top row has an image ID.
+    static func from(
+        history: [History],
+        layerSizes: [Int64],
+        imageDigest: String,
+        tags: [String]
+    ) -> [EngineImageHistoryItem] {
+        var remaining = ArraySlice(layerSizes)
+        var oldestFirst: [EngineImageHistoryItem] = []
+        oldestFirst.reserveCapacity(history.count)
+        for (offset, item) in history.enumerated() {
+            let empty = item.emptyLayer ?? false
+            let newest = offset == history.count - 1
+            oldestFirst.append(
+                EngineImageHistoryItem(
+                    id: newest ? imageDigest : "<missing>",
+                    created: Int64((ISO8601.parse(item.created ?? "") ?? Date(timeIntervalSince1970: 0)).timeIntervalSince1970),
+                    createdBy: item.createdBy ?? "",
+                    tags: newest ? tags : [],
+                    size: (!empty && !remaining.isEmpty) ? remaining.removeFirst() : 0,
+                    comment: item.comment ?? ""
+                )
+            )
+        }
+        return Array(oldestFirst.reversed())
+    }
+}
+
+enum ImageLayerSize {
+    static let uncompressedAnnotation = "io.containerd.image.uncompressed"
+
+    static func uncompressed(_ layer: Descriptor, content: Content? = nil) -> Int64 {
+        if let raw = layer.annotations?[uncompressedAnnotation], let parsed = Int64(raw) {
+            return parsed
+        }
+        if isGzip(layer.mediaType), let content, let size = gzipISIZE(from: content) {
+            return size
+        }
+        return layer.size
+    }
+
+    static func isGzip(_ mediaType: String) -> Bool {
+        mediaType == MediaTypes.imageLayerGzip
+            || mediaType == MediaTypes.dockerImageLayerGzip
+            || mediaType.hasSuffix("+gzip")
+            || mediaType.hasSuffix(".gzip")
+    }
+
+    static func gzipISIZE(from content: Content) -> Int64? {
+        guard let blobSize = try? content.size(), blobSize >= 8 else { return nil }
+        guard let header = try? content.data(offset: 0, length: 2) else { return nil }
+        guard let tail = try? content.data(offset: blobSize - 4, length: 4) else { return nil }
+        guard [UInt8](header) == [0x1f, 0x8b] else { return nil }
+        return gzipISIZE(tail)
+    }
+
+    static func gzipISIZE(_ tail: Data) -> Int64? {
+        let bytes = [UInt8](tail)
+        guard bytes.count == 4 else { return nil }
+        let value = UInt32(bytes[0]) | UInt32(bytes[1]) << 8 | UInt32(bytes[2]) << 16 | UInt32(bytes[3]) << 24
+        return Int64(value)
+    }
 }
 
 public struct EngineImageSearchResult: Sendable {

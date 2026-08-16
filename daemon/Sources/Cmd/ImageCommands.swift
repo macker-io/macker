@@ -102,14 +102,22 @@ struct Tag: ParsableCommand {
 
 struct History: ParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Show the history of an image.")
+    @Flag(help: "Don't truncate output.")
+    var noTrunc = false
     @Argument var image: String
 
     func run() throws {
         let items = try DaemonAPI.decode([HistoryItem].self, from: DaemonAPI.get("/images/\(DaemonAPI.path(image))/history"))
         let rows = items.map { item in
-            [Format.shortID(item.Id), item.CreatedBy ?? "", Format.size(item.Size), item.Comment ?? ""]
+            [
+                Format.historyID(item.Id, truncating: !noTrunc),
+                Format.timeAgo(item.Created),
+                Format.createdBy(item.CreatedBy ?? "", truncating: !noTrunc),
+                Format.size(item.Size),
+                item.Comment ?? "",
+            ]
         }
-        Table.print(headers: ["IMAGE", "CREATED BY", "SIZE", "COMMENT"], rows: rows)
+        Table.print(headers: ["IMAGE", "CREATED", "CREATED BY", "SIZE", "COMMENT"], rows: rows)
     }
 }
 
@@ -219,6 +227,7 @@ private struct ImageDeleteItem: Decodable {
 
 private struct HistoryItem: Decodable {
     var Id: String
+    var Created: Int64
     var CreatedBy: String?
     var Size: Int64
     var Comment: String?
