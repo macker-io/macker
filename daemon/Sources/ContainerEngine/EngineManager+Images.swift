@@ -9,14 +9,21 @@ extension EngineManager {
     public func pullImage(
         name: String,
         tag: String,
-        platform: String? = nil
+        platform: String? = nil,
+        registryAuth: String? = nil
     ) -> AsyncThrowingStream<ImagePullEvent, Error> {
+        let reference: String
+        do {
+            reference = try Self.normalizedReference(name: name, tag: tag)
+        } catch {
+            return Self.failedImageProgress(error)
+        }
+        let auth = authStore.authentication(reference: reference, header: registryAuth)
         let store = imageStore
         return AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    let reference = try Self.normalizedReference(name: name, tag: tag)
-                    continuation.yield(.status("Pulling from \(reference)", id: tag))
+                    continuation.yield(.status("Pulling from \(Self.repository(from: reference))", id: tag))
 
                     let ociPlatform: Platform? = {
                         if let platform, !platform.isEmpty {
@@ -29,6 +36,7 @@ extension EngineManager {
                     let image = try await store.pull(
                         reference: reference,
                         platform: ociPlatform,
+                        auth: auth,
                         progress: { events in
                             let snapshot = await progressState.apply(events)
                             continuation.yield(
@@ -53,10 +61,8 @@ extension EngineManager {
                         )
                     )
                     continuation.finish()
-                } catch let error as ContainerizationError {
-                    continuation.finish(throwing: EngineError.pullFailed(error.localizedDescription))
                 } catch {
-                    continuation.finish(throwing: EngineError.pullFailed(error.localizedDescription))
+                    continuation.finish(throwing: RegistryErrorMapper.map(error, reference: reference, operation: .pull))
                 }
             }
             continuation.onTermination = { _ in
@@ -347,21 +353,28 @@ extension EngineManager {
         )
     }
 
-    public func pushImage(name: String, tag: String?) -> AsyncThrowingStream<ImagePullEvent, Error> {
+    public func pushImage(
+        name: String,
+        tag: String?,
+        registryAuth: String? = nil
+    ) -> AsyncThrowingStream<ImagePullEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
+                var reference = name
                 do {
                     let image = try await self.resolveImage(name)
-                    var reference = image.reference
+                    reference = image.reference
                     if let tag, !tag.isEmpty {
                         reference = try Self.normalizedReference(name: Self.repository(from: reference), tag: tag)
                     }
+                    let auth = self.authStore.authentication(reference: reference, header: registryAuth)
                     continuation.yield(.status("The push refers to repository [\(Self.repository(from: reference))]", id: nil))
 
                     let progressState = ProgressAccumulator()
                     try await self.imageStore.push(
                         reference: reference,
                         platform: Platform.current,
+                        auth: auth,
                         progress: { events in
                             let snapshot = await progressState.apply(events)
                             continuation.yield(
@@ -384,14 +397,16 @@ extension EngineManager {
                         )
                     )
                     continuation.finish()
-                } catch let error as EngineError {
-                    continuation.finish(throwing: error)
                 } catch {
-                    continuation.finish(throwing: EngineError.pushFailed(error.localizedDescription))
+                    continuation.finish(throwing: RegistryErrorMapper.map(error, reference: reference, operation: .push))
                 }
             }
             continuation.onTermination = { _ in task.cancel() }
         }
+    }
+
+    private static func failedImageProgress(_ error: Error) -> AsyncThrowingStream<ImagePullEvent, Error> {
+        AsyncThrowingStream { $0.finish(throwing: error) }
     }
 
     public func pruneImages(danglingOnly: Bool, until: Date?) async throws -> EngineImagePruneResult {

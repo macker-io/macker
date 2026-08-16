@@ -11,6 +11,7 @@ public actor EngineManager {
     public static var defaultStorePath: URL { DaemonPaths.storeDirectory }
 
     let imageStore: ImageStore
+    let authStore: RegistryAuthStore
     let eventBus = EventBus()
     let daemonID: String
     let containerRoot: URL
@@ -39,6 +40,7 @@ public actor EngineManager {
     public init(storePath: URL? = nil) throws {
         let store = try ImageStore(path: storePath ?? Self.defaultStorePath)
         self.imageStore = store
+        self.authStore = RegistryAuthStore(directory: store.path)
         self.daemonID = Self.loadOrCreateDaemonID(in: store.path)
         let containerRoot = store.path.appendingPathComponent("containers", isDirectory: true)
         try FileManager.default.createDirectory(at: containerRoot, withIntermediateDirectories: true)

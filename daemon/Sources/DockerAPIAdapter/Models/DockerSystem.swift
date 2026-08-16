@@ -221,14 +221,6 @@ public struct DockerEvent: Encodable, Sendable {
     }
 }
 
-/// `POST /auth` request body.
-public struct DockerAuthRequest: Decodable, Sendable {
-    public let username: String?
-    public let password: String?
-    public let email: String?
-    public let serveraddress: String?
-}
-
 /// `POST /auth` response.
 public struct DockerAuthResponse: Encodable, Sendable {
     public let Status: String

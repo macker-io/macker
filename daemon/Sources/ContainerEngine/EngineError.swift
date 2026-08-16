@@ -7,6 +7,8 @@ public enum EngineError: Error, Sendable, LocalizedError {
     case invalidReference(String)
     case pullFailed(String)
     case pushFailed(String)
+    case unauthorized(String)
+    case loginFailed(String)
     case exportFailed(String)
     case loadFailed(String)
     case notImplemented(String)
@@ -25,6 +27,8 @@ public enum EngineError: Error, Sendable, LocalizedError {
             .invalidReference(let reason),
             .pullFailed(let reason),
             .pushFailed(let reason),
+            .unauthorized(let reason),
+            .loginFailed(let reason),
             .exportFailed(let reason),
             .loadFailed(let reason),
             .notImplemented(let reason),

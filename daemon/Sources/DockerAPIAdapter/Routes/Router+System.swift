@@ -59,15 +59,31 @@ extension Router {
         )
     }
 
-    static func auth(_ request: HTTPRequest) -> HTTPResponse {
-        if !request.body.isEmpty {
-            do {
-                _ = try JSONDecoder().decode(DockerAuthRequest.self, from: request.body)
-            } catch {
-                return jsonError(status: 400, message: "invalid auth config: \(error.localizedDescription)")
-            }
+    func auth(_ request: HTTPRequest) async -> HTTPResponse {
+        if request.body.isEmpty {
+            return Self.jsonError(status: 400, message: "username and password required")
         }
-        return Self.jsonOK(DockerAuthResponse(Status: "Login Succeeded", IdentityToken: ""))
+        let config: AuthConfig
+        do {
+            config = try JSONDecoder().decode(AuthConfig.self, from: request.body)
+        } catch {
+            return Self.jsonError(status: 400, message: "invalid auth config: \(error.localizedDescription)")
+        }
+        do {
+            try await engine.login(config)
+            return Self.jsonOK(DockerAuthResponse(Status: "Login Succeeded", IdentityToken: ""))
+        } catch {
+            return Self.engineError(error)
+        }
+    }
+
+    func logout(_ request: HTTPRequest) async -> HTTPResponse {
+        do {
+            try await engine.logout(serverAddress: request.query["serveraddress"])
+            return HTTPResponse(status: 204)
+        } catch {
+            return Self.engineError(error)
+        }
     }
 
     static func matches(_ event: EngineEvent, filters: [String: [String]]) -> Bool {

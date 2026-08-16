@@ -74,7 +74,14 @@ extension Router {
             return Self.jsonError(status: 400, message: "fromImage query parameter is required")
         }
         let tag = request.query["tag"].flatMap { $0.isEmpty ? nil : $0 } ?? "latest"
-        return Self.progressStream(await engine.pullImage(name: fromImage, tag: tag, platform: request.query["platform"]))
+        return Self.progressStream(
+            await engine.pullImage(
+                name: fromImage,
+                tag: tag,
+                platform: request.query["platform"],
+                registryAuth: request.headers["x-registry-auth"]
+            )
+        )
     }
 
     func imageHistory(_ name: String) async -> HTTPResponse {
@@ -98,7 +105,13 @@ extension Router {
     }
 
     func pushImage(_ name: String, request: HTTPRequest) async -> HTTPResponse {
-        Self.progressStream(await engine.pushImage(name: name, tag: request.query["tag"]))
+        Self.progressStream(
+            await engine.pushImage(
+                name: name,
+                tag: request.query["tag"],
+                registryAuth: request.headers["x-registry-auth"]
+            )
+        )
     }
 
     func searchImages(_ request: HTTPRequest) async -> HTTPResponse {

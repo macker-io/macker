@@ -151,7 +151,7 @@ Daemon data lives in `~/Library/Application Support/io.macker.daemon/`:
 
 - `macker.sock` — API socket (removed when the daemon exits)
 - `runtime/vmlinux`, `initfs.ext4` — guest kernel and initfs
-- `content/`, `volumes/`, `containers/`, `networks/` — engine state (`make reset`). Container metadata is `containers/<id>.json`; MicroVM disks under `containers/<id>/` are recreated on each start.
+- `content/`, `volumes/`, `containers/`, `networks/`, `auth.json` — engine state (`make reset` keeps `auth.json`). Container metadata is `containers/<id>.json`; MicroVM disks under `containers/<id>/` are recreated on each start.
 
 Guest versions are pinned in `daemon/Sources/ContainerEngine/RuntimePin.json` (`containerization`, `kata`). `daemon/.runtime/` is a packaging cache only (gitignored), not the runtime store.
 

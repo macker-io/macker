@@ -33,7 +33,9 @@ public struct Router: Sendable {
         case ("GET", "/system/df"):
             return await systemDataUsage()
         case ("POST", "/auth"):
-            return Self.auth(request)
+            return await auth(request)
+        case ("DELETE", "/auth"):
+            return await logout(request)
         case ("GET", "/containers/json"):
             return await containersJSON(request)
         case ("POST", "/containers/create"):
@@ -139,6 +141,8 @@ public struct Router: Sendable {
                 return jsonError(status: 404, message: error.localizedDescription)
             case .invalidReference, .invalidArgument:
                 return jsonError(status: 400, message: error.localizedDescription)
+            case .unauthorized:
+                return jsonError(status: 401, message: error.localizedDescription)
             case .conflict:
                 return jsonError(status: 409, message: error.localizedDescription)
             case .notImplemented:

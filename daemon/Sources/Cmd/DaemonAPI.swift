@@ -139,17 +139,16 @@ enum DaemonAPI {
             if let message = progressError(in: line) {
                 printer.finish()
                 failed = message
-                fputs("Error: \(message)\n", stderr)
                 return
             }
             printer.write(line)
         }
         printer.finish()
         if let failed {
-            throw CLIError.http(failed)
+            try exitWithDaemonError(CLIError.http(failed))
         }
         if status != 200 {
-            throw CLIError.http("request failed with HTTP \(status)")
+            try exitWithDaemonError(CLIError.http("request failed with HTTP \(status)"))
         }
     }
 
@@ -279,6 +278,26 @@ enum Prompt {
         print("Are you sure you want to continue? [y/N]")
         let answer = readLine()?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return answer == "y" || answer == "yes"
+    }
+
+    static func secret(_ prompt: String) -> String {
+        fputs(prompt, stdout)
+        fflush(stdout)
+        let tty = isatty(STDIN_FILENO) != 0
+        var original = termios()
+        if tty {
+            tcgetattr(STDIN_FILENO, &original)
+            var hidden = original
+            hidden.c_lflag &= ~tcflag_t(ECHO)
+            tcsetattr(STDIN_FILENO, TCSANOW, &hidden)
+        }
+        defer {
+            if tty {
+                tcsetattr(STDIN_FILENO, TCSANOW, &original)
+                fputs("\n", stdout)
+            }
+        }
+        return readLine() ?? ""
     }
 }
 

@@ -13,6 +13,7 @@ struct Macker: ParsableCommand {
         version: DaemonAPI.clientVersion,
         subcommands: [
             Setup.self, FetchRuntime.self, Doctor.self, Status.self,
+            Login.self, Logout.self,
             Pull.self, Push.self, Images.self, Rmi.self, Tag.self, History.self, Search.self,
             Inspect.self, Save.self, Load.self, Build.self,
             Ps.self, Run.self, Create.self, Start.self, Stop.self, Restart.self, Kill.self,

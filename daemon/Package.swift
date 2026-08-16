@@ -53,7 +53,11 @@ let package = Package(
         ),
         .testTarget(
             name: "ContainerEngineTests",
-            dependencies: ["ContainerEngine"]
+            dependencies: [
+                "ContainerEngine",
+                .product(name: "ContainerizationOCI", package: "containerization"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+            ]
         ),
         .target(
             name: "DockerAPIAdapter",
