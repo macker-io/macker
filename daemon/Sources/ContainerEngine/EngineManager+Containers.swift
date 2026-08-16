@@ -94,6 +94,7 @@ extension EngineManager {
         saveContainer(container)
         watchVM(container.id)
         await publish(EngineEvent(type: "container", action: "start", actorID: container.id, attributes: ["name": container.name, "image": container.image]))
+        await refreshPeerHosts(networkIDs: container.networkIDs)
         return true
     }
 
@@ -305,6 +306,12 @@ extension EngineManager {
             return container
         }
         throw EngineError.containerNotFound("No such container: \(idOrName)")
+    }
+
+    func requireUnpaused(_ container: EngineContainer, action: String) throws {
+        if container.state == "paused" {
+            throw EngineError.conflict("cannot \(action) a paused container")
+        }
     }
 
     func finish(container: inout EngineContainer, exitCode: Int, action: String) async {

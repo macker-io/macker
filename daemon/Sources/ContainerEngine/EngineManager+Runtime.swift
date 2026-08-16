@@ -118,6 +118,7 @@ extension EngineManager {
         if let stdinPipe {
             containerStdin[record.id] = stdinPipe
         }
+        recordGuestNics(prepared)
         do {
             try await startPortPublishers(containers[record.id] ?? prepared)
         } catch {
@@ -182,9 +183,11 @@ extension EngineManager {
     }
 
     func handleVMExit(id: String, code: Int, action: String) async {
+        let networkIDs = containers[id]?.networkIDs ?? []
         await teardownVM(id)
         guard var record = containers[id], record.isActive else { return }
         await finish(container: &record, exitCode: code, action: action)
+        await refreshPeerHosts(networkIDs: networkIDs)
     }
 
     func appendOutput(id: String, text: String) {

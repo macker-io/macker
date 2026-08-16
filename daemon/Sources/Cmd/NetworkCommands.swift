@@ -87,7 +87,7 @@ struct NetworkRm: ParsableCommand {
 struct NetworkConnect: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "connect",
-        abstract: "Connect a stopped container to a network."
+        abstract: "Connect a container to a network."
     )
     @Argument var network: String
     @Argument var container: String
@@ -103,7 +103,7 @@ struct NetworkConnect: ParsableCommand {
 struct NetworkDisconnect: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "disconnect",
-        abstract: "Disconnect a container from a network (running containers need --force)."
+        abstract: "Disconnect a container from a network."
     )
     @Flag(name: .shortAndLong) var force = false
     @Argument var network: String

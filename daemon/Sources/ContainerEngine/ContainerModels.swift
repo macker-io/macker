@@ -144,6 +144,8 @@ public struct EngineContainer: Sendable, Codable {
 
     public var isActive: Bool { state == "running" || state == "paused" }
 
+    var networkIDs: Set<String> { Set(endpoints.map(\.networkID)) }
+
     /// Docker `ps` STATUS: `Up 3 minutes`, `Exited (0) 10 seconds ago`.
     public var dockerStatus: String {
         switch state {

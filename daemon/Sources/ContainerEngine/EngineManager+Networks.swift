@@ -103,16 +103,21 @@ extension EngineManager {
     public func connectNetwork(_ idOrName: String, spec: EngineNetworkConnectSpec) async throws {
         let network = try resolveNetwork(idOrName)
         var container = try resolveContainer(spec.container)
-        if container.isActive {
-            throw EngineError.notImplemented("connecting a running container is not implemented")
-        }
+        try requireUnpaused(container, action: "connect")
         if container.endpoints.contains(where: { $0.networkID == network.id }) {
             throw EngineError.conflict("container \(container.name) is already connected to \(network.name)")
         }
         try validateAttachment(mode: container.networkMode, extra: network)
-        container.endpoints.append(endpoint(for: network, aliases: spec.aliases))
+
+        var attached = endpoint(for: network, aliases: spec.aliases)
+        if container.state == "running" {
+            attached = try await attachRunningEndpoint(container, network: network, aliases: spec.aliases)
+        }
         if container.networkMode == "none", network.driver != "none" {
+            container.endpoints = [attached]
             container.networkMode = network.name
+        } else {
+            container.endpoints.append(attached)
         }
         saveContainer(container)
         await publish(
@@ -123,21 +128,19 @@ extension EngineManager {
                 attributes: ["name": network.name, "container": container.id, "containerName": container.name]
             )
         )
+        await refreshPeerHosts(networkIDs: container.networkIDs)
     }
 
     public func disconnectNetwork(_ idOrName: String, container idOrContainer: String, force: Bool) async throws {
         let network = try resolveNetwork(idOrName)
         var container = try resolveContainer(idOrContainer)
-        if !force, container.isActive {
-            throw EngineError.notImplemented("disconnecting a running container is not implemented")
-        }
+        try requireUnpaused(container, action: "disconnect")
         guard container.endpoints.contains(where: { $0.networkID == network.id }) else {
+            if force { return }
             throw EngineError.conflict("container \(container.name) is not connected to \(network.name)")
         }
-        if force, container.isActive {
-            await stopVM(container.id, timeoutSeconds: 1, signal: .kill)
-            await handleVMExit(id: container.id, code: 137, action: "kill")
-            container = try resolveContainer(container.id)
+        if container.state == "running" {
+            try await detachRunningEndpoint(container, network: network)
         }
         container.endpoints.removeAll { $0.networkID == network.id }
         if container.endpoints.isEmpty {
@@ -156,6 +159,7 @@ extension EngineManager {
                 attributes: ["name": network.name, "container": container.id, "containerName": container.name]
             )
         )
+        await refreshPeerHosts(networkIDs: container.networkIDs.union([network.id]))
     }
 
     func attachCreateEndpoints(_ spec: EngineContainerCreateSpec) throws -> (mode: String, endpoints: [EngineEndpoint], warnings: [String]) {
@@ -208,47 +212,64 @@ extension EngineManager {
     }
 
     func releaseInterfaces(_ containerID: String) {
-        guard let record = containers[containerID] else {
-            for networkID in networkDataplane.ids {
-                releaseVmnet(networkID: networkID, containerID: containerID)
-            }
-            return
+        let nics = guestNics.removeValue(forKey: containerID) ?? []
+        let networkIDs: Set<String>
+        if !nics.isEmpty {
+            networkIDs = Set(nics.map(\.networkID))
+        } else if let record = containers[containerID] {
+            networkIDs = record.networkIDs
+        } else {
+            networkIDs = Set(networkDataplane.ids)
         }
-        for endpoint in record.endpoints {
-            releaseVmnet(networkID: endpoint.networkID, containerID: containerID)
+        for networkID in networkIDs {
+            releaseVmnet(networkID: networkID, containerID: containerID)
         }
     }
 
-    func hostsFile(for record: EngineContainer) -> Hosts {
-        var hosts = Hosts.default
-        let networkIDs = Set(record.endpoints.map(\.networkID))
-        var byIP: [String: [String]] = [:]
+    func recordGuestNics(_ record: EngineContainer) {
+        guestNics[record.id] = GuestNic.slots(from: record.endpoints)
+    }
 
-        func add(_ ip: String, _ name: String) {
-            let trimmed = name.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            guard !ip.isEmpty, !trimmed.isEmpty else { return }
-            var names = byIP[ip] ?? []
-            if !names.contains(trimmed) {
-                names.append(trimmed)
-            }
-            byIP[ip] = names
+    private func attachRunningEndpoint(
+        _ container: EngineContainer,
+        network: EngineNetwork,
+        aliases: [String]
+    ) async throws -> EngineEndpoint {
+        guard network.driver == "bridge" || network.driver == "host" else {
+            throw EngineError.notImplemented("connecting a running container to \(network.name) is not implemented")
         }
+        guard let nic = guestNic(container.id, networkID: network.id, inUse: false) else {
+            throw EngineError.notImplemented(
+                "cannot hot-plug a new network interface on a running MicroVM; stop the container, connect, then start"
+            )
+        }
+        try await withGuestAgent(container.id) { agent in
+            try await agent.up(name: nic.interfaceName, mtu: nil)
+        }
+        setGuestNicInUse(container.id, networkID: network.id, inUse: true)
+        return nic.asEndpoint(network: network, aliases: aliases)
+    }
 
-        for peer in containers.values {
-            for endpoint in peer.endpoints where networkIDs.contains(endpoint.networkID) && !endpoint.ipv4Address.isEmpty {
-                add(endpoint.ipv4Address, peer.name)
-                add(endpoint.ipv4Address, peer.hostname)
-                add(endpoint.ipv4Address, String(peer.id.prefix(12)))
-                for alias in endpoint.aliases {
-                    add(endpoint.ipv4Address, alias)
-                }
-            }
+    private func detachRunningEndpoint(_ container: EngineContainer, network: EngineNetwork) async throws {
+        guard let nic = guestNic(container.id, networkID: network.id, inUse: true) else {
+            return
         }
+        try await withGuestAgent(container.id) { agent in
+            try await agent.down(name: nic.interfaceName)
+        }
+        setGuestNicInUse(container.id, networkID: network.id, inUse: false)
+    }
 
-        for (ip, names) in byIP.sorted(by: { $0.key < $1.key }) {
-            hosts.entries.append(.init(ipAddress: ip, hostnames: names))
-        }
-        return hosts
+    private func guestNic(_ containerID: String, networkID: String, inUse: Bool) -> GuestNic? {
+        guestNics[containerID]?.first { $0.networkID == networkID && $0.inUse == inUse }
+    }
+
+    private func setGuestNicInUse(_ containerID: String, networkID: String, inUse: Bool) {
+        guard var nics = guestNics[containerID],
+            let index = nics.firstIndex(where: { $0.networkID == networkID })
+        else { return }
+        nics[index].inUse = inUse
+        guestNics[containerID] = nics
     }
 
     func dnsConfig(for record: EngineContainer) -> DNS? {

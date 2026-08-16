@@ -86,7 +86,7 @@ Each container is a MicroVM with its own kernel, so this is not Linux `bridge` +
 | `host` | NAT NIC like bridge. `-p` is ignored. Image `EXPOSE` (and create `ExposedPorts`) are published 1:1 on the Mac (`80` → `localhost:80`). Guest `127.0.0.1` is **not** the Mac loopback. |
 | `none` | No NIC. |
 
-`macker network ls|create|rm|inspect|connect|disconnect|prune` works. Builtin `bridge` / `host` / `none` cannot be removed. `connect` / `disconnect` only apply while the container is stopped.
+`macker network ls|create|rm|inspect|connect|disconnect|prune` works. Builtin `bridge` / `host` / `none` cannot be removed. Running `disconnect` takes the NIC down immediately. Running `connect` can reattach a NIC that was connected at boot; a brand-new network needs a stop/start because MicroVMs cannot hot-plug virtio-net. Same-network names in `/etc/hosts` update when containers start, stop, connect, or disconnect.
 
 ```bash
 ./.build/debug/macker network ls

@@ -54,6 +54,31 @@ extension EngineManager {
         }
         return GuestProc.parseTop(result.stdout)
     }
+
+    /// Guest path of the container rootfs. Same as `LinuxContainer.guestRootfsPath` (private).
+    static func guestRootfsPath(_ id: String) -> String {
+        "/run/container/\(id)/rootfs"
+    }
+
+    func withGuestAgent<T: Sendable>(_ id: String, _ body: @Sendable (Vminitd) async throws -> T) async throws -> T {
+        guard let linux = vms[id] else {
+            throw EngineError.conflict("container \(id) has no running MicroVM")
+        }
+        return try await linux.withVirtualMachineInstance { vm in
+            guard let vz = vm as? VZVirtualMachineInstance else {
+                throw EngineError.runtimeUnavailable("guest agent is unavailable")
+            }
+            let agent = try await vz.dialAgent()
+            do {
+                let result = try await body(agent)
+                try await agent.close()
+                return result
+            } catch {
+                try? await agent.close()
+                throw error
+            }
+        }
+    }
 }
 
 private final class DataCollector: @unchecked Sendable {
