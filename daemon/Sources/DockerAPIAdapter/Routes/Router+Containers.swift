@@ -3,7 +3,7 @@ import Foundation
 import NIOCore
 
 extension Router {
-    enum NamedContainerRoute {
+    enum NamedContainerRoute: Equatable {
         case inspect(String)
         case top(String)
         case logs(String)
@@ -22,6 +22,7 @@ extension Router {
         case attach(String)
         case attachWS(String)
         case createExec(String)
+        case archive(String)
         case unsupported(String)
     }
 
@@ -76,8 +77,9 @@ extension Router {
                 return .attach(id)
             case ("POST", "exec"):
                 return .createExec(id)
-            case ("GET", "changes"), ("GET", "export"),
-                ("GET", "archive"), ("HEAD", "archive"), ("PUT", "archive"):
+            case ("GET", "archive"), ("HEAD", "archive"), ("PUT", "archive"):
+                return .archive(id)
+            case ("GET", "changes"), ("GET", "export"):
                 return .unsupported(id)
             default:
                 return nil
@@ -128,6 +130,8 @@ extension Router {
             return await attachContainer(id, request: request, websocket: true)
         case .createExec(let id):
             return await createExec(id, request: request)
+        case .archive(let id):
+            return await archiveContainer(id, request: request)
         case .unsupported:
             return Self.jsonError(status: 501, message: "this container endpoint is not implemented")
         }
@@ -419,6 +423,44 @@ extension Router {
                 width: Int(request.query["w"] ?? "") ?? 0
             )
             return HTTPResponse(status: 200)
+        } catch {
+            return Self.engineError(error)
+        }
+    }
+
+    private func archiveContainer(_ id: String, request: HTTPRequest) async -> HTTPResponse {
+        guard let path = request.query["path"], !path.isEmpty else {
+            return Self.jsonError(status: 400, message: "path query parameter is required")
+        }
+        let method = request.method.uppercased()
+        do {
+            if method == "PUT" {
+                try await engine.putArchive(
+                    id,
+                    path: path,
+                    tar: request.body,
+                    noOverwriteDirNonDir: Self.queryFlag(request.query["noOverwriteDirNonDir"])
+                )
+                return HTTPResponse(status: 200)
+            }
+            if method == "HEAD" {
+                let stat = try await engine.archiveStat(id, path: path)
+                return HTTPResponse(
+                    status: 200,
+                    headers: [("X-Docker-Container-Path-Stat", stat.dockerHeader)]
+                )
+            }
+            let (stat, tar) = try await engine.getArchive(id, path: path)
+            var buffer = ByteBuffer()
+            buffer.writeBytes(tar)
+            return HTTPResponse(
+                status: 200,
+                headers: [
+                    ("Content-Type", "application/x-tar"),
+                    ("X-Docker-Container-Path-Stat", stat.dockerHeader),
+                ],
+                body: .buffer(buffer)
+            )
         } catch {
             return Self.engineError(error)
         }

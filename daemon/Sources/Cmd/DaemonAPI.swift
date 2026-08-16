@@ -40,6 +40,26 @@ enum DaemonAPI {
         try UnixHTTPClient.request(method: "DELETE", path: prefixed(path), socketPath: socket)
     }
 
+    static func head(_ path: String, timeoutSeconds: Int? = 5) throws -> UnixHTTPClient.Response {
+        try UnixHTTPClient.request(method: "HEAD", path: prefixed(path), socketPath: socket, timeoutSeconds: timeoutSeconds)
+    }
+
+    static func put(
+        _ path: String,
+        body: Data? = nil,
+        contentType: String = "application/x-tar",
+        timeoutSeconds: Int? = 5
+    ) throws -> UnixHTTPClient.Response {
+        try UnixHTTPClient.request(
+            method: "PUT",
+            path: prefixed(path),
+            socketPath: socket,
+            body: body,
+            contentType: contentType,
+            timeoutSeconds: timeoutSeconds
+        )
+    }
+
     @discardableResult
     static func requireOK(_ response: UnixHTTPClient.Response) throws -> UnixHTTPClient.Response {
         guard response.statusCode >= 400 else { return response }

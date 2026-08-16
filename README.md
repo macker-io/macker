@@ -66,6 +66,16 @@ Official `nginx` does not include `wget` / `curl`. Use `cat` on the static files
 
 Without `-t`, Ctrl-C on foreground `run` stops the container. `attach` without a TTY proxies SIGINT/SIGTERM/SIGHUP/SIGQUIT; with a TTY, `ctrl-p ctrl-q` detaches and leaves the container running. `exec` without `-t` proxies the same signals to the exec process, not the container. `Ctrl-D` / `exit` should restore the host terminal (`stty sane` if it does not).
 
+## Copy files
+
+`macker cp` talks to `GET`/`PUT /containers/{id}/archive`. The container must be running (the writable rootfs lives in the MicroVM).
+
+```bash
+./.build/debug/macker cp notes.txt web:/tmp/notes.txt
+./.build/debug/macker cp web:/etc/hosts ./hosts
+./.build/debug/macker cp web:/etc/hosts -
+```
+
 ## Socket
 
 The daemon listens on:

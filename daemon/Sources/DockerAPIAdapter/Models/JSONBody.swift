@@ -8,10 +8,13 @@ enum JSONBody {
         return encoder
     }()
 
+    static func encodeData(_ value: some Encodable) -> Data {
+        (try? encoder.encode(value)) ?? Data("{}".utf8)
+    }
+
     static func encode(_ value: some Encodable) -> ByteBuffer {
-        let data = (try? encoder.encode(value)) ?? Data("{}".utf8)
         var buffer = ByteBuffer()
-        buffer.writeBytes(data)
+        buffer.writeBytes(encodeData(value))
         return buffer
     }
 

@@ -29,7 +29,12 @@ enum UnixHTTPClient {
         defer { reader.close() }
         try reader.send(method: method, path: path, body: body, contentType: contentType)
         let head = try reader.readHead()
-        let responseBody = try reader.readBody(status: head.statusCode, headers: head.headers)
+        let responseBody: Data
+        if method.uppercased() == "HEAD" || head.statusCode == 204 || head.statusCode == 304 {
+            responseBody = Data()
+        } else {
+            responseBody = try reader.readBody(status: head.statusCode, headers: head.headers)
+        }
         return Response(statusCode: head.statusCode, headers: head.headers, body: responseBody)
     }
 

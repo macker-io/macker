@@ -638,7 +638,7 @@ struct ContainerGroup: ParsableCommand {
         subcommands: [
             ContainerLs.self, Run.self, Create.self, Start.self, Stop.self, Restart.self, Kill.self,
             ContainerRm.self, Pause.self, Unpause.self, Rename.self, Logs.self, Wait.self, Top.self,
-            Stats.self, Attach.self, Exec.self, ContainerInspect.self, ContainerPrune.self,
+            Stats.self, Attach.self, Exec.self, Cp.self, ContainerInspect.self, ContainerPrune.self,
         ]
     )
 }
