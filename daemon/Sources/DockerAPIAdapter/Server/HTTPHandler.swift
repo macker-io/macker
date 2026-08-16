@@ -4,6 +4,7 @@ import Logging
 import NIOCore
 import NIOHTTP1
 import NIOWebSocket
+import struct os.OSAllocatedUnfairLock
 
 /// Accumulates one HTTP/1.1 request, then dispatches it to ``Router``.
 final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler, @unchecked Sendable {
@@ -81,14 +82,23 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler, @unchec
     }
 
     private func writeResponse(channel: Channel, request: HTTPRequest, response: HTTPResponse) {
-        guard channel.isActive else { return }
-
         if case .hijack(let session) = response.body {
+            guard channel.isActive else {
+                Task { await session.onClose() }
+                return
+            }
             channel.eventLoop.makeFutureWithTask {
                 await self.performHijack(channel: channel, request: request, response: response, session: session)
             }.whenFailure { error in
                 self.logger.error("hijack failed: \(error)")
                 channel.close(promise: nil)
+            }
+            return
+        }
+
+        guard channel.isActive else {
+            if case .stream(let stream) = response.body {
+                OnceClose(stream.onClose).run()
             }
             return
         }
@@ -118,19 +128,27 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler, @unchec
 
         case .stream(let stream):
             Self.writeHead(channel: channel, status: response.status, headers: headers)
+            let close = OnceClose(stream.onClose)
+            channel.closeFuture.whenComplete { _ in
+                close.run()
+            }
             channel.eventLoop.makeFutureWithTask {
-                for await chunk in stream {
-                    try await channel.eventLoop.submit {
-                        guard channel.isActive else { return }
+                for await chunk in stream.chunks {
+                    let wrote = try await channel.eventLoop.submit {
+                        guard channel.isActive else { return false }
                         channel.writeAndFlush(HTTPServerResponsePart.body(.byteBuffer(chunk)), promise: nil)
+                        return true
                     }.get()
+                    if !wrote { break }
                 }
                 try await channel.eventLoop.submit {
                     guard channel.isActive else { return }
                     channel.writeAndFlush(HTTPServerResponsePart.end(nil), promise: nil)
                 }.get()
+                await close.runAwait()
             }.whenFailure { _ in
                 channel.close(promise: nil)
+                close.run()
             }
 
         case .hijack:
@@ -263,5 +281,29 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler, @unchec
             queryAll[key, default: []].append(value)
         }
         return (path, query, queryAll)
+    }
+}
+
+/// Runs an optional async closer at most once (client drop, write failure, or stream end).
+private final class OnceClose: @unchecked Sendable {
+    private let lock = OSAllocatedUnfairLock(initialState: false)
+    private let action: (@Sendable () async -> Void)?
+
+    init(_ action: (@Sendable () async -> Void)?) {
+        self.action = action
+    }
+
+    func run() {
+        Task { await runAwait() }
+    }
+
+    func runAwait() async {
+        let first = lock.withLock { done -> Bool in
+            if done { return false }
+            done = true
+            return true
+        }
+        guard first, let action else { return }
+        await action()
     }
 }

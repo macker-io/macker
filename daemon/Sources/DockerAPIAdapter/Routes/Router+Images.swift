@@ -155,7 +155,7 @@ extension Router {
             return HTTPResponse(
                 status: 200,
                 headers: [("Content-Type", "application/json")],
-                body: .stream(stream)
+                body: .stream(.init(stream))
             )
         } catch {
             return Self.engineError(error)
@@ -193,7 +193,7 @@ extension Router {
         return HTTPResponse(
             status: 200,
             headers: [("Content-Type", "application/json")],
-            body: .stream(stream)
+            body: .stream(.init(stream))
         )
     }
 }

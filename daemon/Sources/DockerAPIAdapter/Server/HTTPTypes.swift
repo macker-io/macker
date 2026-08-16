@@ -26,10 +26,21 @@ public struct HTTPRequest: Sendable {
     }
 }
 
+/// Chunked HTTP body. `onClose` runs once when the client drops or the stream ends.
+public struct HTTPStream: Sendable {
+    public let chunks: AsyncStream<ByteBuffer>
+    public let onClose: (@Sendable () async -> Void)?
+
+    public init(_ chunks: AsyncStream<ByteBuffer>, onClose: (@Sendable () async -> Void)? = nil) {
+        self.chunks = chunks
+        self.onClose = onClose
+    }
+}
+
 public enum HTTPResponseBody: Sendable {
     case none
     case buffer(ByteBuffer)
-    case stream(AsyncStream<ByteBuffer>)
+    case stream(HTTPStream)
     case hijack(DockerHijack)
 }
 

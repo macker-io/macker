@@ -3,6 +3,12 @@ import Foundation
 
 import struct ContainerizationOS.Terminal
 
+/// Fan-out target for live container output. Attach gets the Docker exit notice; `logs -f` does not.
+struct EngineIOSubscriber: Sendable {
+    let continuation: AsyncStream<EngineIOChunk>.Continuation
+    let includeExitNotice: Bool
+}
+
 extension EngineManager {
     public func resizeContainer(_ idOrName: String, height: Int, width: Int) async throws {
         let container = try resolveContainer(idOrName)
@@ -23,15 +29,20 @@ extension EngineManager {
             throw EngineError.invalidArgument("you must choose at least one of logs, stream or stdin")
         }
 
-        let sessionID = UUID()
-        let (chunks, continuation) = AsyncStream<EngineIOChunk>.makeStream()
+        var replay: [EngineIOChunk] = []
         if logs, !container.logs.isEmpty {
-            continuation.yield(EngineIOChunk(data: Data(container.logs.utf8), stdout: true))
+            replay.append(EngineIOChunk(data: Data(container.logs.utf8), stdout: true))
         }
 
         let keepOpen = stream || stdin
         if keepOpen {
-            attachSubscribers[container.id, default: [:]][sessionID] = continuation
+            let session = subscribeAttach(
+                containerID: container.id,
+                tty: container.tty,
+                stdin: stdin && container.openStdin,
+                includeExitNotice: true,
+                replay: replay
+            )
             await publish(
                 EngineEvent(
                     type: "container",
@@ -40,15 +51,60 @@ extension EngineManager {
                     attributes: ["name": container.name]
                 )
             )
-        } else {
-            continuation.finish()
+            return session
         }
 
-        let engine = self
-        let containerID = container.id
-        return EngineIOSession(
+        let sessionID = UUID()
+        let (chunks, continuation) = AsyncStream<EngineIOChunk>.makeStream()
+        for chunk in replay {
+            continuation.yield(chunk)
+        }
+        continuation.finish()
+        return ioSession(
+            containerID: container.id,
+            sessionID: sessionID,
             tty: container.tty,
-            stdin: stdin && container.openStdin,
+            stdin: false,
+            chunks: chunks
+        )
+    }
+
+    func subscribeAttach(
+        containerID: String,
+        tty: Bool,
+        stdin: Bool,
+        includeExitNotice: Bool,
+        replay: [EngineIOChunk] = []
+    ) -> EngineIOSession {
+        let sessionID = UUID()
+        let (chunks, continuation) = AsyncStream<EngineIOChunk>.makeStream()
+        for chunk in replay {
+            continuation.yield(chunk)
+        }
+        attachSubscribers[containerID, default: [:]][sessionID] = EngineIOSubscriber(
+            continuation: continuation,
+            includeExitNotice: includeExitNotice
+        )
+        return ioSession(
+            containerID: containerID,
+            sessionID: sessionID,
+            tty: tty,
+            stdin: stdin,
+            chunks: chunks
+        )
+    }
+
+    private func ioSession(
+        containerID: String,
+        sessionID: UUID,
+        tty: Bool,
+        stdin: Bool,
+        chunks: AsyncStream<EngineIOChunk>
+    ) -> EngineIOSession {
+        let engine = self
+        return EngineIOSession(
+            tty: tty,
+            stdin: stdin,
             chunks: chunks,
             writeStdin: { data in
                 await engine.writeAttachStdin(containerID, data: data)
@@ -64,8 +120,8 @@ extension EngineManager {
     }
 
     func closeAttach(_ containerID: String, sessionID: UUID) {
-        if let continuation = attachSubscribers[containerID]?.removeValue(forKey: sessionID) {
-            continuation.finish()
+        if let subscriber = attachSubscribers[containerID]?.removeValue(forKey: sessionID) {
+            subscriber.continuation.finish()
         }
         if attachSubscribers[containerID]?.isEmpty == true {
             attachSubscribers[containerID] = nil
@@ -74,11 +130,11 @@ extension EngineManager {
 
     func finishAttachSubscribers(_ containerID: String, extra: String?) {
         let subscribers = attachSubscribers.removeValue(forKey: containerID) ?? [:]
-        for continuation in subscribers.values {
-            if let extra, !extra.isEmpty {
-                continuation.yield(EngineIOChunk(data: Data(extra.utf8), stdout: true))
+        for subscriber in subscribers.values {
+            if subscriber.includeExitNotice, let extra, !extra.isEmpty {
+                subscriber.continuation.yield(EngineIOChunk(data: Data(extra.utf8), stdout: true))
             }
-            continuation.finish()
+            subscriber.continuation.finish()
         }
     }
 }

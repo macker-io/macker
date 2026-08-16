@@ -198,8 +198,8 @@ extension EngineManager {
         }
         if let subscribers = attachSubscribers[id] {
             let chunk = EngineIOChunk(data: data, stdout: stdout)
-            for continuation in subscribers.values {
-                continuation.yield(chunk)
+            for subscriber in subscribers.values {
+                subscriber.continuation.yield(chunk)
             }
         }
     }

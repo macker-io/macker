@@ -235,64 +235,46 @@ extension Router {
             return Self.jsonError(status: 400, message: "you must choose at least one stream")
         }
 
+        let timestamps = Self.queryFlag(request.query["timestamps"])
+        let follow = Self.queryFlag(request.query["follow"])
+        let tail = request.query["tail"]
+
         do {
-            let (text, tty) = try await engine.containerLogs(id)
-            let formatted = Self.formatLogs(
-                text,
-                timestamps: Self.queryFlag(request.query["timestamps"]),
-                tail: request.query["tail"]
-            )
+            let (text, tty, live) = try await engine.containerLogs(id, follow: follow)
+            let formatted = Self.formatLogs(text, timestamps: timestamps, tail: tail)
             let payload = Self.dockerLogPayload(text: formatted, tty: tty, stdout: stdout)
 
-            if Self.queryFlag(request.query["follow"]) {
-                let running: Bool
-                do {
-                    let state = try await engine.inspectContainer(id).state
-                    running = state == "running" || state == "paused"
-                } catch {
-                    running = false
-                }
-                let (stream, continuation) = AsyncStream<ByteBuffer>.makeStream()
-                Task {
-                    if !payload.isEmpty {
-                        var buffer = ByteBuffer()
-                        buffer.writeBytes(payload)
-                        continuation.yield(buffer)
-                    }
-                    if running {
-                        _ = try? await engine.waitContainer(id)
-                        if let (later, laterTTY) = try? await engine.containerLogs(id) {
-                            let laterFormatted = Self.formatLogs(
-                                later,
-                                timestamps: Self.queryFlag(request.query["timestamps"]),
-                                tail: nil
-                            )
-                            if laterFormatted.count > formatted.count {
-                                let extra = String(laterFormatted.dropFirst(formatted.count))
-                                let extraPayload = Self.dockerLogPayload(text: extra, tty: laterTTY, stdout: stdout)
-                                if !extraPayload.isEmpty {
-                                    var buffer = ByteBuffer()
-                                    buffer.writeBytes(extraPayload)
-                                    continuation.yield(buffer)
-                                }
-                            }
-                        }
-                    }
-                    continuation.finish()
-                }
+            guard follow, let session = live else {
+                var buffer = ByteBuffer()
+                buffer.writeBytes(payload)
                 return HTTPResponse(
                     status: 200,
                     headers: [("Content-Type", "application/vnd.docker.raw-stream")],
-                    body: .stream(stream)
+                    body: .buffer(buffer)
                 )
             }
 
-            var buffer = ByteBuffer()
-            buffer.writeBytes(payload)
+            let (stream, continuation) = AsyncStream<ByteBuffer>.makeStream()
+            Task {
+                Self.yieldLog(payload, to: continuation)
+                for await chunk in session.chunks {
+                    Self.yieldLog(
+                        Self.framedIOChunk(
+                            chunk,
+                            tty: tty,
+                            stdout: stdout,
+                            stderr: stderr,
+                            timestamps: timestamps
+                        ),
+                        to: continuation
+                    )
+                }
+                continuation.finish()
+            }
             return HTTPResponse(
                 status: 200,
                 headers: [("Content-Type", "application/vnd.docker.raw-stream")],
-                body: .buffer(buffer)
+                body: .stream(.init(stream, onClose: { await session.close() }))
             )
         } catch {
             return Self.engineError(error)
@@ -547,5 +529,34 @@ extension Router {
             return data
         }
         return DockerStdio.frame(data, stdout: stdout)
+    }
+
+    static func framedIOChunk(
+        _ chunk: EngineIOChunk,
+        tty: Bool,
+        stdout: Bool,
+        stderr: Bool,
+        timestamps: Bool = false
+    ) -> Data {
+        if !tty {
+            if chunk.stdout && !stdout { return Data() }
+            if !chunk.stdout && !stderr { return Data() }
+        }
+        let data: Data
+        if timestamps {
+            data = Data(
+                formatLogs(String(decoding: chunk.data, as: UTF8.self), timestamps: true, tail: nil).utf8
+            )
+        } else {
+            data = chunk.data
+        }
+        return dockerLogPayload(data: data, tty: tty, stdout: chunk.stdout)
+    }
+
+    static func yieldLog(_ payload: Data, to continuation: AsyncStream<ByteBuffer>.Continuation) {
+        guard !payload.isEmpty else { return }
+        var buffer = ByteBuffer()
+        buffer.writeBytes(payload)
+        continuation.yield(buffer)
     }
 }

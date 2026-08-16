@@ -209,9 +209,22 @@ extension EngineManager {
         return (deleted, 0)
     }
 
-    public func containerLogs(_ idOrName: String) async throws -> (text: String, tty: Bool) {
+    public func containerLogs(_ idOrName: String, follow: Bool = false) async throws -> (text: String, tty: Bool, live: EngineIOSession?) {
         let container = try resolveContainer(idOrName)
-        return (container.logs, container.tty)
+        let text = container.logs
+        let tty = container.tty
+        let live: EngineIOSession?
+        if follow, container.isActive {
+            live = subscribeAttach(
+                containerID: container.id,
+                tty: tty,
+                stdin: false,
+                includeExitNotice: false
+            )
+        } else {
+            live = nil
+        }
+        return (text, tty, live)
     }
 
     public func updateContainer(_ idOrName: String, memory: Int64?, nanoCpus: Int64?) async throws {

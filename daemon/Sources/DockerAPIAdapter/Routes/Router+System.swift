@@ -55,7 +55,7 @@ extension Router {
         return HTTPResponse(
             status: 200,
             headers: [("Content-Type", "application/json")],
-            body: .stream(out)
+            body: .stream(.init(out))
         )
     }
 

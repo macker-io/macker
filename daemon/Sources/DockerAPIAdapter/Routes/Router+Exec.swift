@@ -175,16 +175,10 @@ extension Router {
         let (stream, continuation) = AsyncStream<ByteBuffer>.makeStream()
         Task {
             for await chunk in session.chunks {
-                if !session.tty {
-                    if chunk.stdout && !stdout { continue }
-                    if !chunk.stdout && !stderr { continue }
-                }
-                let payload = dockerLogPayload(data: chunk.data, tty: session.tty, stdout: chunk.stdout)
-                if !payload.isEmpty {
-                    var buffer = ByteBuffer()
-                    buffer.writeBytes(payload)
-                    continuation.yield(buffer)
-                }
+                Self.yieldLog(
+                    Self.framedIOChunk(chunk, tty: session.tty, stdout: stdout, stderr: stderr),
+                    to: continuation
+                )
             }
             continuation.finish()
         }

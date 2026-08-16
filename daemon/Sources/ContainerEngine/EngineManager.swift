@@ -24,7 +24,7 @@ public actor EngineManager {
     var execStdin: [String: ProcessStdin] = [:]
     var execWaitTasks: [String: Task<Void, Never>] = [:]
     var containerStdin: [String: ProcessStdin] = [:]
-    var attachSubscribers: [String: [UUID: AsyncStream<EngineIOChunk>.Continuation]] = [:]
+    var attachSubscribers: [String: [UUID: EngineIOSubscriber]] = [:]
     var execSubscribers: [String: [UUID: AsyncStream<EngineIOChunk>.Continuation]] = [:]
     var volumes: [String: EngineVolume] = [:]
     var networks: [String: EngineNetwork] = [:]
