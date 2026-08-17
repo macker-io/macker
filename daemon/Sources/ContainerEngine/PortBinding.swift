@@ -1,0 +1,152 @@
+import Foundation
+
+public struct EnginePortBinding: Sendable, Codable, Equatable {
+    public var hostIP: String
+    public var hostPort: Int
+    public var containerPort: Int
+    public var protocolName: String
+
+    public var dockerKey: String { "\(containerPort)/\(protocolName)" }
+
+    /// Go `net.JoinHostPort`: IPv6 addresses are wrapped in brackets.
+    public var joinedHostPort: String {
+        hostIP.contains(":") ? "[\(hostIP)]:\(hostPort)" : "\(hostIP):\(hostPort)"
+    }
+
+    public var dockerPortLine: String { "\(dockerKey) -> \(joinedHostPort)" }
+
+    public init(hostIP: String = "", hostPort: Int, containerPort: Int, protocolName: String = "tcp") {
+        self.hostIP = hostIP
+        self.hostPort = hostPort
+        self.containerPort = containerPort
+        self.protocolName = protocolName
+    }
+
+    public static func parsePublish(_ spec: String) throws -> EnginePortBinding {
+        let trimmed = spec.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw EngineError.invalidArgument("invalid publish spec: \(spec)")
+        }
+
+        let (rest, protocolName) = splitTrailingProtocol(trimmed)
+        guard protocolName == "tcp" || protocolName == "udp" else {
+            throw EngineError.invalidArgument("invalid publish protocol in \(spec)")
+        }
+
+        let parts = rest.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+        let hostIP: String
+        let hostPort: Int
+        let containerPort: Int
+        switch parts.count {
+        case 1:
+            hostIP = ""
+            hostPort = 0
+            containerPort = try parsePort(parts[0], spec: spec)
+        case 2:
+            hostIP = ""
+            if parts[0].isEmpty {
+                hostPort = 0
+            } else {
+                hostPort = try parsePort(parts[0], spec: spec)
+            }
+            containerPort = try parsePort(parts[1], spec: spec)
+        case 3:
+            hostIP = parts[0]
+            if parts[1].isEmpty {
+                hostPort = 0
+            } else {
+                hostPort = try parsePort(parts[1], spec: spec)
+            }
+            containerPort = try parsePort(parts[2], spec: spec)
+        default:
+            throw EngineError.invalidArgument("invalid publish spec: \(spec)")
+        }
+        return EnginePortBinding(
+            hostIP: hostIP,
+            hostPort: hostPort,
+            containerPort: containerPort,
+            protocolName: protocolName
+        )
+    }
+
+    public static func parseExposed(_ key: String) throws -> EnginePortBinding {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw EngineError.invalidArgument("invalid exposed port \(key)")
+        }
+        let (portPart, protocolName) = splitTrailingProtocol(trimmed)
+        guard protocolName == "tcp" || protocolName == "udp" else {
+            throw EngineError.invalidArgument("invalid exposed port protocol in \(key)")
+        }
+        let port = try parsePort(portPart, spec: key)
+        guard (1...65535).contains(port) else {
+            throw EngineError.invalidArgument("invalid exposed port \(key)")
+        }
+        return EnginePortBinding(hostIP: "", hostPort: port, containerPort: port, protocolName: protocolName)
+    }
+
+    /// `docker port` private-port argument: `80`, `80/tcp`, `80/`. Empty protocol defaults to tcp.
+    public static func parsePrivatePortKey(_ spec: String) throws -> String {
+        var portPart = spec
+        var proto = "tcp"
+        if let slash = spec.firstIndex(of: "/") {
+            portPart = String(spec[..<slash])
+            let rest = String(spec[spec.index(after: slash)...])
+            if !rest.isEmpty {
+                proto = rest.lowercased()
+            }
+        }
+        guard let value = UInt64(portPart), value <= UInt64(UInt16.max) else {
+            throw EngineError.invalidArgument("Invalid private port '\(spec)'")
+        }
+        return "\(value)/\(proto)"
+    }
+
+    public static func uniqued(_ ports: [EnginePortBinding]) -> [EnginePortBinding] {
+        merging(ports, [])
+    }
+
+    public static func merging(_ lhs: [EnginePortBinding], _ rhs: [EnginePortBinding]) -> [EnginePortBinding] {
+        var byKey: [String: EnginePortBinding] = [:]
+        for binding in lhs + rhs {
+            byKey[binding.dockerKey] = binding
+        }
+        return byKey.values.sorted {
+            $0.containerPort == $1.containerPort
+                ? $0.protocolName < $1.protocolName
+                : $0.containerPort < $1.containerPort
+        }
+    }
+
+    /// All mappings (`80/tcp -> 0.0.0.0:8080`), or just host addresses for one private port.
+    /// Multiple host bindings for the same container port are kept (unlike ``merging``).
+    public static func dockerPortLines(
+        _ bindings: [EnginePortBinding],
+        privatePort: String?,
+        container: String
+    ) throws -> [String] {
+        if let privatePort {
+            let key = try parsePrivatePortKey(privatePort)
+            let hosts = bindings.filter { $0.dockerKey == key }
+            guard !hosts.isEmpty else {
+                throw EngineError.invalidArgument("No public port '\(key)' published for \(container)")
+            }
+            return hosts.map(\.joinedHostPort)
+        }
+        return bindings.map(\.dockerPortLine).sorted()
+    }
+
+    private static func splitTrailingProtocol(_ spec: String) -> (rest: String, protocolName: String) {
+        guard let slash = spec.lastIndex(of: "/") else {
+            return (spec, "tcp")
+        }
+        return (String(spec[..<slash]), String(spec[spec.index(after: slash)...]).lowercased())
+    }
+
+    private static func parsePort(_ raw: String, spec: String) throws -> Int {
+        guard let value = Int(raw), (0...65535).contains(value) else {
+            throw EngineError.invalidArgument("invalid port in publish spec: \(spec)")
+        }
+        return value
+    }
+}

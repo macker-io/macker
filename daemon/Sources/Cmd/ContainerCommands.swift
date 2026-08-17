@@ -622,6 +622,28 @@ struct Inspect: ParsableCommand {
     }
 }
 
+struct Port: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "List port mappings or a specific mapping for the container."
+    )
+
+    @Argument(help: "Container name or ID.")
+    var container: String
+
+    @Argument(help: "Private port, optionally with protocol (for example 80 or 80/tcp).")
+    var privatePort: String?
+
+    func run() throws {
+        let inspect = try DaemonAPI.decode(
+            DockerPortMapping.Inspect.self,
+            from: DaemonAPI.get("/containers/\(DaemonAPI.path(container))/json")
+        )
+        for line in try DockerPortMapping.lines(from: inspect, privatePort: privatePort, container: container) {
+            print(line)
+        }
+    }
+}
+
 struct ContainerPrune: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "prune", abstract: "Remove all stopped containers.")
     @Flag(name: .shortAndLong) var force = false
@@ -638,7 +660,8 @@ struct ContainerGroup: ParsableCommand {
         subcommands: [
             ContainerLs.self, Run.self, Create.self, Start.self, Stop.self, Restart.self, Kill.self,
             ContainerRm.self, Pause.self, Unpause.self, Rename.self, Logs.self, Wait.self, Top.self,
-            Stats.self, Attach.self, Exec.self, Cp.self, ContainerInspect.self, ContainerPrune.self,
+            Stats.self, Attach.self, Exec.self, Cp.self, ContainerInspect.self, Port.self,
+            ContainerPrune.self,
         ]
     )
 }
