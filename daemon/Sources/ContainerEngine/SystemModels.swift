@@ -50,25 +50,50 @@ public struct EngineEvent: Sendable {
     }
 }
 
-/// In-process fan-out for live `/events` subscribers.
+/// In-process fan-out for live `/events` subscribers, plus a bounded replay buffer.
 actor EventBus {
+    /// Same size as Docker's in-memory event log.
+    static let historyLimit = 256
+
     private var subscribers: [UUID: AsyncStream<EngineEvent>.Continuation] = [:]
+    private var history: [EngineEvent] = []
 
     var listenerCount: Int { subscribers.count }
 
+    func publish(_ event: EngineEvent) {
+        if history.count == Self.historyLimit {
+            history.removeFirst()
+        }
+        history.append(event)
+        for continuation in subscribers.values {
+            continuation.yield(event)
+        }
+    }
+
+    func buffered(since: Date? = nil, until: Date? = nil) -> [EngineEvent] {
+        history.filter { event in
+            if let since, event.time < since { return false }
+            if let until, event.time > until { return false }
+            return true
+        }
+    }
+
     func subscribe() -> AsyncStream<EngineEvent> {
+        liveStream()
+    }
+
+    /// Copies matching history, then registers the live subscriber in the same turn.
+    func subscribe(since: Date?, until: Date?) -> (history: [EngineEvent], stream: AsyncStream<EngineEvent>) {
+        (buffered(since: since, until: until), liveStream())
+    }
+
+    private func liveStream() -> AsyncStream<EngineEvent> {
         AsyncStream { continuation in
             let id = UUID()
             subscribers[id] = continuation
             continuation.onTermination = { _ in
                 Task { await self.unsubscribe(id) }
             }
-        }
-    }
-
-    func publish(_ event: EngineEvent) {
-        for continuation in subscribers.values {
-            continuation.yield(event)
         }
     }
 

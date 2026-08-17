@@ -29,13 +29,43 @@ struct Info: ParsableCommand {
 struct Events: ParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Get real time events from the server.")
 
+    @Option(name: .shortAndLong, help: "Filter output based on conditions provided.")
+    var filter: [String] = []
+
+    @Option(help: "Show all events created since timestamp.")
+    var since: String?
+
+    @Option(help: "Stream events until this timestamp.")
+    var until: String?
+
     func run() throws {
-        let status = try DaemonAPI.streamLines(method: "GET", path: "/events", timeoutSeconds: nil) { line in
+        var query: [String] = []
+        if let since { query.append("since=\(DaemonAPI.query(since))") }
+        if let until { query.append("until=\(DaemonAPI.query(until))") }
+        if !filter.isEmpty {
+            query.append("filters=\(DaemonAPI.query(try Self.encodeFilters(filter)))")
+        }
+        let path = query.isEmpty ? "/events" : "/events?\(query.joined(separator: "&"))"
+        let status = try DaemonAPI.streamLines(method: "GET", path: path, timeoutSeconds: nil) { line in
             print(line)
         }
         if status >= 400 {
             throw CLIError.http("events failed with HTTP \(status)")
         }
+    }
+
+    private static func encodeFilters(_ specs: [String]) throws -> String {
+        var map: [String: [String]] = [:]
+        for spec in specs {
+            guard let eq = spec.firstIndex(of: "=") else {
+                throw CLIError.http("Invalid filter '\(spec)'")
+            }
+            let key = String(spec[..<eq])
+            let value = String(spec[spec.index(after: eq)...])
+            map[key, default: []].append(value)
+        }
+        let data = try JSONEncoder().encode(map)
+        return String(data: data, encoding: .utf8) ?? "{}"
     }
 }
 

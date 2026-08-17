@@ -117,7 +117,41 @@ public struct Router: Sendable {
         if let seconds = TimeInterval(raw) {
             return Date(timeIntervalSince1970: seconds)
         }
-        return ISO8601.parse(raw)
+        if let date = ISO8601.parse(raw) {
+            return date
+        }
+        if let duration = parseGoDuration(raw) {
+            return Date().addingTimeInterval(-duration)
+        }
+        return nil
+    }
+
+    /// Go `time.ParseDuration` subset: `10s`, `5m`, `1h30m`.
+    static func parseGoDuration(_ raw: String) -> TimeInterval? {
+        var text = Substring(raw)
+        var sign: TimeInterval = 1
+        if text.first == "-" {
+            sign = -1
+            text.removeFirst()
+        } else if text.first == "+" {
+            text.removeFirst()
+        }
+        guard !text.isEmpty else { return nil }
+        // Longer units first so `ms` is not parsed as `m`.
+        let units: [(String, TimeInterval)] = [
+            ("ms", 0.001), ("ns", 1e-9), ("us", 1e-6), ("µs", 1e-6), ("μs", 1e-6),
+            ("h", 3600), ("m", 60), ("s", 1),
+        ]
+        var total: TimeInterval = 0
+        while !text.isEmpty {
+            let digits = text.prefix { $0.isNumber || $0 == "." }
+            guard let value = Double(digits) else { return nil }
+            text = text.dropFirst(digits.count)
+            guard let unit = units.first(where: { text.hasPrefix($0.0) }) else { return nil }
+            text = text.dropFirst(unit.0.count)
+            total += value * unit.1
+        }
+        return sign * total
     }
 
     static func parseFilters(_ raw: String?) -> [String: [String]] {

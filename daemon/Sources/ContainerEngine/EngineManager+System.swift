@@ -46,34 +46,55 @@ extension EngineManager {
         )
     }
 
-    /// Live event stream for `GET /events`. Historical log is not persisted.
-    public func events(until: Date? = nil) async -> AsyncStream<EngineEvent> {
-        if let until, until <= Date() {
-            return AsyncStream { $0.finish() }
+    /// `GET /events`. `since` / `until` replay the in-memory buffer; live follows unless `until` is past.
+    public func events(since: Date? = nil, until: Date? = nil) async -> AsyncStream<EngineEvent> {
+        let live = until.map { $0 > Date() } ?? true
+        let replay = since != nil || until != nil
+
+        let history: [EngineEvent]
+        let upstream: AsyncStream<EngineEvent>?
+        if !live {
+            history = await eventBus.buffered(since: since, until: until)
+            upstream = nil
+        } else if replay {
+            (history, upstream) = await eventBus.subscribe(since: since, until: until)
+        } else {
+            history = []
+            upstream = await eventBus.subscribe()
         }
 
-        let upstream = await eventBus.subscribe()
         return AsyncStream { continuation in
             let worker = Task {
-                for await event in upstream {
+                for event in history {
                     if Task.isCancelled { break }
-                    if let until, Date() >= until { break }
                     continuation.yield(event)
+                }
+                if let upstream {
+                    for await event in upstream {
+                        if Task.isCancelled { break }
+                        if let until, event.time > until { break }
+                        continuation.yield(event)
+                    }
                 }
                 continuation.finish()
             }
-            if let until {
-                Task {
+            let sleeper: Task<Void, Never>?
+            if live, let until {
+                sleeper = Task {
                     let delay = until.timeIntervalSinceNow
                     if delay > 0 {
                         try? await Task.sleep(for: .seconds(delay))
                     }
+                    guard !Task.isCancelled else { return }
                     worker.cancel()
                     continuation.finish()
                 }
+            } else {
+                sleeper = nil
             }
             continuation.onTermination = { _ in
                 worker.cancel()
+                sleeper?.cancel()
             }
         }
     }
