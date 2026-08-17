@@ -2,11 +2,29 @@ import Foundation
 import Network
 import os
 
-/// Userspace TCP proxy: Mac listen port → `containerIP:containerPort`.
+/// Userspace TCP/UDP proxy: Mac listen port → `containerIP:containerPort`.
 final class PortPublisher: @unchecked Sendable {
     private struct Live {
         var listener: NWListener
         var connections: [ObjectIdentifier: NWConnection] = [:]
+    }
+
+    private enum Transport: String {
+        case tcp
+        case udp
+
+        init(_ name: String) throws {
+            guard let value = Transport(rawValue: name.lowercased()) else {
+                throw EngineError.invalidArgument("unsupported publish protocol \(name)")
+            }
+            self = value
+        }
+
+        var parameters: NWParameters {
+            let parameters: NWParameters = self == .udp ? .udp : .tcp
+            parameters.allowLocalEndpointReuse = true
+            return parameters
+        }
     }
 
     private let queue = DispatchQueue(label: "io.macker.ports")
@@ -17,7 +35,8 @@ final class PortPublisher: @unchecked Sendable {
         hostIP: String,
         hostPort: Int,
         containerIP: String,
-        containerPort: Int
+        containerPort: Int,
+        protocolName: String
     ) async throws -> Int {
         guard (0...65535).contains(hostPort), (1...65535).contains(containerPort) else {
             throw EngineError.invalidArgument("invalid port mapping \(hostPort):\(containerPort)")
@@ -25,14 +44,17 @@ final class PortPublisher: @unchecked Sendable {
         guard !containerIP.isEmpty else {
             throw EngineError.invalidArgument("cannot publish ports before the container has an IP")
         }
+        let transport = try Transport(protocolName)
 
-        let parameters = NWParameters.tcp
-        parameters.allowLocalEndpointReuse = true
         let listener: NWListener
         do {
-            listener = try Self.makeListener(parameters: parameters, hostIP: hostIP, hostPort: hostPort)
+            listener = try Self.makeListener(
+                parameters: transport.parameters,
+                hostIP: hostIP,
+                hostPort: hostPort
+            )
         } catch {
-            throw EngineError.conflict("failed to bind \(Self.displayHost(hostIP)):\(hostPort): \(error.localizedDescription)")
+            throw EngineError.conflict("failed to bind \(Self.displayHost(hostIP)):\(hostPort)/\(transport.rawValue): \(error.localizedDescription)")
         }
 
         let pending = OSAllocatedUnfairLock<CheckedContinuation<Int, Error>?>(initialState: nil)
@@ -52,7 +74,7 @@ final class PortPublisher: @unchecked Sendable {
                 pending.withLock { continuation in
                     continuation?.resume(
                         throwing: EngineError.conflict(
-                            "failed to listen on \(Self.displayHost(hostIP)):\(hostPort): \(error.localizedDescription)"
+                            "failed to listen on \(Self.displayHost(hostIP)):\(hostPort)/\(transport.rawValue): \(error.localizedDescription)"
                         )
                     )
                     continuation = nil
@@ -68,7 +90,7 @@ final class PortPublisher: @unchecked Sendable {
         }
 
         listener.newConnectionHandler = { [weak self] incoming in
-            self?.bridge(incoming, key: key, to: containerIP, port: containerPort)
+            self?.bridge(incoming, key: key, to: containerIP, port: containerPort, transport: transport)
         }
 
         do {
@@ -93,18 +115,34 @@ final class PortPublisher: @unchecked Sendable {
         }
     }
 
-    private func bridge(_ incoming: NWConnection, key: String, to containerIP: String, port: Int) {
+    private func bridge(
+        _ incoming: NWConnection,
+        key: String,
+        to containerIP: String,
+        port: Int,
+        transport: Transport
+    ) {
         guard let targetPort = NWEndpoint.Port(rawValue: UInt16(port)) else {
             incoming.cancel()
             return
         }
-        let outgoing = NWConnection(host: NWEndpoint.Host(containerIP), port: targetPort, using: .tcp)
+        let outgoing = NWConnection(
+            host: NWEndpoint.Host(containerIP),
+            port: targetPort,
+            using: transport.parameters
+        )
         incoming.start(queue: queue)
         outgoing.start(queue: queue)
         remember(incoming, key: key)
         remember(outgoing, key: key)
-        pipe(incoming, to: outgoing)
-        pipe(outgoing, to: incoming)
+        switch transport {
+        case .tcp:
+            pipeStream(incoming, to: outgoing)
+            pipeStream(outgoing, to: incoming)
+        case .udp:
+            pipeDatagrams(incoming, to: outgoing)
+            pipeDatagrams(outgoing, to: incoming)
+        }
     }
 
     private func cancel(_ live: Live) {
@@ -114,22 +152,51 @@ final class PortPublisher: @unchecked Sendable {
         }
     }
 
-    private func pipe(_ from: NWConnection, to: NWConnection) {
+    private func closePair(_ from: NWConnection, _ to: NWConnection) {
+        from.cancel()
+        to.cancel()
+    }
+
+    private func pipeStream(_ from: NWConnection, to: NWConnection) {
         from.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] data, _, isComplete, error in
             let publisher = self
             if let data, !data.isEmpty {
                 to.send(content: data, completion: .contentProcessed { _ in
                     if error == nil, !isComplete {
-                        publisher?.pipe(from, to: to)
+                        publisher?.pipeStream(from, to: to)
                     }
                 })
             }
             if isComplete || error != nil {
                 to.send(content: nil, isComplete: true, completion: .contentProcessed { _ in
-                    from.cancel()
-                    to.cancel()
+                    publisher?.closePair(from, to)
                 })
             }
+        }
+    }
+
+    private func pipeDatagrams(_ from: NWConnection, to: NWConnection) {
+        from.receiveMessage { [weak self] data, _, isComplete, error in
+            guard let self else { return }
+            if error != nil {
+                self.closePair(from, to)
+                return
+            }
+            if let data {
+                to.send(content: data, contentContext: .defaultMessage, isComplete: true, completion: .contentProcessed { sendError in
+                    if sendError != nil || isComplete {
+                        self.closePair(from, to)
+                        return
+                    }
+                    self.pipeDatagrams(from, to: to)
+                })
+                return
+            }
+            if isComplete {
+                self.closePair(from, to)
+                return
+            }
+            self.pipeDatagrams(from, to: to)
         }
     }
 

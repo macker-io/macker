@@ -189,9 +189,6 @@ extension EngineManager {
         if mode == "none", !spec.portBindings.isEmpty {
             warnings.append("Published ports are discarded when using none network mode")
         }
-        if spec.portBindings.contains(where: { $0.protocolName == "udp" }) {
-            warnings.append("UDP port publishing is not implemented")
-        }
         return (mode, endpoints, warnings)
     }
 
@@ -297,14 +294,14 @@ extension EngineManager {
         var updated = record
         var published: [EnginePortBinding] = []
         for (index, binding) in bindings.enumerated() {
-            guard binding.protocolName == "tcp" else { continue }
             let key = "\(record.id):\(index)"
             let bound = try await portPublisher.publish(
                 key: key,
                 hostIP: binding.hostIP,
                 hostPort: binding.hostPort,
                 containerIP: ip,
-                containerPort: binding.containerPort
+                containerPort: binding.containerPort,
+                protocolName: binding.protocolName
             )
             published.append(
                 EnginePortBinding(
