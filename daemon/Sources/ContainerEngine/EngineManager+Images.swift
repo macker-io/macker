@@ -427,12 +427,6 @@ extension EngineManager {
         }
     }
 
-    private func publishImage(action: String, digest: String, name: String) async {
-        await publish(
-            EngineEvent(type: "image", action: action, actorID: digest, attributes: ["name": name])
-        )
-    }
-
     private func imagesGroupedByDigest() async throws -> [(digest: String, members: [Containerization.Image])] {
         var groups: [String: [Containerization.Image]] = [:]
         for image in try await imageStore.list() {

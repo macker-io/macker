@@ -155,11 +155,21 @@ enum DaemonAPI {
         throw ExitCode(1)
     }
 
-    /// Pull/push NDJSON progress. Throws if the stream reports an error line or a non-200 status.
-    static func streamProgress(method: String = "POST", path: String) throws {
+    /// Pull/push/import NDJSON progress. Throws if the stream reports an error line or a non-200 status.
+    static func streamProgress(
+        method: String = "POST",
+        path: String,
+        bodyFile: URL? = nil,
+        contentType: String = "application/json"
+    ) throws {
         let printer = ProgressPrinter()
         var failed: String?
-        let status = try streamLines(method: method, path: path) { line in
+        let status = try streamLines(
+            method: method,
+            path: path,
+            bodyFile: bodyFile,
+            contentType: contentType
+        ) { line in
             if let message = progressError(in: line) {
                 printer.finish()
                 failed = message

@@ -205,11 +205,94 @@ struct Load: ParsableCommand {
     }
 }
 
+struct Import: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Import the contents from a tarball to create a filesystem image."
+    )
+
+    @Option(name: [.customShort("c"), .customLong("change")], help: "Apply Dockerfile instruction to the created image.")
+    var change: [String] = []
+
+    @Option(name: [.customShort("m"), .customLong("message")], help: "Set commit message for imported image.")
+    var message: String?
+
+    @Option(help: "Platform of the imported image (host platform only).")
+    var platform: String?
+
+    @Argument(help: "File, URL, or - for stdin.")
+    var source: String
+
+    @Argument(help: "Name and optionally a tag in the name:tag format.")
+    var repository: String?
+
+    func run() throws {
+        var query = ["fromSrc=\(DaemonAPI.query(Self.fromSrc(source)))"]
+        if let repository {
+            let (repo, tag) = DaemonAPI.splitReference(repository)
+            query.append("repo=\(DaemonAPI.query(repo))")
+            query.append("tag=\(DaemonAPI.query(tag))")
+        }
+        if let message, !message.isEmpty {
+            query.append("message=\(DaemonAPI.query(message))")
+        }
+        if let platform, !platform.isEmpty {
+            query.append("platform=\(DaemonAPI.query(platform))")
+        }
+        for instruction in change {
+            query.append("changes=\(DaemonAPI.query(instruction))")
+        }
+        let path = "/images/create?\(query.joined(separator: "&"))"
+
+        if Self.isRemote(source) {
+            try DaemonAPI.streamProgress(path: path)
+            return
+        }
+
+        let tar = try Self.localArchive(source)
+        defer {
+            if source == "-" { try? FileManager.default.removeItem(at: tar) }
+        }
+        try DaemonAPI.streamProgress(path: path, bodyFile: tar, contentType: "application/x-tar")
+    }
+
+    private static func isRemote(_ source: String) -> Bool {
+        source.hasPrefix("http://") || source.hasPrefix("https://")
+    }
+
+    private static func fromSrc(_ source: String) -> String {
+        isRemote(source) ? source : "-"
+    }
+
+    private static func localArchive(_ source: String) throws -> URL {
+        if source != "-" {
+            let url = URL(fileURLWithPath: source)
+            guard FileManager.default.isReadableFile(atPath: url.path) else {
+                throw CLIError.io("cannot read \(source)")
+            }
+            return url
+        }
+        let tar = FileManager.default.temporaryDirectory
+            .appendingPathComponent("macker-import-\(UUID().uuidString).tar")
+        FileManager.default.createFile(atPath: tar.path, contents: nil)
+        let out = try FileHandle(forWritingTo: tar)
+        defer { try? out.close() }
+        while true {
+            let chunk = FileHandle.standardInput.readData(ofLength: 1_048_576)
+            if chunk.isEmpty { break }
+            try out.write(contentsOf: chunk)
+        }
+        return tar
+    }
+}
+
 struct ImageGroup: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "image",
         abstract: "Manage images.",
-        subcommands: [ImageLs.self, Pull.self, ImageRm.self, Tag.self, Push.self, History.self, ImageInspect.self, ImagePrune.self]
+        subcommands: [
+            ImageLs.self, Pull.self, ImageRm.self, Tag.self, Push.self, History.self, ImageInspect.self,
+            ImagePrune.self, Import.self,
+        ]
     )
 }
 

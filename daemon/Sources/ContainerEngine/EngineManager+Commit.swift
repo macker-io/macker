@@ -59,15 +59,7 @@ extension EngineManager {
             )
         }
 
-        let image: Containerization.Image
-        let reference: String
-        if let repo = spec.repo, !repo.isEmpty {
-            reference = try Self.normalizedReference(name: repo, tag: spec.tag)
-            image = try await imageStore.create(description: .init(reference: reference, descriptor: ingested.descriptor))
-        } else {
-            reference = ingested.descriptor.digest
-            image = try await adoptImage(ingested.descriptor)
-        }
+        let (image, reference) = try await registerIngested(ingested, repo: spec.repo, tag: spec.tag)
         await publish(
             EngineEvent(
                 type: "container",
@@ -76,13 +68,10 @@ extension EngineManager {
                 attributes: ["image": image.digest, "name": container.name]
             )
         )
-        await publish(
-            EngineEvent(
-                type: "image",
-                action: spec.repo == nil ? "commit" : "tag",
-                actorID: image.digest,
-                attributes: ["name": reference]
-            )
+        await publishImage(
+            action: spec.repo == nil ? "commit" : "tag",
+            digest: image.digest,
+            name: reference
         )
         return image.digest
     }

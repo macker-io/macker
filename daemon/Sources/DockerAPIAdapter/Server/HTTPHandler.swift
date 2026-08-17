@@ -103,7 +103,7 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler, @unchec
         guard method.uppercased() == "POST" else { return false }
         let path = Self.parseURI(uri).path
         let unversioned = Router.splitAPIVersion(path).path
-        return unversioned == "/build" || unversioned == "/images/load"
+        return unversioned == "/build" || unversioned == "/images/load" || unversioned == "/images/create"
     }
 
     private func writeResponse(

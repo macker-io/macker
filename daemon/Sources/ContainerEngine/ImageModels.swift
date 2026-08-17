@@ -128,3 +128,29 @@ public struct EngineImagePruneResult: Sendable {
     public let deleted: [EngineImageDeleteItem]
     public let spaceReclaimed: Int64
 }
+
+/// `POST /images/create?fromSrc=` — filesystem tar becomes a single-layer image.
+public struct EngineImportSpec: Sendable {
+    public var source: String
+    public var repo: String?
+    public var tag: String?
+    public var message: String
+    public var changes: [String]
+    public var platform: String?
+
+    public init(
+        source: String,
+        repo: String? = nil,
+        tag: String? = nil,
+        message: String = "",
+        changes: [String] = [],
+        platform: String? = nil
+    ) {
+        self.source = source
+        self.repo = repo
+        self.tag = tag
+        self.message = message
+        self.changes = changes
+        self.platform = platform
+    }
+}

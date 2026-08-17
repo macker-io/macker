@@ -198,9 +198,23 @@ public enum ArchivePath {
 
 public enum TemporaryDirectory {
     public static func with<T>(_ prefix: String, _ body: (URL) throws -> T) throws -> T {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(prefix)-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        let url = try make(prefix)
         defer { try? FileManager.default.removeItem(at: url) }
         return try body(url)
+    }
+
+    public static func with<T>(_ prefix: String, _ body: (URL) async throws -> T) async throws -> T {
+        let url = try make(prefix)
+        defer { try? FileManager.default.removeItem(at: url) }
+        return try await body(url)
+    }
+
+    private static func make(_ prefix: String) throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "\(prefix)-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
     }
 }

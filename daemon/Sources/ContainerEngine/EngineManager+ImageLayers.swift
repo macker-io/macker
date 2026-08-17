@@ -134,6 +134,29 @@ extension EngineManager {
         }
         return try await imageStore.create(description: .init(reference: descriptor.digest, descriptor: descriptor))
     }
+
+    /// Tags `ingested` when `repo` is set; otherwise stores it as a dangling digest.
+    func registerIngested(
+        _ ingested: IngestedImage,
+        repo: String?,
+        tag: String?
+    ) async throws -> (image: Containerization.Image, reference: String) {
+        if let repo, !repo.isEmpty {
+            let reference = try Self.normalizedReference(name: repo, tag: tag)
+            let image = try await imageStore.create(
+                description: .init(reference: reference, descriptor: ingested.descriptor)
+            )
+            return (image, reference)
+        }
+        let image = try await adoptImage(ingested.descriptor)
+        return (image, ingested.descriptor.digest)
+    }
+
+    func publishImage(action: String, digest: String, name: String) async {
+        await publish(
+            EngineEvent(type: "image", action: action, actorID: digest, attributes: ["name": name])
+        )
+    }
 }
 
 /// `LocalContentStore.ingest` hands work to a non-isolated closure; this carries the result out.

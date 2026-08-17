@@ -70,8 +70,23 @@ extension Router {
     }
 
     func createImage(_ request: HTTPRequest) async -> HTTPResponse {
+        if let fromSrc = request.query["fromSrc"], !fromSrc.isEmpty {
+            return Self.progressStream(
+                await engine.importImage(
+                    spec: EngineImportSpec(
+                        source: fromSrc,
+                        repo: request.query["repo"],
+                        tag: request.query["tag"],
+                        message: request.query["message"] ?? "",
+                        changes: request.queryAll["changes"] ?? request.query["changes"].map { [$0] } ?? [],
+                        platform: request.query["platform"]
+                    ),
+                    archive: request.bodyFile
+                )
+            )
+        }
         guard let fromImage = request.query["fromImage"], !fromImage.isEmpty else {
-            return Self.jsonError(status: 400, message: "fromImage query parameter is required")
+            return Self.jsonError(status: 400, message: "fromImage or fromSrc query parameter is required")
         }
         let tag = request.query["tag"].flatMap { $0.isEmpty ? nil : $0 } ?? "latest"
         return Self.progressStream(
