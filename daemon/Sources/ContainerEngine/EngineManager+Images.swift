@@ -74,12 +74,7 @@ extension EngineManager {
     /// Local OCI images grouped by digest, with size / created metadata.
     /// `all: false` hides dangling (untagged) images, matching `GET /images/json`.
     public func listImages(all: Bool = true, filters: [String: [String]] = [:]) async throws -> [EngineImageSummary] {
-        let images = try await imageStore.list()
-        var groups: [String: [Containerization.Image]] = [:]
-        for image in images {
-            groups[image.digest, default: []].append(image)
-        }
-
+        let groups = try await imagesGroupedByDigest()
         var summaries: [EngineImageSummary] = []
         summaries.reserveCapacity(groups.count)
         for (digest, members) in groups {
@@ -149,22 +144,8 @@ extension EngineManager {
         let digest = image.digest
         let reference = image.reference
         try await imageStore.delete(reference: reference, performCleanup: true)
-        await publish(
-            EngineEvent(
-                type: "image",
-                action: "untag",
-                actorID: digest,
-                attributes: ["name": reference]
-            )
-        )
-        await publish(
-            EngineEvent(
-                type: "image",
-                action: "delete",
-                actorID: digest,
-                attributes: ["name": reference]
-            )
-        )
+        await publishImage(action: "untag", digest: digest, name: reference)
+        await publishImage(action: "delete", digest: digest, name: reference)
         return [
             EngineImageDeleteItem(untagged: reference, deleted: nil),
             EngineImageDeleteItem(untagged: nil, deleted: digest),
@@ -407,30 +388,57 @@ extension EngineManager {
         var deleted: [EngineImageDeleteItem] = []
         var reclaimed: Int64 = 0
 
-        if !danglingOnly {
-            for image in try await imageStore.list() {
-                if let until {
-                    let created = await Self.createdDate(of: image)
-                    if created >= until { continue }
+        for (digest, members) in try await imagesGroupedByDigest() {
+            guard let primary = members.first else { continue }
+            if danglingOnly, !Self.uniqueDisplayTags(members.map(\.reference)).isEmpty { continue }
+            if imageInUse(digest: digest, members: members) { continue }
+            if let until {
+                let created = await Self.createdDate(of: primary)
+                if created >= until { continue }
+            }
+
+            let size = await Self.totalSize(of: primary)
+            var leftover = false
+            for image in members {
+                do {
+                    try await imageStore.delete(reference: image.reference, performCleanup: false)
+                    deleted.append(EngineImageDeleteItem(untagged: image.reference, deleted: nil))
+                    await publishImage(action: "untag", digest: digest, name: image.reference)
+                } catch {
+                    leftover = true
                 }
-                let size = await Self.totalSize(of: image)
-                try await imageStore.delete(reference: image.reference, performCleanup: false)
-                deleted.append(EngineImageDeleteItem(untagged: image.reference, deleted: image.digest))
+            }
+            if !leftover {
+                deleted.append(EngineImageDeleteItem(untagged: nil, deleted: digest))
                 reclaimed += size
-                await publish(
-                    EngineEvent(
-                        type: "image",
-                        action: "delete",
-                        actorID: image.digest,
-                        attributes: ["name": image.reference]
-                    )
-                )
+                await publishImage(action: "delete", digest: digest, name: digest)
             }
         }
 
-        let cleanup = try await imageStore.cleanUpOrphanedBlobs()
-        reclaimed += Int64(cleanup.freed)
+        _ = try await imageStore.cleanUpOrphanedBlobs()
         return EngineImagePruneResult(deleted: deleted, spaceReclaimed: reclaimed)
+    }
+
+    private func imageInUse(digest: String, members: [Containerization.Image]) -> Bool {
+        containers.values.contains { container in
+            if !container.imageID.isEmpty, container.imageID == digest { return true }
+            guard !container.image.isEmpty else { return false }
+            return members.contains { Self.matches($0, name: container.image) }
+        }
+    }
+
+    private func publishImage(action: String, digest: String, name: String) async {
+        await publish(
+            EngineEvent(type: "image", action: action, actorID: digest, attributes: ["name": name])
+        )
+    }
+
+    private func imagesGroupedByDigest() async throws -> [(digest: String, members: [Containerization.Image])] {
+        var groups: [String: [Containerization.Image]] = [:]
+        for image in try await imageStore.list() {
+            groups[image.digest, default: []].append(image)
+        }
+        return groups.sorted(by: { $0.key < $1.key }).map { ($0.key, $0.value) }
     }
 
     public func searchImages(term: String, limit: Int) async throws -> [EngineImageSearchResult] {

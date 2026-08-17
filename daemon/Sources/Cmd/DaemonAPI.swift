@@ -299,7 +299,8 @@ enum Prompt {
     static func confirm(_ warning: String, force: Bool) -> Bool {
         if force { return true }
         print("WARNING! \(warning)")
-        print("Are you sure you want to continue? [y/N]")
+        fputs("Are you sure you want to continue? [y/N] ", stdout)
+        fflush(stdout)
         let answer = readLine()?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return answer == "y" || answer == "yes"
     }

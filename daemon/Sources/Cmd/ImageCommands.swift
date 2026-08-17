@@ -140,12 +140,31 @@ struct Search: ParsableCommand {
 
 struct ImagePrune: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "prune", abstract: "Remove unused images.")
-    @Flag(name: .shortAndLong, help: "Do not prompt for confirmation.")
+
+    @Flag(name: .shortAndLong, help: "Remove all unused images, not just dangling ones.")
+    var all = false
+
+    @Flag(name: [.customShort("f"), .long], help: "Do not prompt for confirmation.")
     var force = false
 
     func run() throws {
-        guard Prompt.confirm("This will remove dangling images.", force: force) else { return }
-        try DaemonAPI.printJSON(try DaemonAPI.requireOK(DaemonAPI.post("/images/prune")).body)
+        let warning = all
+            ? "This will remove all images without at least one container associated to them."
+            : "This will remove all dangling images."
+        guard Prompt.confirm(warning, force: force) else { return }
+        var path = "/images/prune"
+        if all {
+            path += "?filters=\(DaemonAPI.query(#"{"dangling":["false"]}"#))"
+        }
+        let result = try DaemonAPI.decode(ImagePruneResponse.self, from: DaemonAPI.post(path, timeoutSeconds: 120))
+        if let items = result.ImagesDeleted, !items.isEmpty {
+            print("Deleted Images:")
+            for item in items {
+                if let untagged = item.Untagged { print("untagged: \(untagged)") }
+                if let deleted = item.Deleted { print("deleted: \(deleted)") }
+            }
+        }
+        print("Total reclaimed space: \(Format.size(result.SpaceReclaimed ?? 0))")
     }
 }
 
@@ -223,6 +242,11 @@ private struct ImageSummary: Decodable {
 private struct ImageDeleteItem: Decodable {
     var Untagged: String?
     var Deleted: String?
+}
+
+private struct ImagePruneResponse: Decodable {
+    var ImagesDeleted: [ImageDeleteItem]?
+    var SpaceReclaimed: Int64?
 }
 
 private struct HistoryItem: Decodable {
