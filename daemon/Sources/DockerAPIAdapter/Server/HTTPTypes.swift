@@ -8,6 +8,9 @@ public struct HTTPRequest: Sendable {
     public let queryAll: [String: [String]]
     public let headers: [String: String]
     public let body: Data
+    /// Set instead of ``body`` for routes whose payload is spooled to disk
+    /// (build contexts, image archives). Valid until the response completes.
+    public let bodyFile: URL?
 
     public init(
         method: String,
@@ -15,7 +18,8 @@ public struct HTTPRequest: Sendable {
         query: [String: String] = [:],
         queryAll: [String: [String]] = [:],
         headers: [String: String] = [:],
-        body: Data = Data()
+        body: Data = Data(),
+        bodyFile: URL? = nil
     ) {
         self.method = method
         self.path = path
@@ -23,6 +27,7 @@ public struct HTTPRequest: Sendable {
         self.queryAll = queryAll
         self.headers = headers
         self.body = body
+        self.bodyFile = bodyFile
     }
 }
 

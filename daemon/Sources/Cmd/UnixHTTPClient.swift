@@ -38,18 +38,25 @@ enum UnixHTTPClient {
         return Response(statusCode: head.statusCode, headers: head.headers, body: responseBody)
     }
 
-    /// Reads a newline-delimited JSON stream (pull / push / events).
+    /// Reads a newline-delimited JSON stream (pull / push / build / events).
+    /// `bodyFile` uploads from disk so a large build context never enters memory.
     static func streamLines(
         method: String,
         path: String,
         socketPath: String,
         body: Data? = nil,
+        bodyFile: URL? = nil,
+        contentType: String = "application/json",
         timeoutSeconds: Int? = 300,
         onLine: (String) -> Void
     ) throws -> Int {
         var reader = try HTTPReader(socketPath: socketPath, timeoutSeconds: timeoutSeconds)
         defer { reader.close() }
-        try reader.send(method: method, path: path, body: body)
+        if let bodyFile {
+            try reader.send(method: method, path: path, bodyFile: bodyFile, contentType: contentType)
+        } else {
+            try reader.send(method: method, path: path, body: body, contentType: contentType)
+        }
         let head = try reader.readHead()
         try reader.readBodyLines(status: head.statusCode, headers: head.headers, onLine: onLine)
         return head.statusCode
@@ -227,6 +234,24 @@ private struct HTTPReader {
         try writeAll(Data(header.utf8))
         if let body {
             try writeAll(body)
+        }
+    }
+
+    /// Same as ``send(method:path:body:contentType:extraHeaders:closeConnection:)``
+    /// but reads the request body off disk in chunks.
+    func send(method: String, path: String, bodyFile: URL, contentType: String) throws {
+        guard let handle = try? FileHandle(forReadingFrom: bodyFile),
+            let size = (try? FileManager.default.attributesOfItem(atPath: bodyFile.path)[.size]) as? NSNumber
+        else {
+            throw CLIError.io("cannot read request body at \(bodyFile.path)")
+        }
+        defer { try? handle.close() }
+        var header = "\(method) \(path) HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n"
+        header += "Content-Type: \(contentType)\r\n"
+        header += "Content-Length: \(size.intValue)\r\n\r\n"
+        try writeAll(Data(header.utf8))
+        while let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty {
+            try writeAll(chunk)
         }
     }
 

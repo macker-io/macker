@@ -95,6 +95,9 @@ public struct DockerSystemInfo: Encodable, Sendable {
     public let Name: String
     public let Labels: [String]
     public let ExperimentalBuild: Bool
+    /// `"1"` is the classic builder. BuildKit would be `"2"`, and clients that see it
+    /// go looking for `POST /session`, which macker does not serve.
+    public let BuilderVersion: String
     public let ServerVersion: String
     public let Runtimes: [String: Runtime]
     public let DefaultRuntime: String
@@ -164,6 +167,7 @@ public struct DockerSystemInfo: Encodable, Sendable {
         self.Name = engine.hostname
         self.Labels = []
         self.ExperimentalBuild = true
+        self.BuilderVersion = "1"
         self.ServerVersion = DockerAPI.daemonVersion
         self.Runtimes = [
             "containerization": .init(path: "Virtualization.framework", runtimeArgs: nil),

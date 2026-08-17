@@ -487,12 +487,21 @@ extension EngineManager {
         }
         let work = try Self.makeWorkDirectory()
         defer { try? FileManager.default.removeItem(at: work) }
-
         let tarFile = work.appendingPathComponent("images.tar")
-        let dest = work.appendingPathComponent("oci", isDirectory: true)
         try tar.write(to: tarFile)
+        return try await loadImages(fromArchive: tarFile)
+    }
+
+    public func loadImages(fromArchive tar: URL) async throws -> [String] {
+        guard (try? TarArchive.size(of: tar)) ?? 0 > 0 else {
+            throw EngineError.loadFailed("empty image archive")
+        }
+        let work = try Self.makeWorkDirectory()
+        defer { try? FileManager.default.removeItem(at: work) }
+
+        let dest = work.appendingPathComponent("oci", isDirectory: true)
         try FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
-        try Self.runTar(["-C", dest.path, "-xf", tarFile.path])
+        try Self.runTar(["-C", dest.path, "-xf", tar.path])
 
         let root = Self.findOCILayout(in: dest) ?? dest
         let images = try await imageStore.load(from: root)

@@ -79,6 +79,8 @@ enum DaemonAPI {
     static func streamLines(
         method: String,
         path: String,
+        bodyFile: URL? = nil,
+        contentType: String = "application/json",
         timeoutSeconds: Int? = 300,
         onLine: (String) -> Void
     ) throws -> Int {
@@ -86,6 +88,8 @@ enum DaemonAPI {
             method: method,
             path: prefixed(path),
             socketPath: socket,
+            bodyFile: bodyFile,
+            contentType: contentType,
             timeoutSeconds: timeoutSeconds,
             onLine: onLine
         )

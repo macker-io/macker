@@ -77,6 +77,7 @@ struct CommitRuntimeConfig: Codable, Sendable {
     var WorkingDir: String?
     var Labels: [String: String]?
     var StopSignal: String?
+    var Shell: [String]?
     var ExposedPorts: [String: CommitEmpty]?
     var Volumes: [String: CommitEmpty]?
 }
@@ -206,6 +207,8 @@ enum CommitConfig {
             )
         case "USER":
             config.User = rest
+        case "STOPSIGNAL":
+            config.StopSignal = rest
         case "WORKDIR":
             config.WorkingDir = rest
         case "VOLUME":

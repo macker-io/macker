@@ -113,6 +113,24 @@ struct FilesystemCommandTests {
         }
     }
 
+    /// Image rootfs trees are full of absolute symlinks (`/bin/cat` → `/bin/busybox`)
+    /// that dangle on the host. Losing them makes a commit whiteout half of `/bin`.
+    @Test func walkKeepsDanglingAbsoluteSymlinks() throws {
+        try TemporaryDirectory.with("macker-walk-links") { work in
+            let root = work.appendingPathComponent("root")
+            try FileManager.default.createDirectory(at: root.appendingPathComponent("bin"), withIntermediateDirectories: true)
+            try "binary\n".write(to: root.appendingPathComponent("bin/busybox"), atomically: true, encoding: .utf8)
+            try FileManager.default.createSymbolicLink(
+                atPath: root.appendingPathComponent("bin/cat").path,
+                withDestinationPath: "/bin/busybox"
+            )
+            let entries = FSInventory.walkDirectory(root)
+            #expect(entries["/bin/busybox"]?.kind == .file)
+            #expect(entries["/bin/cat"]?.kind == .symlink)
+            #expect(FSInventory.diff(baseline: entries, current: entries).isEmpty)
+        }
+    }
+
     @Test func dockerfileChangesMergeIntoConfig() throws {
         var config = CommitRuntimeConfig()
         try CommitConfig.applyInstructions(

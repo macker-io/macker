@@ -85,19 +85,6 @@ struct SystemGroup: ParsableCommand {
     )
 }
 
-struct Build: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        abstract: "Build an image from a Dockerfile (not implemented)."
-    )
-
-    @Argument(help: "Build context (unused).")
-    var path: String?
-
-    func run() throws {
-        throw CLIError.http("image build is not implemented")
-    }
-}
-
 private struct VersionInfo: Decodable {
     var Version: String
     var ApiVersion: String

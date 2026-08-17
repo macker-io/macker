@@ -20,6 +20,7 @@ struct Macker: ParsableCommand {
             Rm.self, Pause.self, Unpause.self, Rename.self, Logs.self, Wait.self, Top.self, Stats.self,
             Attach.self, Exec.self, Cp.self, Export.self, Diff.self, Commit.self, Port.self, Version.self, Info.self, Events.self,
             ImageGroup.self, ContainerGroup.self, VolumeGroup.self, NetworkGroup.self, SystemGroup.self,
+            BuilderGroup.self,
         ]
     )
 }

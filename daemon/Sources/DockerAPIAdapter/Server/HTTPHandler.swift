@@ -15,6 +15,7 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler, @unchec
     private let logger: Logger
     private var head: HTTPRequestHead?
     private var body: ByteBuffer?
+    private var spool: BodySpool?
     private var hijacked = false
 
     init(router: Router, logger: Logger) {
@@ -28,8 +29,12 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler, @unchec
         case .head(let head):
             self.head = head
             self.body = nil
+            self.spool?.discard()
+            self.spool = Self.spoolsBody(method: head.method.rawValue, uri: head.uri) ? BodySpool() : nil
         case .body(var buffer):
-            if body == nil {
+            if let spool {
+                spool.write(buffer)
+            } else if body == nil {
                 body = buffer
             } else {
                 body!.writeBuffer(&buffer)
@@ -42,18 +47,24 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler, @unchec
             for (name, value) in head.headers {
                 headers[name.lowercased()] = value
             }
+            let spool = self.spool
+            spool?.finish()
             let request = HTTPRequest(
                 method: head.method.rawValue,
                 path: parsed.path,
                 query: parsed.query,
                 queryAll: parsed.queryAll,
                 headers: headers,
-                body: bodyData
+                body: bodyData,
+                bodyFile: spool?.readableURL
             )
             let router = self.router
             let logger = self.logger
             let channel = context.channel
             let handler = self
+            let cleanup: (@Sendable () -> Void)? = spool.flatMap { spool -> (@Sendable () -> Void) in
+                { spool.discard() }
+            }
 
             context.eventLoop.makeFutureWithTask {
                 await router.handle(request)
@@ -73,32 +84,56 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler, @unchec
                 if case .hijack = response.body {
                     handler.hijacked = true
                 }
-                handler.writeResponse(channel: channel, request: request, response: response)
+                handler.writeResponse(channel: channel, request: request, response: response, cleanup: cleanup)
                 logger.debug("\(request.method) \(request.path) -> \(response.status)")
             }
             self.head = nil
             self.body = nil
+            self.spool = nil
         }
     }
 
-    private func writeResponse(channel: Channel, request: HTTPRequest, response: HTTPResponse) {
+    func handlerRemoved(context: ChannelHandlerContext) {
+        spool?.discard()
+        spool = nil
+    }
+
+    /// Routes whose request body is a tar and can be arbitrarily large.
+    private static func spoolsBody(method: String, uri: String) -> Bool {
+        guard method.uppercased() == "POST" else { return false }
+        let path = Self.parseURI(uri).path
+        let unversioned = Router.splitAPIVersion(path).path
+        return unversioned == "/build" || unversioned == "/images/load"
+    }
+
+    private func writeResponse(
+        channel: Channel,
+        request: HTTPRequest,
+        response: HTTPResponse,
+        cleanup: (@Sendable () -> Void)? = nil
+    ) {
         if case .hijack(let session) = response.body {
             guard channel.isActive else {
                 Task { await session.onClose() }
+                cleanup?()
                 return
             }
             channel.eventLoop.makeFutureWithTask {
                 await self.performHijack(channel: channel, request: request, response: response, session: session)
+                cleanup?()
             }.whenFailure { error in
                 self.logger.error("hijack failed: \(error)")
                 channel.close(promise: nil)
+                cleanup?()
             }
             return
         }
 
         guard channel.isActive else {
             if case .stream(let stream) = response.body {
-                OnceClose(stream.onClose).run()
+                OnceClose(stream.onClose, then: cleanup).run()
+            } else {
+                cleanup?()
             }
             return
         }
@@ -115,6 +150,7 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler, @unchec
             }
             Self.writeHead(channel: channel, status: response.status, headers: headers)
             channel.writeAndFlush(HTTPServerResponsePart.end(nil), promise: nil)
+            cleanup?()
 
         case .buffer(let body):
             if headers["content-length"].isEmpty {
@@ -125,10 +161,11 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler, @unchec
                 channel.write(HTTPServerResponsePart.body(.byteBuffer(body)), promise: nil)
             }
             channel.writeAndFlush(HTTPServerResponsePart.end(nil), promise: nil)
+            cleanup?()
 
         case .stream(let stream):
             Self.writeHead(channel: channel, status: response.status, headers: headers)
-            let close = OnceClose(stream.onClose)
+            let close = OnceClose(stream.onClose, then: cleanup)
             channel.closeFuture.whenComplete { _ in
                 close.run()
             }
@@ -152,7 +189,7 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler, @unchec
             }
 
         case .hijack:
-            break
+            cleanup?()
         }
     }
 
@@ -288,9 +325,11 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler, @unchec
 private final class OnceClose: @unchecked Sendable {
     private let lock = OSAllocatedUnfairLock(initialState: false)
     private let action: (@Sendable () async -> Void)?
+    private let then: (@Sendable () -> Void)?
 
-    init(_ action: (@Sendable () async -> Void)?) {
+    init(_ action: (@Sendable () async -> Void)?, then: (@Sendable () -> Void)? = nil) {
         self.action = action
+        self.then = then
     }
 
     func run() {
@@ -303,7 +342,51 @@ private final class OnceClose: @unchecked Sendable {
             done = true
             return true
         }
-        guard first, let action else { return }
-        await action()
+        guard first else { return }
+        await action?()
+        then?()
+    }
+}
+
+/// Spools a request body to a temp file so the daemon never holds a whole tar in memory.
+/// The file lives until the response finishes; the router reads it via ``HTTPRequest/bodyFile``.
+private final class BodySpool: @unchecked Sendable {
+    private let directory: URL
+    private let url: URL
+    private var handle: FileHandle?
+    private var usable: Bool
+
+    init() {
+        let fm = FileManager.default
+        directory = fm.temporaryDirectory.appendingPathComponent("macker-body-\(UUID().uuidString)", isDirectory: true)
+        url = directory.appendingPathComponent("body")
+        usable = (try? fm.createDirectory(at: directory, withIntermediateDirectories: true)) != nil
+            && fm.createFile(atPath: url.path, contents: nil)
+        handle = usable ? try? FileHandle(forWritingTo: url) : nil
+        usable = handle != nil
+    }
+
+    /// `nil` when spooling failed, so the route falls back to an empty in-memory body.
+    var readableURL: URL? { usable ? url : nil }
+
+    func write(_ buffer: ByteBuffer) {
+        guard let handle else { return }
+        do {
+            try handle.write(contentsOf: Data(buffer.readableBytesView))
+        } catch {
+            usable = false
+            try? handle.close()
+            self.handle = nil
+        }
+    }
+
+    func finish() {
+        try? handle?.close()
+        handle = nil
+    }
+
+    func discard() {
+        finish()
+        try? FileManager.default.removeItem(at: directory)
     }
 }

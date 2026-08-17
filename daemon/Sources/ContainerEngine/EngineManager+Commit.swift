@@ -8,14 +8,12 @@ extension EngineManager {
         try CommitConfig.applyInstructions(spec.changes, to: &preview)
 
         let container = try requireFilesystem(idOrName)
-        return try await withExtractedRootfs(container) { root in
-            let current = FSInventory.walkDirectory(root, excluding: self.mountDestinations(container))
-            let baseline = try await self.loadBaseline(container)
-            return try await self.writeCommittedImage(
+        return try await withSnapshot(container) { changes, root in
+            try await self.writeCommittedImage(
                 container: container,
                 spec: spec,
                 root: root,
-                changes: FSInventory.diff(baseline: baseline, current: current)
+                changes: changes
             )
         }
     }
@@ -45,32 +43,31 @@ extension EngineManager {
             imageFile.author = spec.author
         }
 
-        let descriptor = try await withScratch("macker-layer") { work in
-            let staged = work.appendingPathComponent("layer", isDirectory: true)
-            try FSInventory.packLayer(from: root, changes: changes, into: staged)
-            let tar = work.appendingPathComponent("layer.tar")
-            try TarArchive.createContents(of: staged, into: tar)
-            let gzip = work.appendingPathComponent("layer.tar.gz")
-            try TarArchive.gzip(tar, to: gzip)
-            return try await self.ingestCommittedImage(
-                imageFile: imageFile,
+        let ingested = try await withScratch("macker-layer") { work in
+            try await self.ingestImage(
+                config: imageFile,
                 parentLayers: manifest.layers,
                 platform: platform,
-                gzip: gzip,
-                diffID: try TarArchive.sha256(of: tar),
-                uncompressedSize: try TarArchive.size(of: tar),
-                spec: spec,
-                createdAt: createdAt
+                layer: try self.stageLayer(root: root, changes: changes, work: work),
+                history: CommitHistory(
+                    created: ISO8601.string(from: createdAt),
+                    createdBy: "#(nop) COMMIT",
+                    author: spec.author.isEmpty ? imageFile.author : spec.author,
+                    comment: spec.comment.isEmpty ? nil : spec.comment,
+                    emptyLayer: nil
+                )
             )
         }
 
+        let image: Containerization.Image
         let reference: String
         if let repo = spec.repo, !repo.isEmpty {
             reference = try Self.normalizedReference(name: repo, tag: spec.tag)
+            image = try await imageStore.create(description: .init(reference: reference, descriptor: ingested.descriptor))
         } else {
-            reference = descriptor.digest
+            reference = ingested.descriptor.digest
+            image = try await adoptImage(ingested.descriptor)
         }
-        let image = try await imageStore.create(description: .init(reference: reference, descriptor: descriptor))
         await publish(
             EngineEvent(
                 type: "container",
@@ -88,94 +85,5 @@ extension EngineManager {
             )
         )
         return image.digest
-    }
-
-    private func ingestCommittedImage(
-        imageFile: CommitImageFile,
-        parentLayers: [Descriptor],
-        platform: Platform,
-        gzip: URL,
-        diffID: String,
-        uncompressedSize: Int64,
-        spec: EngineCommitSpec,
-        createdAt: Date
-    ) async throws -> Descriptor {
-        var imageFile = imageFile
-        imageFile.rootfs.diffIDs.append(diffID)
-        imageFile.history = (imageFile.history ?? []) + [
-            CommitHistory(
-                created: ISO8601.string(from: createdAt),
-                createdBy: "#(nop) COMMIT",
-                author: spec.author.isEmpty ? imageFile.author : spec.author,
-                comment: spec.comment.isEmpty ? nil : spec.comment,
-                emptyLayer: nil
-            )
-        ]
-
-        let contentStore = try LocalContentStore(path: imageStore.path.appendingPathComponent("content"))
-        let box = DescriptorBox()
-        let encoded = imageFile
-        try await contentStore.ingest { dir in
-            let writer = try ContentWriter(for: dir)
-            let layerResult = try writer.create(from: gzip)
-            let configResult = try writer.create(from: encoded)
-            let manifestResult = try writer.create(
-                from: Manifest(
-                    config: Descriptor(
-                        mediaType: MediaTypes.imageConfig,
-                        digest: configResult.digest.digestString,
-                        size: configResult.size
-                    ),
-                    layers: parentLayers + [
-                        Descriptor(
-                            mediaType: MediaTypes.imageLayerGzip,
-                            digest: layerResult.digest.digestString,
-                            size: layerResult.size,
-                            annotations: [ImageLayerSize.uncompressedAnnotation: String(uncompressedSize)]
-                        )
-                    ]
-                )
-            )
-            let indexResult = try writer.create(
-                from: Index(
-                    manifests: [
-                        Descriptor(
-                            mediaType: MediaTypes.imageManifest,
-                            digest: manifestResult.digest.digestString,
-                            size: manifestResult.size,
-                            platform: platform
-                        )
-                    ]
-                )
-            )
-            box.set(
-                Descriptor(
-                    mediaType: MediaTypes.index,
-                    digest: indexResult.digest.digestString,
-                    size: indexResult.size
-                )
-            )
-        }
-        guard let descriptor = box.get() else {
-            throw EngineError.exportFailed("failed to write committed image")
-        }
-        return descriptor
-    }
-}
-
-private final class DescriptorBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var value: Descriptor?
-
-    func set(_ descriptor: Descriptor) {
-        lock.lock()
-        value = descriptor
-        lock.unlock()
-    }
-
-    func get() -> Descriptor? {
-        lock.lock()
-        defer { lock.unlock() }
-        return value
     }
 }

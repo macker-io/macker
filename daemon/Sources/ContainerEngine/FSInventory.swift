@@ -59,8 +59,14 @@ public struct EngineFSChange: Sendable, Equatable {
 }
 
 public enum FSInventory {
-    /// Compare a live tree against the image baseline captured at start.
-    public static func diff(baseline: [String: FSEntry], current: [String: FSEntry]) -> [EngineFSChange] {
+    /// Compare a live tree against the image baseline captured at start. Pass
+    /// `timestamps: false` when either side went through a tar that dropped mtimes,
+    /// which would otherwise report every file in the image as modified.
+    public static func diff(
+        baseline: [String: FSEntry],
+        current: [String: FSEntry],
+        timestamps: Bool = true
+    ) -> [EngineFSChange] {
         var changes: [EngineFSChange] = []
         for path in Set(baseline.keys).union(current.keys).sorted() where path != "/" {
             switch (baseline[path], current[path]) {
@@ -68,7 +74,7 @@ public enum FSInventory {
                 changes.append(EngineFSChange(path: path, kind: .add))
             case (.some, nil):
                 changes.append(EngineFSChange(path: path, kind: .delete))
-            case (let left?, let right?) where changed(left, right):
+            case (let left?, let right?) where changed(left, right, timestamps: timestamps):
                 changes.append(EngineFSChange(path: path, kind: .modify))
             default:
                 break
@@ -104,13 +110,36 @@ public enum FSInventory {
         }
     }
 
+    /// A directory enumeration reports paths under the real root (`/private/var/…`)
+    /// while callers hold the unresolved URL (`/var/…`). Standardizing the entry is not
+    /// an option: it silently leaves dangling symlinks — which an image rootfs is full
+    /// of — spelled the other way, so accept either spelling of the root instead.
     public static func containerPath(for url: URL, root: URL) -> String? {
-        let rootPath = root.standardizedFileURL.path
-        let full = url.standardizedFileURL.path
-        if full == rootPath { return nil }
-        let prefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
-        guard full.hasPrefix(prefix) else { return nil }
-        return "/" + String(full.dropFirst(prefix.count))
+        relativePath(url.path, under: rootPrefixes(root))
+    }
+
+    static func rootPrefixes(_ root: URL) -> [String] {
+        let path = root.path
+        let real = realpath(path)
+        return real == path ? [path] : [path, real]
+    }
+
+    static func relativePath(_ full: String, under bases: [String]) -> String? {
+        for base in bases {
+            if full == base { return nil }
+            let prefix = base.hasSuffix("/") ? base : base + "/"
+            guard full.hasPrefix(prefix) else { continue }
+            return "/" + String(full.dropFirst(prefix.count))
+        }
+        return nil
+    }
+
+    /// `URL.resolvingSymlinksInPath` strips `/private` back off, which is the opposite
+    /// of what an enumeration hands back.
+    private static func realpath(_ path: String) -> String {
+        guard let resolved = Foundation.realpath(path, nil) else { return path }
+        defer { free(resolved) }
+        return String(cString: resolved)
     }
 
     public static func hostURL(root: URL, path: String) -> URL {
@@ -118,12 +147,9 @@ public enum FSInventory {
     }
 
     public static func walkDirectory(_ root: URL, excluding mounts: [String] = []) -> [String: FSEntry] {
-        let fm = FileManager.default
-        guard let enumerator = fm.enumerator(
+        guard let enumerator = FileManager.default.enumerator(
             at: root,
-            includingPropertiesForKeys: [
-                .isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey, .fileResourceTypeKey,
-            ],
+            includingPropertiesForKeys: nil,
             options: [],
             errorHandler: { _, _ in true }
         ) else {
@@ -131,24 +157,15 @@ public enum FSInventory {
         }
 
         var entries: [String: FSEntry] = [:]
+        let prefixes = rootPrefixes(root)
         while let url = enumerator.nextObject() as? URL {
-            guard let rel = containerPath(for: url, root: root), !shouldSkip(rel) else { continue }
+            guard let rel = relativePath(url.path, under: prefixes), !shouldSkip(rel) else { continue }
             if mounts.contains(rel) {
                 enumerator.skipDescendants()
             }
             if isExcluded(rel, mounts: mounts) { continue }
-            guard let values = try? url.resourceValues(forKeys: [
-                .isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey, .fileResourceTypeKey,
-            ]) else {
-                continue
-            }
-            let attrs = (try? fm.attributesOfItem(atPath: url.path)) ?? [:]
-            entries[rel] = FSEntry(
-                kind: kind(from: values),
-                size: Int64(values.fileSize ?? 0),
-                mode: (attrs[.posixPermissions] as? NSNumber)?.uint16Value ?? 0,
-                mtime: Int64((values.contentModificationDate ?? Date.distantPast).timeIntervalSince1970)
-            )
+            guard let entry = stat(url) else { continue }
+            entries[rel] = entry
         }
         return entries
     }
@@ -219,20 +236,39 @@ public enum FSInventory {
         try fm.copyItem(at: source, to: dest)
     }
 
-    private static func changed(_ left: FSEntry, _ right: FSEntry) -> Bool {
+    /// EXT4 inodes carry the full `st_mode`; a host directory walk only sees the
+    /// permission bits, so comparisons mask off the file type. Symlink permissions
+    /// and mtimes do not survive a host extraction either, so only the target
+    /// length is compared for them.
+    private static func changed(_ left: FSEntry, _ right: FSEntry, timestamps: Bool) -> Bool {
         if left.kind != right.kind { return true }
-        if left.kind == .directory { return left.mode != right.mode }
-        return left.size != right.size || left.mtime != right.mtime || left.mode != right.mode
+        let permissions = left.mode & 0o7777 != right.mode & 0o7777
+        switch left.kind {
+        case .directory:
+            return permissions
+        case .symlink:
+            return left.size != right.size
+        case .file, .other:
+            if timestamps, left.mtime != right.mtime { return true }
+            return left.size != right.size || permissions
+        }
     }
 
     private static func shouldSkip(_ path: String) -> Bool {
         path == "/lost+found" || path.hasPrefix("/lost+found/")
     }
 
-    private static func kind(from values: URLResourceValues) -> FSEntry.Kind {
-        if values.isSymbolicLink == true { return .symlink }
-        if values.isDirectory == true { return .directory }
-        if values.fileResourceType == .regular { return .file }
-        return .other
+    /// `lstat`, not `URL.resourceValues`: image rootfs trees are full of absolute
+    /// symlinks (`/bin/cat` → `/bin/busybox`) that dangle once extracted to a host
+    /// directory, and resource values for a dangling link fail outright.
+    private static func stat(_ url: URL) -> FSEntry? {
+        var info = Foundation.stat()
+        guard lstat(url.path, &info) == 0 else { return nil }
+        return FSEntry(
+            kind: FSEntry.Kind(unixMode: info.st_mode),
+            size: Int64(info.st_size),
+            mode: info.st_mode,
+            mtime: Int64(info.st_mtimespec.tv_sec)
+        )
     }
 }

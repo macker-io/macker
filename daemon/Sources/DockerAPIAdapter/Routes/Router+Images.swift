@@ -157,7 +157,12 @@ extension Router {
 
     func loadImages(_ request: HTTPRequest) async -> HTTPResponse {
         do {
-            let references = try await engine.loadImages(from: request.body)
+            let references: [String]
+            if let file = request.bodyFile {
+                references = try await engine.loadImages(fromArchive: file)
+            } else {
+                references = try await engine.loadImages(from: request.body)
+            }
             let (stream, continuation) = AsyncStream<ByteBuffer>.makeStream()
             Task {
                 for reference in references {

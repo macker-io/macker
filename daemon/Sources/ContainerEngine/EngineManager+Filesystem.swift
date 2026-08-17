@@ -18,9 +18,30 @@ extension EngineManager {
 
     public func containerChanges(_ idOrName: String) async throws -> [EngineFSChange] {
         let container = try requireFilesystem(idOrName)
-        let current = try await currentInventory(container)
-        let baseline = try await loadBaseline(container)
-        return FSInventory.diff(baseline: baseline, current: current)
+        guard container.state == "running" else {
+            return try await offlineChanges(container)
+        }
+        return try await withExtractedRootfs(container) { root in
+            try await self.extractedChanges(container, root: root)
+        }
+    }
+
+    /// The changes to turn into a layer, plus a host tree holding their contents.
+    /// Used by `commit` and by the builder's `RUN`.
+    func withSnapshot<T>(
+        _ container: EngineContainer,
+        _ body: ([EngineFSChange], URL) async throws -> T
+    ) async throws -> T {
+        let offline = container.state == "running" ? nil : try await offlineChanges(container)
+        return try await withExtractedRootfs(container) { root in
+            let changes: [EngineFSChange]
+            if let offline {
+                changes = offline
+            } else {
+                changes = try await self.extractedChanges(container, root: root)
+            }
+            return try await body(changes, root)
+        }
     }
 
     func snapshotBaseline(_ id: String) {
@@ -77,14 +98,22 @@ extension EngineManager {
         }
     }
 
-    private func currentInventory(_ container: EngineContainer) async throws -> [String: FSEntry] {
-        let mounts = mountDestinations(container)
-        if container.state == "running" {
-            return try await withExtractedRootfs(container) { root in
-                FSInventory.walkDirectory(root, excluding: mounts)
-            }
-        }
-        return try FSInventory.walkEXT4(rootfsURL(container.id))
+    /// Both sides are ext4 metadata, so timestamps are comparable.
+    private func offlineChanges(_ container: EngineContainer) async throws -> [EngineFSChange] {
+        FSInventory.diff(
+            baseline: try await loadBaseline(container),
+            current: try FSInventory.walkEXT4(rootfsURL(container.id))
+        )
+    }
+
+    /// A live rootfs can only be read through the guest's tar, which carries no
+    /// timestamps, so mtimes stay out of the comparison.
+    private func extractedChanges(_ container: EngineContainer, root: URL) async throws -> [EngineFSChange] {
+        FSInventory.diff(
+            baseline: try await loadBaseline(container),
+            current: FSInventory.walkDirectory(root, excluding: mountDestinations(container)),
+            timestamps: false
+        )
     }
 
     private func unpackImageBaseline(_ imageName: String) async throws -> [String: FSEntry] {

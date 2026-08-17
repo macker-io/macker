@@ -8,8 +8,38 @@ public enum TarArchive {
         )
     }
 
-    public static func createContents(of directory: URL, into archive: URL) throws {
-        try run(["-cf", archive.path, "-C", directory.path, "."])
+    /// Owner recorded in the archive. Host ownership is whatever the staged copy has;
+    /// image layers override it, since a non-root host cannot restore uid/gid on extract.
+    public enum Ownership: Sendable, Equatable {
+        case host
+        case numeric(uid: Int, gid: Int)
+
+        public static let root = Ownership.numeric(uid: 0, gid: 0)
+
+        var arguments: [String] {
+            switch self {
+            case .host:
+                return []
+            case .numeric(let uid, let gid):
+                var args = ["--numeric-owner", "--uid", "\(uid)", "--gid", "\(gid)"]
+                if uid == 0 { args += ["--uname", "root"] }
+                if gid == 0 { args += ["--gname", "root"] }
+                return args
+            }
+        }
+    }
+
+    public static func createContents(of directory: URL, into archive: URL, ownership: Ownership = .host) throws {
+        try run(["-cf", archive.path] + ownership.arguments + ["-C", directory.path, "."])
+    }
+
+    /// Packs exactly `paths` (relative to `directory`), for build contexts filtered by
+    /// `.dockerignore`. Directories are archived as single entries, never recursively.
+    public static func create(contentsOf directory: URL, paths: [String], into archive: URL) throws {
+        let list = archive.deletingLastPathComponent().appendingPathComponent("\(archive.lastPathComponent).files")
+        try paths.joined(separator: "\n").appending("\n").write(to: list, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: list) }
+        try run(["-cf", archive.path, "--no-recursion", "-C", directory.path, "-T", list.path])
     }
 
     /// Pack `item` so the tar's top-level name is `name` (for `cp file.txt container:/tmp/renamed`).

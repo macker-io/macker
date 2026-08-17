@@ -90,6 +90,30 @@ Running containers are snapshotted through the guest. A stopped container still 
 ./.build/debug/macker run --rm myhello cat /hello
 ```
 
+## Build
+
+`macker build` is the classic Docker builder: the CLI applies `.dockerignore` and uploads a context tar to `POST /build`, the daemon interprets the Dockerfile, and each `RUN` executes in a throwaway MicroVM. **buildx / BuildKit is not implemented** — `POST /session` stays 404 and `GET /info` reports `BuilderVersion: "1"`.
+
+```bash
+cat > Dockerfile <<'EOF'
+FROM alpine AS build
+WORKDIR /src
+COPY . .
+RUN echo "built at $(date)" > /out.txt
+
+FROM alpine
+COPY --from=build /out.txt /out.txt
+CMD ["cat", "/out.txt"]
+EOF
+./.build/debug/macker build -t demo:latest .
+./.build/debug/macker run --rm demo:latest
+./.build/debug/macker builder prune          # drop cached intermediate images
+```
+
+`-t` (repeatable), `-f`, `--build-arg`, `--label`, `--target`, `--no-cache`, `--pull`, and `-q` behave as usual, as do multi-stage builds, `COPY --from`, and `ADD` with a remote URL or an auto-extracted tar. Intermediate images are stored untagged, so `images -a` shows them and `builder prune` (or `image prune`) reclaims them. Because every `RUN` boots a VM, the layer cache matters: a cache key is the parent digest plus the normalized instruction, plus a content hash for `COPY` and the resolved value for `ARG`.
+
+`macker setup` aliases `docker` to `macker`, so `docker build` lands here. The official `docker` binary talking straight to `macker.sock` defaults to BuildKit on 23+ and will fail — use `macker build` or `DOCKER_BUILDKIT=0 docker build`. BuildKit-only syntax (`# syntax=`, heredocs, `RUN --mount`, `--secret`, `--ssh`, cache mounts, bake, multi-platform) is out of scope for this release; the follow-up is to reuse BuildKit plus [container-builder-shim](https://github.com/apple/container-builder-shim) and wire the host side to macker's store — see [docs/buildkit.md](docs/buildkit.md). Gaps in the classic builder are in [docs/cli-status.md](docs/cli-status.md).
+
 ## Socket
 
 The daemon listens on:
