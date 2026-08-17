@@ -217,7 +217,7 @@ struct Create: ParsableCommand {
 struct Start: ParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Start one or more stopped containers.")
     @Argument var containers: [String]
-    func run() throws { try ContainerAction.post("start", containers) }
+    func run() throws { try ContainerAction.post("start", containers, timeoutSeconds: 300) }
 }
 
 struct Stop: ParsableCommand {
@@ -225,7 +225,7 @@ struct Stop: ParsableCommand {
     @Option(name: .shortAndLong, help: "Seconds to wait before killing the container.")
     var time: Int = 10
     @Argument var containers: [String]
-    func run() throws { try ContainerAction.post("stop", containers, query: "t=\(time)") }
+    func run() throws { try ContainerAction.post("stop", containers, query: "t=\(time)", timeoutSeconds: time + 30) }
 }
 
 struct Restart: ParsableCommand {
@@ -233,7 +233,7 @@ struct Restart: ParsableCommand {
     @Option(name: .shortAndLong, help: "Seconds to wait before killing the container.")
     var time: Int = 10
     @Argument var containers: [String]
-    func run() throws { try ContainerAction.post("restart", containers, query: "t=\(time)") }
+    func run() throws { try ContainerAction.post("restart", containers, query: "t=\(time)", timeoutSeconds: time + 30) }
 }
 
 struct Kill: ParsableCommand {
@@ -241,7 +241,7 @@ struct Kill: ParsableCommand {
     @Option(name: .shortAndLong, help: "Signal to send.")
     var signal: String = "KILL"
     @Argument var containers: [String]
-    func run() throws { try ContainerAction.post("kill", containers, query: "signal=\(DaemonAPI.query(signal))") }
+    func run() throws { try ContainerAction.post("kill", containers, query: "signal=\(DaemonAPI.query(signal))", timeoutSeconds: 30) }
 }
 
 struct Pause: ParsableCommand {
@@ -687,12 +687,11 @@ struct ContainerInspect: ParsableCommand {
 }
 
 private enum ContainerAction {
-    static func post(_ action: String, _ ids: [String], query: String = "") throws {
+    static func post(_ action: String, _ ids: [String], query: String = "", timeoutSeconds: Int? = 5) throws {
         for id in ids {
             var path = "/containers/\(DaemonAPI.path(id))/\(action)"
             if !query.isEmpty { path += "?\(query)" }
-            let timeout = action == "start" ? 300 : 5
-            try DaemonAPI.requireOK(DaemonAPI.post(path, timeoutSeconds: timeout))
+            try DaemonAPI.requireOK(DaemonAPI.post(path, timeoutSeconds: timeoutSeconds))
             print(id)
         }
     }

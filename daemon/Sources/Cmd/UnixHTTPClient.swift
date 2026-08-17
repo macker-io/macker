@@ -342,12 +342,7 @@ private struct HTTPReader {
                 buffer.removeSubrange(..<range.upperBound)
                 return result
             }
-            do {
-                try readMore(allowEOF: false)
-            } catch {
-                if buffer.isEmpty { return Data() }
-                throw error
-            }
+            try readMore(allowEOF: false)
         }
     }
 
