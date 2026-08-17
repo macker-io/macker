@@ -94,7 +94,6 @@ extension EngineManager {
         saveContainer(container)
         watchVM(container.id)
         await publish(EngineEvent(type: "container", action: "start", actorID: container.id, attributes: ["name": container.name, "image": container.image]))
-        await refreshPeerHosts(networkIDs: container.networkIDs)
         return true
     }
 
@@ -185,7 +184,7 @@ extension EngineManager {
         finishWaiters(id: container.id, code: container.exitCode)
         finishAttachSubscribers(container.id, extra: nil)
         await finishExecs(forContainer: container.id, code: container.exitCode)
-        forgetContainer(container.id)
+        await forgetContainer(container.id)
         if removeAnonymousVolumes {
             for name in anonymous where !name.isEmpty {
                 try? await deleteVolume(name, force: true)
@@ -203,7 +202,7 @@ extension EngineManager {
             for (id, exec) in execs where exec.containerID == container.id {
                 execs[id] = nil
             }
-            forgetContainer(container.id)
+            await forgetContainer(container.id)
             deleted.append(container.id)
             await publish(EngineEvent(type: "container", action: "destroy", actorID: container.id, attributes: ["name": container.name]))
         }
@@ -320,7 +319,7 @@ extension EngineManager {
         container.finishedAt = Date()
         let id = container.id
         if container.autoRemove {
-            forgetContainer(id)
+            await forgetContainer(id)
         } else {
             saveContainer(container)
         }
@@ -356,6 +355,7 @@ extension EngineManager {
         for id in ids {
             _ = try? await stopContainer(id, timeoutSeconds: 10)
         }
+        await networkGateway.shutdown()
     }
 
     func saveContainer(_ container: EngineContainer) {
@@ -363,9 +363,9 @@ extension EngineManager {
         try? persistContainer(container)
     }
 
-    func forgetContainer(_ id: String) {
+    func forgetContainer(_ id: String) async {
         stopPortPublishers(id)
-        releaseInterfaces(id)
+        await releaseInterfaces(id, keepAddresses: false)
         containers[id] = nil
         ttySessions[id] = nil
         statsSamples[id] = nil

@@ -1,0 +1,172 @@
+import ContainerizationExtras
+import Foundation
+import Testing
+@testable import ContainerEngine
+
+struct NetworkGatewayTests {
+    @Test func ipamSkipsNetworkGatewayAndBroadcast() throws {
+        var table = try NetworkIPAM(subnet: "172.17.0.0/16")
+        let first = try table.allocate(id: "a")
+        #expect(first.description == "172.17.0.2")
+        try table.reserve(id: "b", ip: IPv4Address(0xAC11_0003))
+        let third = try table.allocate(id: "c")
+        #expect(third.description == "172.17.0.4")
+        table.release(id: "a")
+        let reused = try table.allocate(id: "d")
+        #expect(reused.description == "172.17.0.2")
+        #expect(throws: EngineError.self) {
+            try table.reserve(id: "e", ip: IPv4Address(0xAC11_0003)) // taken by "b"
+        }
+        #expect(throws: EngineError.self) {
+            try table.reserve(id: "e", ip: IPv4Address(0xAC11_0001)) // the gateway
+        }
+        table.release(id: "b")
+        try table.reserve(id: "e", ip: IPv4Address(0xAC11_0003))
+        #expect(table.address(for: "e")?.description == "172.17.0.3")
+    }
+
+    @Test func dnsAnswersARecords() throws {
+        let ip = IPv4Address(0xAC11_0002)
+        var query = Data([0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+        query.append(contentsOf: [3, 119, 101, 98, 0, 0, 1, 0, 1]) // web A IN
+        let question = try #require(GatewayDNS.parseQuery(query))
+        #expect(question.name == "web")
+        #expect(question.type == 1)
+        let answer = GatewayDNS.answer(id: question.id, name: question.name, address: ip)
+        #expect(answer[2] & 0x80 != 0)
+        #expect(Array(answer.suffix(4)) == ip.bytes)
+        let nodata = GatewayDNS.answer(id: question.id, name: question.name, address: nil)
+        #expect(nodata[3] & 0x0f == 0)
+        let nx = GatewayDNS.answer(id: question.id, name: question.name, address: nil, nxdomain: true)
+        #expect(nx[3] & 0x0f == 3)
+    }
+
+    @Test func ipv4EncodePacksLargePayloadLength() {
+        let src = IPv4Address(0xAC11_0002)
+        let dst = IPv4Address(0xC0A8_FF01)
+        let packet = IPv4Packet(tos: 0, id: 1, ttl: 64, proto: Ethernet.protoUDP, src: src, dst: dst, payload: Data(count: 300))
+        let encoded = packet.encode()
+        #expect(encoded.count == 320)
+        #expect(encoded[2] == 0x01)
+        #expect(encoded[3] == 0x40)
+    }
+
+    @Test func ethernetRoundTripAndChecksum() throws {
+        let src = try MACAddress([0x0A, 0x00, 0x27, 0x00, 0x00, 0x02])
+        let dst = NetworkGateway.gatewayMAC
+        let payload = Data([1, 2, 3, 4])
+        let frame = Ethernet.frame(dst: dst, src: src, type: Ethernet.typeIPv4, payload: payload)
+        let parsed = try #require(Ethernet.parse(frame))
+        #expect(parsed.src == src)
+        #expect(parsed.dst == dst)
+        #expect(parsed.type == Ethernet.typeIPv4)
+        #expect(parsed.payload == payload)
+        #expect(Ethernet.checksum(Data([0x00, 0x01, 0xf2, 0x03, 0xf4, 0xf5, 0xf6, 0xf7])) == 0x220d)
+    }
+
+    @Test func tcpSegmentParsesHeaderFlagsAndPayload() throws {
+        var header = Data(count: 20)
+        header[0] = 0x1f // src 8080
+        header[1] = 0x90
+        header[2] = 0x00 // dst 80
+        header[3] = 0x50
+        header[4] = 0x00 // seq 0x0000_0102
+        header[5] = 0x00
+        header[6] = 0x01
+        header[7] = 0x02
+        header[12] = 0x60 // data offset 6 words: 4 bytes of options
+        header[13] = TCPSegment.Flags.pushAck.rawValue
+        let segment = try #require(TCPSegment.parse(header + Data([9, 9, 9, 9]) + Data([1, 2, 3])))
+        #expect(segment.srcPort == 8080)
+        #expect(segment.dstPort == 80)
+        #expect(segment.seq == 0x0000_0102)
+        #expect(segment.flags.contains(.ack))
+        #expect(segment.flags.contains(.push))
+        #expect(!segment.flags.contains(.syn))
+        #expect(segment.payload == Data([1, 2, 3]))
+        #expect(TCPSegment.parse(Data(count: 19)) == nil)
+        #expect(try #require(TCPSegment.parse(header)).payload.isEmpty)
+    }
+
+    @Test func attachmentFactoryStubsFutureDrivers() throws {
+        _ = try NetworkAttachmentFactory.make(driver: "bridge")
+        _ = try NetworkAttachmentFactory.make(driver: "host")
+        _ = try NetworkAttachmentFactory.make(driver: "none")
+        #expect(throws: EngineError.self) {
+            _ = try NetworkAttachmentFactory.make(driver: "macvlan")
+        }
+        #expect(throws: EngineError.self) {
+            _ = try NetworkAttachmentFactory.make(driver: "ipvlan")
+        }
+        #expect(throws: EngineError.self) {
+            _ = try NetworkAttachmentFactory.make(driver: "container:abc")
+        }
+    }
+
+    @Test func gatewayAclAndDnsStayOnTheSameNetwork() async throws {
+        let gateway = NetworkGateway()
+        let bridge = EngineNetwork(
+            id: "net-a",
+            name: "bridge",
+            driver: "bridge",
+            scope: "local",
+            created: Date(),
+            labels: [:],
+            subnet: "172.17.0.0/16",
+            gateway: "172.17.0.1",
+            internalNetwork: false,
+            builtin: true
+        )
+        let backend = EngineNetwork(
+            id: "net-b",
+            name: "backend",
+            driver: "bridge",
+            scope: "local",
+            created: Date(),
+            labels: [:],
+            subnet: "172.18.0.0/16",
+            gateway: "172.18.0.1",
+            internalNetwork: true,
+            builtin: false
+        )
+        await gateway.registerNetwork(bridge)
+        await gateway.registerNetwork(backend)
+        let web = try await gateway.allocate(bridge.id, key: "web:net-a")
+        let db = try await gateway.allocate(backend.id, key: "db:net-b")
+        await gateway.bind(
+            containerID: "web",
+            containerName: "web",
+            hostname: "web",
+            network: bridge,
+            ip: web,
+            aliases: ["www"]
+        )
+        await gateway.bind(
+            containerID: "db",
+            containerName: "db",
+            hostname: "db",
+            network: backend,
+            ip: db,
+            aliases: []
+        )
+        #expect(await gateway.canForward(src: web, dst: db) == false)
+        #expect(await gateway.allowsOutbound(src: web))
+        #expect(await gateway.allowsOutbound(src: db) == false)
+        #expect(await gateway.lookup(name: "web", from: web) == web)
+        #expect(await gateway.lookup(name: "www", from: web) == web)
+        #expect(await gateway.lookup(name: "db", from: web) == nil)
+        #expect(await gateway.lookup(name: "db", from: db) == db)
+        let webOnBackend = try await gateway.allocate(backend.id, key: "web:net-b")
+        await gateway.bind(
+            containerID: "web",
+            containerName: "web",
+            hostname: "web",
+            network: backend,
+            ip: webOnBackend,
+            aliases: []
+        )
+        #expect(await gateway.lookup(name: "db", from: web) == db)
+        #expect(await gateway.canForward(src: web, dst: db))
+        #expect(NetworkGateway.gatewayAddress.description == "192.168.255.1")
+    }
+}

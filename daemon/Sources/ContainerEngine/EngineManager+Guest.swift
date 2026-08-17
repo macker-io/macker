@@ -3,7 +3,8 @@ import Foundation
 
 extension EngineManager {
     /// Runs a command in the guest and captures stdout. Does not create a Docker exec instance.
-    func runGuest(_ idOrName: String, command: [String]) async throws -> (code: Int, stdout: String) {
+    /// Pass `privileged: true` for network admin operations (`ip addr` add/del).
+    func runGuest(_ idOrName: String, command: [String], privileged: Bool = false) async throws -> (code: Int, stdout: String) {
         let container = try requireRunningForExec(idOrName)
         guard let linux = vms[container.id] else {
             throw EngineError.conflict("Container \(container.id) has no running MicroVM")
@@ -20,6 +21,9 @@ extension EngineManager {
                 config.terminal = false
                 config.stdout = stdout
                 config.stderr = stderr
+                if privileged {
+                    config.capabilities = .allCapabilities
+                }
             }
             try await process.start()
         } catch {

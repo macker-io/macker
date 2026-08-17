@@ -30,7 +30,7 @@ extension EngineManager {
     func bootContainer(_ record: EngineContainer) async throws {
         let image = try await resolveImage(record.image)
         var manager = try await ensureManager()
-        reclaimContainerRuntime(record.id)
+        await reclaimContainerRuntime(record.id)
 
         let stdoutSink = ProcessLogSink(hopping: { [id = record.id] data in
             await self.appendOutput(id: id, data: data, stdout: true)
@@ -43,10 +43,10 @@ extension EngineManager {
         var prepared = record
         let interfaces: [any Interface]
         do {
-            interfaces = try allocateInterfaces(for: &prepared)
+            interfaces = try await allocateInterfaces(for: &prepared)
             saveContainer(prepared)
         } catch {
-            releaseInterfaces(record.id)
+            await releaseInterfaces(record.id)
             throw error
         }
         let dns = dnsConfig(for: prepared)
@@ -106,12 +106,12 @@ extension EngineManager {
         } catch {
             try? await linux?.stop()
             vms[record.id] = nil
-            reclaimContainerRuntime(record.id)
+            await reclaimContainerRuntime(record.id)
             throw EngineError.runtimeUnavailable("failed to start MicroVM: \(error.localizedDescription)")
         }
 
         guard let linux else {
-            reclaimContainerRuntime(record.id)
+            await reclaimContainerRuntime(record.id)
             throw EngineError.runtimeUnavailable("failed to start MicroVM")
         }
         vms[record.id] = linux
@@ -120,6 +120,7 @@ extension EngineManager {
         }
         recordGuestNics(prepared)
         do {
+            try await applySecondaryBridgeAddresses(containers[record.id] ?? prepared)
             try await startPortPublishers(containers[record.id] ?? prepared)
         } catch {
             await teardownVM(record.id)
@@ -179,15 +180,13 @@ extension EngineManager {
         if let linux = vms.removeValue(forKey: id) {
             try? await linux.stop()
         }
-        releaseInterfaces(id)
+        await releaseInterfaces(id)
     }
 
     func handleVMExit(id: String, code: Int, action: String) async {
-        let networkIDs = containers[id]?.networkIDs ?? []
         await teardownVM(id)
         guard var record = containers[id], record.isActive else { return }
         await finish(container: &record, exitCode: code, action: action)
-        await refreshPeerHosts(networkIDs: networkIDs)
     }
 
     func appendOutput(id: String, text: String) {
@@ -227,9 +226,9 @@ extension EngineManager {
         }
     }
 
-    func reclaimContainerRuntime(_ id: String) {
+    func reclaimContainerRuntime(_ id: String) async {
         stopPortPublishers(id)
-        releaseInterfaces(id)
+        await releaseInterfaces(id)
         resetContainerFiles(id)
     }
 

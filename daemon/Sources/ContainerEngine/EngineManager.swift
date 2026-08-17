@@ -33,6 +33,8 @@ public actor EngineManager {
     var volumes: [String: EngineVolume] = [:]
     var networks: [String: EngineNetwork] = [:]
     let networkDataplane = NetworkDataplane()
+    let networkGateway = NetworkGateway()
+    var gatewayReady = false
     var containerManager: ContainerManager?
     var vms: [String: LinuxContainer] = [:]
     var waitTasks: [String: Task<Void, Never>] = [:]

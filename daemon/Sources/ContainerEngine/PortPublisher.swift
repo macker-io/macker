@@ -159,44 +159,49 @@ final class PortPublisher: @unchecked Sendable {
 
     private func pipeStream(_ from: NWConnection, to: NWConnection) {
         from.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] data, _, isComplete, error in
-            let publisher = self
+            guard let publisher = self else { return }
             if let data, !data.isEmpty {
-                to.send(content: data, completion: .contentProcessed { _ in
-                    if error == nil, !isComplete {
-                        publisher?.pipeStream(from, to: to)
+                to.send(content: data, completion: .contentProcessed { sendError in
+                    if sendError != nil || isComplete || error != nil {
+                        to.send(content: nil, isComplete: true, completion: .contentProcessed { _ in
+                            publisher.closePair(from, to)
+                        })
+                        return
                     }
+                    publisher.pipeStream(from, to: to)
                 })
+                return
             }
             if isComplete || error != nil {
                 to.send(content: nil, isComplete: true, completion: .contentProcessed { _ in
-                    publisher?.closePair(from, to)
+                    publisher.closePair(from, to)
                 })
+                return
             }
+            publisher.pipeStream(from, to: to)
         }
     }
 
+    /// `isComplete` marks the end of one datagram, not the end of the flow, so the only reason
+    /// to tear a UDP pair down is an error. Idle pairs go away when the container is unpublished.
     private func pipeDatagrams(_ from: NWConnection, to: NWConnection) {
-        from.receiveMessage { [weak self] data, _, isComplete, error in
+        from.receiveMessage { [weak self] data, _, _, error in
             guard let self else { return }
             if error != nil {
                 self.closePair(from, to)
                 return
             }
-            if let data {
-                to.send(content: data, contentContext: .defaultMessage, isComplete: true, completion: .contentProcessed { sendError in
-                    if sendError != nil || isComplete {
-                        self.closePair(from, to)
-                        return
-                    }
-                    self.pipeDatagrams(from, to: to)
-                })
+            guard let data, !data.isEmpty else {
+                self.pipeDatagrams(from, to: to)
                 return
             }
-            if isComplete {
-                self.closePair(from, to)
-                return
-            }
-            self.pipeDatagrams(from, to: to)
+            to.send(content: data, contentContext: .defaultMessage, isComplete: true, completion: .contentProcessed { sendError in
+                if sendError != nil {
+                    self.closePair(from, to)
+                    return
+                }
+                self.pipeDatagrams(from, to: to)
+            })
         }
     }
 

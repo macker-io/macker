@@ -2,8 +2,9 @@ import Containerization
 import ContainerizationExtras
 import Foundation
 
-/// Docker-shaped networks on MicroVMs: virtio-net + host IPAM, vmnet NAT, userspace TCP proxy.
-/// `none` has no NIC. `host` is NAT on a separate subnet — not a shared macOS netns.
+/// Docker-shaped networks on MicroVMs.
+/// Bridge: one virtio-net to ``NetworkGateway`` (L3, DNS, NAT, optional utun).
+/// Host: per-network vmnet NAT. None: no NIC. macvlan/sidecar stay unimplemented.
 extension EngineManager {
     static let builtinBridgeName = "bridge"
     static let builtinHostName = "host"
@@ -33,6 +34,7 @@ extension EngineManager {
     }
 
     public func createNetwork(_ spec: EngineNetworkCreateSpec) async throws -> EngineNetworkInspect {
+        await prepareGateway()
         let driver = spec.driver.isEmpty ? "bridge" : spec.driver
         guard driver == "bridge" else {
             throw EngineError.invalidArgument("network driver \"\(driver)\" is not supported")
@@ -68,6 +70,7 @@ extension EngineManager {
         )
         try persistNetwork(network)
         networks[network.id] = network
+        await networkGateway.registerNetwork(network)
         await publish(
             EngineEvent(type: "network", action: "create", actorID: network.id, attributes: ["name": name, "type": driver])
         )
@@ -85,6 +88,7 @@ extension EngineManager {
         try removeNetworkFiles(network.id)
         networks[network.id] = nil
         networkDataplane.remove(network.id)
+        await networkGateway.unregisterNetwork(network.id)
         await publish(
             EngineEvent(type: "network", action: "destroy", actorID: network.id, attributes: ["name": network.name, "type": network.driver])
         )
@@ -101,6 +105,7 @@ extension EngineManager {
     }
 
     public func connectNetwork(_ idOrName: String, spec: EngineNetworkConnectSpec) async throws {
+        await prepareGateway()
         let network = try resolveNetwork(idOrName)
         var container = try resolveContainer(spec.container)
         try requireUnpaused(container, action: "connect")
@@ -128,7 +133,6 @@ extension EngineManager {
                 attributes: ["name": network.name, "container": container.id, "containerName": container.name]
             )
         )
-        await refreshPeerHosts(networkIDs: container.networkIDs)
     }
 
     public func disconnectNetwork(_ idOrName: String, container idOrContainer: String, force: Bool) async throws {
@@ -159,7 +163,6 @@ extension EngineManager {
                 attributes: ["name": network.name, "container": container.id, "containerName": container.name]
             )
         )
-        await refreshPeerHosts(networkIDs: container.networkIDs.union([network.id]))
     }
 
     func attachCreateEndpoints(_ spec: EngineContainerCreateSpec) throws -> (mode: String, endpoints: [EngineEndpoint], warnings: [String]) {
@@ -192,23 +195,44 @@ extension EngineManager {
         return (mode, endpoints, warnings)
     }
 
-    func allocateInterfaces(for record: inout EngineContainer) throws -> [any Interface] {
+    func allocateInterfaces(for record: inout EngineContainer) async throws -> [any Interface] {
+        await prepareGateway()
         var interfaces: [any Interface] = []
+        var openedBridge = false
         for index in record.endpoints.indices {
             let network = try resolveNetwork(record.endpoints[index].networkID)
-            guard network.driver == "bridge" || network.driver == "host" else { continue }
-            let allocated = try allocateInterface(network: network, containerID: record.id, secondary: !interfaces.isEmpty)
-            record.endpoints[index].ipv4Address = allocated.ip
-            record.endpoints[index].ipv4Prefix = allocated.prefix
-            record.endpoints[index].gateway = allocated.gateway
-            record.endpoints[index].macAddress = allocated.mac
-            record.endpoints[index].networkName = network.name
-            interfaces.append(allocated.interface)
+            _ = try NetworkAttachmentFactory.make(driver: network.driver)
+            switch network.driver {
+            case "none":
+                continue
+            case "host":
+                let allocated = try allocateInterface(
+                    network: network,
+                    containerID: record.id,
+                    secondary: !interfaces.isEmpty
+                )
+                record.endpoints[index].ipv4Address = allocated.ip
+                record.endpoints[index].ipv4Prefix = allocated.prefix
+                record.endpoints[index].gateway = allocated.gateway
+                record.endpoints[index].macAddress = allocated.mac
+                record.endpoints[index].networkName = network.name
+                interfaces.append(allocated.interface)
+            case "bridge":
+                try await allocateBridgeEndpoint(
+                    record: &record,
+                    index: index,
+                    network: network,
+                    interfaces: &interfaces,
+                    openedBridge: &openedBridge
+                )
+            default:
+                throw EngineError.notImplemented("network driver \"\(network.driver)\" is not implemented")
+            }
         }
         return interfaces
     }
 
-    func releaseInterfaces(_ containerID: String) {
+    func releaseInterfaces(_ containerID: String, keepAddresses: Bool = true) async {
         let nics = guestNics.removeValue(forKey: containerID) ?? []
         let networkIDs: Set<String>
         if !nics.isEmpty {
@@ -221,10 +245,169 @@ extension EngineManager {
         for networkID in networkIDs {
             releaseVmnet(networkID: networkID, containerID: containerID)
         }
+        if keepAddresses {
+            await networkGateway.detach(containerID: containerID)
+        } else {
+            await networkGateway.forget(containerID: containerID)
+        }
     }
 
     func recordGuestNics(_ record: EngineContainer) {
-        guestNics[record.id] = GuestNic.slots(from: record.endpoints)
+        var nics: [GuestNic] = []
+        var sawBridge = false
+        for endpoint in record.endpoints where !endpoint.ipv4Address.isEmpty {
+            let driver = networks[endpoint.networkID]?.driver ?? ""
+            if driver == "bridge" {
+                if !sawBridge {
+                    nics.append(
+                        GuestNic(
+                            interfaceName: "eth0",
+                            networkID: endpoint.networkID,
+                            ipv4Address: endpoint.ipv4Address,
+                            ipv4Prefix: endpoint.ipv4Prefix,
+                            gateway: endpoint.gateway,
+                            macAddress: endpoint.macAddress,
+                            inUse: true
+                        )
+                    )
+                    sawBridge = true
+                }
+                continue
+            }
+            if driver == "host" {
+                nics.append(
+                    GuestNic(
+                        interfaceName: "eth\(nics.count)",
+                        networkID: endpoint.networkID,
+                        ipv4Address: endpoint.ipv4Address,
+                        ipv4Prefix: endpoint.ipv4Prefix,
+                        gateway: endpoint.gateway,
+                        macAddress: endpoint.macAddress,
+                        inUse: true
+                    )
+                )
+            }
+        }
+        guestNics[record.id] = nics
+    }
+
+    private func addGuestBridgeAddress(_ containerID: String, ip: String) async throws {
+        let cidr = try CIDRv4("\(ip)/32")
+        do {
+            try await withGuestAgent(containerID) { agent in
+                try await agent.addressAdd(name: "eth0", address: InterfaceAddress(ipv4Address: cidr))
+            }
+        } catch {
+            if await guestHasAddress(containerID, ip: ip) {
+                return
+            }
+            let added = try? await runGuest(
+                containerID,
+                command: ["ip", "addr", "add", "\(ip)/32", "dev", "eth0"],
+                privileged: true
+            )
+            if added?.code != 0, !(await guestHasAddress(containerID, ip: ip)) {
+                throw error
+            }
+        }
+    }
+
+    private func removeGuestBridgeAddress(_ containerID: String, ip: String) async throws {
+        guard await guestHasAddress(containerID, ip: ip) else { return }
+        var deleted = try? await runGuest(
+            containerID,
+            command: ["ip", "addr", "del", "\(ip)/32", "dev", "eth0"],
+            privileged: true
+        )
+        if deleted?.code != 0 {
+            deleted = try? await runGuest(
+                containerID,
+                command: ["ip", "addr", "del", ip, "dev", "eth0"],
+                privileged: true
+            )
+        }
+        if await guestHasAddress(containerID, ip: ip) {
+            throw EngineError.runtimeUnavailable(
+                "failed to remove \(ip) from eth0 (exit \(deleted?.code ?? -1))"
+            )
+        }
+    }
+
+    private func guestHasAddress(_ containerID: String, ip: String) async -> Bool {
+        let show = try? await runGuest(containerID, command: ["ip", "-o", "addr", "show", "dev", "eth0"])
+        guard let text = show?.stdout else { return false }
+        return text.contains(" \(ip)/") || text.contains(" \(ip) ")
+    }
+
+    func applySecondaryBridgeAddresses(_ record: EngineContainer) async throws {
+        let bridges = record.endpoints.filter { endpoint in
+            networks[endpoint.networkID]?.driver == "bridge" && !endpoint.ipv4Address.isEmpty
+        }
+        for endpoint in bridges.dropFirst() {
+            try await addGuestBridgeAddress(record.id, ip: endpoint.ipv4Address)
+        }
+    }
+
+    func prepareGateway() async {
+        guard !gatewayReady else { return }
+        gatewayReady = true
+        for network in networks.values {
+            await networkGateway.registerNetwork(network)
+        }
+        for container in containers.values {
+            for endpoint in container.endpoints {
+                guard networks[endpoint.networkID]?.driver == "bridge",
+                    !endpoint.ipv4Address.isEmpty,
+                    let ip = try? IPv4Address(endpoint.ipv4Address)
+                else { continue }
+                try? await networkGateway.reserve(
+                    endpoint.networkID,
+                    key: NetworkGateway.endpointKey(containerID: container.id, networkID: endpoint.networkID),
+                    ip: ip
+                )
+            }
+        }
+    }
+
+    private func allocateBridgeEndpoint(
+        record: inout EngineContainer,
+        index: Int,
+        network: EngineNetwork,
+        interfaces: inout [any Interface],
+        openedBridge: inout Bool
+    ) async throws {
+        await networkGateway.registerNetwork(network)
+        let key = NetworkGateway.endpointKey(containerID: record.id, networkID: network.id)
+        let ip: IPv4Address
+        if !record.endpoints[index].ipv4Address.isEmpty,
+            let existing = try? IPv4Address(record.endpoints[index].ipv4Address)
+        {
+            try await networkGateway.reserve(network.id, key: key, ip: existing)
+            ip = existing
+        } else {
+            ip = try await networkGateway.allocate(network.id, key: key)
+        }
+        record.endpoints[index].ipv4Address = ip.description
+        record.endpoints[index].ipv4Prefix = 32
+        record.endpoints[index].gateway = NetworkGateway.gatewayAddress.description
+        record.endpoints[index].networkName = network.name
+        await networkGateway.bind(
+            containerID: record.id,
+            containerName: record.name,
+            hostname: record.hostname,
+            network: network,
+            ip: ip,
+            aliases: record.endpoints[index].aliases
+        )
+        if !openedBridge {
+            let cidr = try CIDRv4("\(ip.description)/32")
+            let iface = try await networkGateway.openLink(containerID: record.id, primary: cidr)
+            record.endpoints[index].macAddress = iface.macAddress?.description ?? ""
+            interfaces.append(iface)
+            openedBridge = true
+        } else if let mac = interfaces.first?.macAddress?.description {
+            record.endpoints[index].macAddress = mac
+        }
     }
 
     private func attachRunningEndpoint(
@@ -232,29 +415,81 @@ extension EngineManager {
         network: EngineNetwork,
         aliases: [String]
     ) async throws -> EngineEndpoint {
-        guard network.driver == "bridge" || network.driver == "host" else {
+        _ = try NetworkAttachmentFactory.make(driver: network.driver)
+        if network.driver == "host" {
+            guard let nic = guestNic(container.id, networkID: network.id, inUse: false) else {
+                throw EngineError.notImplemented(
+                    "cannot hot-plug a new network interface on a running MicroVM; stop the container, connect, then start"
+                )
+            }
+            try await withGuestAgent(container.id) { agent in
+                try await agent.up(name: nic.interfaceName, mtu: nil)
+            }
+            setGuestNicInUse(container.id, networkID: network.id, inUse: true)
+            return nic.asEndpoint(network: network, aliases: aliases)
+        }
+        guard network.driver == "bridge" else {
             throw EngineError.notImplemented("connecting a running container to \(network.name) is not implemented")
         }
-        guard let nic = guestNic(container.id, networkID: network.id, inUse: false) else {
+        let hasBridgeNIC = container.endpoints.contains { endpoint in
+            networks[endpoint.networkID]?.driver == "bridge" && !endpoint.ipv4Address.isEmpty
+        }
+        guard hasBridgeNIC else {
             throw EngineError.notImplemented(
                 "cannot hot-plug a new network interface on a running MicroVM; stop the container, connect, then start"
             )
         }
-        try await withGuestAgent(container.id) { agent in
-            try await agent.up(name: nic.interfaceName, mtu: nil)
-        }
-        setGuestNicInUse(container.id, networkID: network.id, inUse: true)
-        return nic.asEndpoint(network: network, aliases: aliases)
+        await prepareGateway()
+        await networkGateway.registerNetwork(network)
+        let key = NetworkGateway.endpointKey(containerID: container.id, networkID: network.id)
+        let ip = try await networkGateway.allocate(network.id, key: key)
+        try await addGuestBridgeAddress(container.id, ip: ip.description)
+        await networkGateway.bind(
+            containerID: container.id,
+            containerName: container.name,
+            hostname: container.hostname,
+            network: network,
+            ip: ip,
+            aliases: aliases
+        )
+        let mac = container.endpoints.first(where: { !$0.macAddress.isEmpty })?.macAddress ?? ""
+        return EngineEndpoint(
+            networkID: network.id,
+            networkName: network.name,
+            ipv4Address: ip.description,
+            ipv4Prefix: 32,
+            gateway: NetworkGateway.gatewayAddress.description,
+            macAddress: mac,
+            aliases: aliases
+        )
     }
 
     private func detachRunningEndpoint(_ container: EngineContainer, network: EngineNetwork) async throws {
-        guard let nic = guestNic(container.id, networkID: network.id, inUse: true) else {
+        if network.driver == "host" {
+            guard let nic = guestNic(container.id, networkID: network.id, inUse: true) else {
+                return
+            }
+            try await withGuestAgent(container.id) { agent in
+                try await agent.down(name: nic.interfaceName)
+            }
+            setGuestNicInUse(container.id, networkID: network.id, inUse: false)
             return
         }
-        try await withGuestAgent(container.id) { agent in
-            try await agent.down(name: nic.interfaceName)
+        guard network.driver == "bridge" else { return }
+        guard let endpoint = container.endpoints.first(where: { $0.networkID == network.id }),
+            !endpoint.ipv4Address.isEmpty
+        else { return }
+        let remaining = container.endpoints.filter { item in
+            item.networkID != network.id && networks[item.networkID]?.driver == "bridge"
         }
-        setGuestNicInUse(container.id, networkID: network.id, inUse: false)
+        if remaining.isEmpty {
+            try await withGuestAgent(container.id) { agent in
+                try await agent.down(name: "eth0")
+            }
+        } else {
+            try await removeGuestBridgeAddress(container.id, ip: endpoint.ipv4Address)
+        }
+        await networkGateway.unbind(containerID: container.id, networkID: network.id)
     }
 
     private func guestNic(_ containerID: String, networkID: String, inUse: Bool) -> GuestNic? {
@@ -274,11 +509,8 @@ extension EngineManager {
         guard attached.contains(where: { $0.driver != "none" }) else {
             return nil
         }
-        if attached.allSatisfy(\.internalNetwork) {
-            if let gateway = record.endpoints.first(where: { !$0.gateway.isEmpty })?.gateway {
-                return DNS(nameservers: [gateway])
-            }
-            return nil
+        if attached.contains(where: { $0.driver == "bridge" }) {
+            return DNS(nameservers: [NetworkGateway.gatewayAddress.description])
         }
         return DNS(nameservers: DNS.defaultNameservers + ["8.8.8.8"])
     }
@@ -291,16 +523,32 @@ extension EngineManager {
 
         let bindings = mode == "host" ? record.exposedPorts : record.portBindings
 
+        let bridgeTarget = record.endpoints.first { endpoint in
+            networks[endpoint.networkID]?.driver == "bridge" && !endpoint.ipv4Address.isEmpty
+        }
         var updated = record
         var published: [EnginePortBinding] = []
         for (index, binding) in bindings.enumerated() {
             let key = "\(record.id):\(index)"
+            let destIP: String
+            let destPort: Int
+            if let bridgeTarget, let guestIP = try? IPv4Address(bridgeTarget.ipv4Address) {
+                destIP = "127.0.0.1"
+                destPort = try await networkGateway.startPortRelay(
+                    guestIP: guestIP,
+                    guestPort: UInt16(binding.containerPort),
+                    udp: binding.protocolName.lowercased() == "udp"
+                )
+            } else {
+                destIP = ip
+                destPort = binding.containerPort
+            }
             let bound = try await portPublisher.publish(
                 key: key,
                 hostIP: binding.hostIP,
                 hostPort: binding.hostPort,
-                containerIP: ip,
-                containerPort: binding.containerPort,
+                containerIP: destIP,
+                containerPort: destPort,
                 protocolName: binding.protocolName
             )
             published.append(

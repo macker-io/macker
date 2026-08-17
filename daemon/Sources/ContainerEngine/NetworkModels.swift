@@ -81,8 +81,8 @@ public struct EngineNetworkConnectSpec: Sendable {
     }
 }
 
-/// Guest virtio-net slot for a running MicroVM. VZ cannot hot-plug NICs, so a
-/// running connect can only reuse a slot that was attached at boot.
+/// Guest virtio-net slots. Bridge endpoints share eth0; host keeps its own NIC.
+/// VZ cannot hot-plug, so a running connect to a new driver still needs a stop/start.
 struct GuestNic: Sendable {
     var interfaceName: String
     var networkID: String
@@ -91,21 +91,6 @@ struct GuestNic: Sendable {
     var gateway: String
     var macAddress: String
     var inUse: Bool
-
-    static func slots(from endpoints: [EngineEndpoint]) -> [GuestNic] {
-        endpoints.enumerated().compactMap { index, endpoint in
-            guard !endpoint.ipv4Address.isEmpty else { return nil }
-            return GuestNic(
-                interfaceName: "eth\(index)",
-                networkID: endpoint.networkID,
-                ipv4Address: endpoint.ipv4Address,
-                ipv4Prefix: endpoint.ipv4Prefix,
-                gateway: endpoint.gateway,
-                macAddress: endpoint.macAddress,
-                inUse: true
-            )
-        }
-    }
 
     func asEndpoint(network: EngineNetwork, aliases: [String]) -> EngineEndpoint {
         EngineEndpoint(

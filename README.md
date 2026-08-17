@@ -92,11 +92,13 @@ Each container is a MicroVM with its own kernel, so this is not Linux `bridge` +
 
 | `--network` | What Macker does |
 | --- | --- |
-| `bridge` (default) | virtio-net on a vmnet NAT network (`172.17.0.0/16`). Same-network containers can reach each other by name (`/etc/hosts`). `-p` publishes TCP on the Mac via a userspace proxy. |
-| `host` | NAT NIC like bridge. `-p` is ignored. Image `EXPOSE` (and create `ExposedPorts`) are published 1:1 on the Mac (`80` → `localhost:80`). Guest `127.0.0.1` is **not** the Mac loopback. |
+| `bridge` (default) | One virtio-net to a userspace L3 gateway (`eth0` is `/32`, DNS at `192.168.255.1`). Same-network containers reach each other by IP and by name. Extra bridge networks add another `/32` on the same `eth0`. `-p` publishes on the Mac. `--internal` allows same-network traffic only (no outbound NAT, no upstream DNS). |
+| `host` | Per-network vmnet NAT. `-p` is ignored. Image `EXPOSE` (and create `ExposedPorts`) are published 1:1 on the Mac (`80` → `localhost:80`). Guest `127.0.0.1` is **not** the Mac loopback. |
 | `none` | No NIC. |
 
-`macker network ls|create|rm|inspect|connect|disconnect|prune` works. Builtin `bridge` / `host` / `none` cannot be removed. Running `disconnect` takes the NIC down immediately. Running `connect` can reattach a NIC that was connected at boot; a brand-new network needs a stop/start because MicroVMs cannot hot-plug virtio-net. Same-network names in `/etc/hosts` update when containers start, stop, connect, or disconnect.
+`macker network ls|create|rm|inspect|connect|disconnect|prune` works. Builtin `bridge` / `host` / `none` cannot be removed. Running `connect` / `disconnect` on an extra bridge adds or removes an address on `eth0`. Connecting a running container that has no bridge NIC yet still needs a stop/start (MicroVMs cannot hot-plug virtio-net). Names resolve through the gateway; `/etc/hosts` is localhost only.
+
+Outbound NAT and `-p` currently terminate TCP in the daemon (guest frames → `NWConnection`). That is not required: with a privileged utun + `pf` (or equivalent kernel forwarding), the Mac can route/NAT IP like `docker0` and drop the userspace TCP proxy. Same-network L3 and DNS stay in the gateway. This is a later dataplane switch, not a redesign of IPAM / `connect` / guest `eth0`. The Mac still cannot reach container IPs directly until that utun path is privileged.
 
 ```bash
 ./.build/debug/macker network ls
@@ -113,7 +115,7 @@ vmnet NAT uses the same `com.apple.security.virtualization` entitlement as Apple
 
 ## Roadmap
 
-Daily `bridge` / `host` / `none`, plus `run -it` / `exec`, is in place. Command completeness, gaps, and the implementation order are in [docs/cli-status.md](docs/cli-status.md).
+Daily `bridge` / `host` / `none`, plus `run -it` / `exec`, is in place. Command completeness, gaps, and the implementation order are in [docs/cli-status.md](docs/cli-status.md). Kernel forwarding for outbound / `-p` / host-to-container IPs is listed there as a follow-up.
 
 ## Make targets
 

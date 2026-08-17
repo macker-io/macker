@@ -1,0 +1,216 @@
+import ContainerizationExtras
+import Foundation
+
+enum Ethernet {
+    static let headerLength = 14
+    static let typeARP: UInt16 = 0x0806
+    static let typeIPv4: UInt16 = 0x0800
+    static let protoICMP: UInt8 = 1
+    static let protoTCP: UInt8 = 6
+    static let protoUDP: UInt8 = 17
+
+    static func frame(dst: MACAddress, src: MACAddress, type: UInt16, payload: Data) -> Data {
+        var out = Data(capacity: headerLength + payload.count)
+        out.append(contentsOf: dst.bytes)
+        out.append(contentsOf: src.bytes)
+        out.append(UInt8(type >> 8))
+        out.append(UInt8(type & 0xff))
+        out.append(payload)
+        return out
+    }
+
+    static func parse(_ frame: Data) -> (dst: MACAddress, src: MACAddress, type: UInt16, payload: Data)? {
+        guard frame.count >= headerLength else { return nil }
+        let bytes = [UInt8](frame)
+        guard let dst = try? MACAddress(Array(bytes[0..<6])),
+            let src = try? MACAddress(Array(bytes[6..<12]))
+        else { return nil }
+        let type = UInt16(bytes[12]) << 8 | UInt16(bytes[13])
+        return (dst, src, type, frame.subdata(in: headerLength..<frame.count))
+    }
+
+    static func checksum(_ data: Data) -> UInt16 {
+        var sum: UInt32 = 0
+        var index = data.startIndex
+        while index + 1 < data.endIndex {
+            sum += UInt32(data[index]) << 8 | UInt32(data[index + 1])
+            index += 2
+        }
+        if index < data.endIndex {
+            sum += UInt32(data[index]) << 8
+        }
+        while sum >> 16 != 0 {
+            sum = (sum & 0xffff) + (sum >> 16)
+        }
+        return ~UInt16(truncatingIfNeeded: sum)
+    }
+}
+
+enum ARP {
+    static func parseRequest(_ payload: Data) -> (senderIP: IPv4Address, targetIP: IPv4Address)? {
+        guard payload.count >= 28 else { return nil }
+        let bytes = [UInt8](payload)
+        let oper = UInt16(bytes[6]) << 8 | UInt16(bytes[7])
+        guard oper == 1 else { return nil }
+        guard let sender = try? IPv4Address(Array(bytes[14..<18])),
+            let target = try? IPv4Address(Array(bytes[24..<28]))
+        else { return nil }
+        return (sender, target)
+    }
+
+    static func reply(senderMAC: MACAddress, senderIP: IPv4Address, targetMAC: MACAddress, targetIP: IPv4Address) -> Data {
+        var out = Data(count: 28)
+        out[0] = 0
+        out[1] = 1
+        out[2] = 0x08
+        out[3] = 0x00
+        out[4] = 6
+        out[5] = 4
+        out[6] = 0
+        out[7] = 2
+        let sm = senderMAC.bytes
+        let sip = senderIP.bytes
+        let tm = targetMAC.bytes
+        let tip = targetIP.bytes
+        for i in 0..<6 { out[8 + i] = sm[i] }
+        for i in 0..<4 { out[14 + i] = sip[i] }
+        for i in 0..<6 { out[18 + i] = tm[i] }
+        for i in 0..<4 { out[24 + i] = tip[i] }
+        return out
+    }
+}
+
+struct IPv4Packet {
+    /// The gateway only ever writes option-free headers.
+    static let headerLength = 20
+
+    var tos: UInt8
+    var id: UInt16
+    var ttl: UInt8
+    var proto: UInt8
+    var src: IPv4Address
+    var dst: IPv4Address
+    var payload: Data
+
+    static func parse(_ data: Data) -> IPv4Packet? {
+        guard data.count >= headerLength else { return nil }
+        let bytes = [UInt8](data)
+        let ihl = Int(bytes[0] & 0x0f) * 4
+        guard bytes[0] >> 4 == 4, ihl >= headerLength, data.count >= ihl else { return nil }
+        let total = Int(bytes[2]) << 8 | Int(bytes[3])
+        guard total >= ihl, data.count >= total else { return nil }
+        guard let src = try? IPv4Address(Array(bytes[12..<16])),
+            let dst = try? IPv4Address(Array(bytes[16..<20]))
+        else { return nil }
+        return IPv4Packet(
+            tos: bytes[1],
+            id: UInt16(bytes[4]) << 8 | UInt16(bytes[5]),
+            ttl: bytes[8],
+            proto: bytes[9],
+            src: src,
+            dst: dst,
+            payload: data.subdata(in: ihl..<total)
+        )
+    }
+
+    func encode() -> Data {
+        var header = Data(count: Self.headerLength)
+        header[0] = 0x45 // IPv4, 5-word header
+        header[1] = tos
+        let total = Self.headerLength + payload.count
+        header[2] = UInt8(truncatingIfNeeded: total >> 8)
+        header[3] = UInt8(truncatingIfNeeded: total)
+        header[4] = UInt8(truncatingIfNeeded: id >> 8)
+        header[5] = UInt8(truncatingIfNeeded: id)
+        header[8] = ttl == 0 ? 64 : ttl
+        header[9] = proto
+        let srcb = src.bytes
+        let dstb = dst.bytes
+        for i in 0..<4 { header[12 + i] = srcb[i] }
+        for i in 0..<4 { header[16 + i] = dstb[i] }
+        let sum = Ethernet.checksum(header)
+        header[10] = UInt8(truncatingIfNeeded: sum >> 8)
+        header[11] = UInt8(truncatingIfNeeded: sum)
+        return header + payload
+    }
+}
+
+/// Parsed TCP header plus payload. Only the fields the gateway acts on.
+struct TCPSegment {
+    struct Flags: OptionSet {
+        let rawValue: UInt8
+
+        static let fin = Flags(rawValue: 0x01)
+        static let syn = Flags(rawValue: 0x02)
+        static let rst = Flags(rawValue: 0x04)
+        static let push = Flags(rawValue: 0x08)
+        static let ack = Flags(rawValue: 0x10)
+
+        static let synAck: Flags = [.syn, .ack]
+        static let finAck: Flags = [.fin, .ack]
+        static let pushAck: Flags = [.push, .ack]
+    }
+
+    static let headerLength = 20
+
+    var srcPort: UInt16
+    var dstPort: UInt16
+    var seq: UInt32
+    var flags: Flags
+    var payload: Data
+
+    static func parse(_ data: Data) -> TCPSegment? {
+        guard data.count >= headerLength else { return nil }
+        let bytes = [UInt8](data)
+        let dataOffset = Int(bytes[12] >> 4) * 4
+        let payload = dataOffset < data.count && dataOffset >= headerLength
+            ? data.subdata(in: dataOffset..<data.count)
+            : Data()
+        return TCPSegment(
+            srcPort: UInt16(bytes[0]) << 8 | UInt16(bytes[1]),
+            dstPort: UInt16(bytes[2]) << 8 | UInt16(bytes[3]),
+            seq: UInt32(bytes[4]) << 24 | UInt32(bytes[5]) << 16 | UInt32(bytes[6]) << 8 | UInt32(bytes[7]),
+            flags: Flags(rawValue: bytes[13]),
+            payload: payload
+        )
+    }
+}
+
+struct UDPDatagram {
+    var srcPort: UInt16
+    var dstPort: UInt16
+    var payload: Data
+
+    static func parse(_ data: Data) -> UDPDatagram? {
+        guard data.count >= 8 else { return nil }
+        let bytes = [UInt8](data)
+        let src = UInt16(bytes[0]) << 8 | UInt16(bytes[1])
+        let dst = UInt16(bytes[2]) << 8 | UInt16(bytes[3])
+        let length = Int(bytes[4]) << 8 | Int(bytes[5])
+        guard length >= 8, data.count >= length else { return nil }
+        return UDPDatagram(srcPort: src, dstPort: dst, payload: data.subdata(in: 8..<length))
+    }
+
+    func encode(src: IPv4Address, dst: IPv4Address) -> Data {
+        var header = Data(count: 8)
+        header[0] = UInt8(truncatingIfNeeded: srcPort >> 8)
+        header[1] = UInt8(truncatingIfNeeded: srcPort)
+        header[2] = UInt8(truncatingIfNeeded: dstPort >> 8)
+        header[3] = UInt8(truncatingIfNeeded: dstPort)
+        let length = 8 + payload.count
+        header[4] = UInt8(truncatingIfNeeded: length >> 8)
+        header[5] = UInt8(truncatingIfNeeded: length)
+        var pseudo = Data()
+        pseudo.append(contentsOf: src.bytes)
+        pseudo.append(contentsOf: dst.bytes)
+        pseudo.append(0)
+        pseudo.append(Ethernet.protoUDP)
+        pseudo.append(UInt8(truncatingIfNeeded: length >> 8))
+        pseudo.append(UInt8(truncatingIfNeeded: length))
+        let sum = Ethernet.checksum(pseudo + header + payload)
+        let encoded = sum == 0 ? 0xffff : sum
+        header[6] = UInt8(truncatingIfNeeded: encoded >> 8)
+        header[7] = UInt8(truncatingIfNeeded: encoded)
+        return header + payload
+    }
+}
