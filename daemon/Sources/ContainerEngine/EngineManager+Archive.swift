@@ -94,7 +94,7 @@ extension EngineManager {
         return linux
     }
 
-    private func withScratch<T>(_ prefix: String, _ body: (URL) async throws -> T) async throws -> T {
+    func withScratch<T>(_ prefix: String, _ body: (URL) async throws -> T) async throws -> T {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(
             "\(prefix)-\(UUID().uuidString)",
             isDirectory: true

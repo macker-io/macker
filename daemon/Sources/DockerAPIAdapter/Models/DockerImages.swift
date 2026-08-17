@@ -250,3 +250,34 @@ public struct DockerImagePruneResponse: Encodable, Sendable {
 public struct DockerLoadLine: Encodable, Sendable {
     public let stream: String
 }
+
+/// `POST /commit` optional container config overlay.
+public struct DockerCommitRequest: Decodable, Sendable {
+    public let User: String?
+    public let Env: [String]?
+    public let Cmd: FlexibleStringList?
+    public let Entrypoint: FlexibleStringList?
+    public let WorkingDir: String?
+    public let Labels: [String: String]?
+    public let ExposedPorts: [String: EmptyObject]?
+    public let Volumes: [String: EmptyObject]?
+
+    public struct EmptyObject: Decodable, Sendable {}
+
+    public var engineConfig: EngineCommitConfig {
+        EngineCommitConfig(
+            user: User,
+            env: Env,
+            cmd: Cmd?.values,
+            entrypoint: Entrypoint?.values,
+            workingDir: WorkingDir,
+            labels: Labels,
+            exposedPorts: ExposedPorts.map { Array($0.keys) },
+            volumes: Volumes.map { Array($0.keys) }
+        )
+    }
+}
+
+public struct DockerCommitResponse: Encodable, Sendable {
+    public let Id: String
+}

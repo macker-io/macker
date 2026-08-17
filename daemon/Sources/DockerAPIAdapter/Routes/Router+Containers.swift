@@ -23,7 +23,8 @@ extension Router {
         case attachWS(String)
         case createExec(String)
         case archive(String)
-        case unsupported(String)
+        case export(String)
+        case changes(String)
     }
 
     private static let reservedContainerNames: Set<String> = ["json", "create", "prune"]
@@ -79,8 +80,10 @@ extension Router {
                 return .createExec(id)
             case ("GET", "archive"), ("HEAD", "archive"), ("PUT", "archive"):
                 return .archive(id)
-            case ("GET", "changes"), ("GET", "export"):
-                return .unsupported(id)
+            case ("GET", "export"):
+                return .export(id)
+            case ("GET", "changes"):
+                return .changes(id)
             default:
                 return nil
             }
@@ -132,8 +135,10 @@ extension Router {
             return await createExec(id, request: request)
         case .archive(let id):
             return await archiveContainer(id, request: request)
-        case .unsupported:
-            return Self.jsonError(status: 501, message: "this container endpoint is not implemented")
+        case .export(let id):
+            return await exportContainer(id)
+        case .changes(let id):
+            return await containerChanges(id)
         }
     }
 
@@ -461,6 +466,32 @@ extension Router {
                 ],
                 body: .buffer(buffer)
             )
+        } catch {
+            return Self.engineError(error)
+        }
+    }
+
+    private func exportContainer(_ id: String) async -> HTTPResponse {
+        do {
+            let tar = try await engine.exportContainer(id)
+            var buffer = ByteBuffer()
+            buffer.writeBytes(tar)
+            return HTTPResponse(
+                status: 200,
+                headers: [
+                    ("Content-Type", "application/x-tar"),
+                    ("Content-Disposition", "attachment; filename=export.tar"),
+                ],
+                body: .buffer(buffer)
+            )
+        } catch {
+            return Self.engineError(error)
+        }
+    }
+
+    private func containerChanges(_ id: String) async -> HTTPResponse {
+        do {
+            return Self.jsonOK(try await engine.containerChanges(id).map(DockerFilesystemChange.init))
         } catch {
             return Self.engineError(error)
         }

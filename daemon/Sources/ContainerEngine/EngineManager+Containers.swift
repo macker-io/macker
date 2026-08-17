@@ -478,7 +478,7 @@ extension EngineManager {
         root.appendingPathComponent("\(id).log")
     }
 
-    private static func runtimeURL(id: String, root: URL) -> URL {
+    static func runtimeURL(id: String, root: URL) -> URL {
         root.appendingPathComponent(id, isDirectory: true)
     }
 }

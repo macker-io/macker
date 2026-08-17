@@ -245,10 +245,15 @@ extension EngineManager {
     static func uniqueDisplayTags(_ references: [String]) -> [String] {
         let stored = Array(Set(references))
         return stored.filter { tag in
-            !stored.contains { other in
+            if isDigestReference(tag) { return false }
+            return !stored.contains { other in
                 other != tag && aliases(for: other).contains(tag)
             }
         }.sorted()
+    }
+
+    static func isDigestReference(_ reference: String) -> Bool {
+        reference.hasPrefix("sha256:") && !reference.contains("/")
     }
 
     static func repository(from reference: String) -> String {

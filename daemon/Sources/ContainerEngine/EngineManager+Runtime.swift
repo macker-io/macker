@@ -101,6 +101,7 @@ extension EngineManager {
             }
             linux = created
             containerManager = manager
+            snapshotBaseline(record.id)
             try await created.create()
             try await created.start()
         } catch {

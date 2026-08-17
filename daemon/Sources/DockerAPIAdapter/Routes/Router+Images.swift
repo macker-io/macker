@@ -191,6 +191,38 @@ extension Router {
         }
     }
 
+    func commitContainer(_ request: HTTPRequest) async -> HTTPResponse {
+        guard let container = request.query["container"], !container.isEmpty else {
+            return Self.jsonError(status: 400, message: "container query parameter is required")
+        }
+        var config: EngineCommitConfig?
+        if !request.body.isEmpty {
+            do {
+                config = try JSONDecoder().decode(DockerCommitRequest.self, from: request.body).engineConfig
+            } catch {
+                return Self.jsonError(status: 400, message: "invalid commit config: \(error.localizedDescription)")
+            }
+        }
+        let spec = EngineCommitSpec(
+            repo: request.query["repo"],
+            tag: request.query["tag"],
+            comment: request.query["comment"] ?? "",
+            author: request.query["author"] ?? "",
+            changes: request.queryAll["changes"] ?? request.query["changes"].map { [$0] } ?? [],
+            config: config
+        )
+        do {
+            let id = try await engine.commitContainer(container, spec: spec)
+            return HTTPResponse(
+                status: 201,
+                headers: [("Content-Type", "application/json")],
+                body: .buffer(JSONBody.encode(DockerCommitResponse(Id: id)))
+            )
+        } catch {
+            return Self.engineError(error)
+        }
+    }
+
     static func progressStream(_ events: AsyncThrowingStream<ImagePullEvent, Error>) -> HTTPResponse {
         let (stream, continuation) = AsyncStream<ByteBuffer>.makeStream()
         Task {

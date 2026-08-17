@@ -76,6 +76,20 @@ Without `-t`, Ctrl-C on foreground `run` stops the container. `attach` without a
 ./.build/debug/macker cp web:/etc/hosts -
 ```
 
+## Export, diff, and commit
+
+`export` writes the container filesystem as a tar. `diff` lists paths added (`A`), changed (`C`), or deleted (`D`) since the image was unpacked. `commit` adds those changes as a new image layer on top of the parent.
+
+Running containers are snapshotted through the guest. A stopped container still works if `rootfs.ext4` is on disk (until the next `start` or a daemon restart of a previously running container). Paused containers are rejected. Volume/bind mounts are omitted from `diff` / `commit`. `--pause` is accepted and ignored: the snapshot cannot freeze the MicroVM and still talk to the guest.
+
+```bash
+./.build/debug/macker run --name box alpine sh -c 'echo hi > /hello'
+./.build/debug/macker diff box
+./.build/debug/macker export -o box.tar box
+./.build/debug/macker commit box myhello:latest
+./.build/debug/macker run --rm myhello cat /hello
+```
+
 ## Socket
 
 The daemon listens on:

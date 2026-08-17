@@ -75,7 +75,8 @@ struct ArchiveTests {
         #expect(Router.matchNamedContainer(method: "GET", path: "/containers/abc/archive") == .archive("abc"))
         #expect(Router.matchNamedContainer(method: "HEAD", path: "/containers/abc/archive") == .archive("abc"))
         #expect(Router.matchNamedContainer(method: "PUT", path: "/containers/abc/archive") == .archive("abc"))
-        #expect(Router.matchNamedContainer(method: "GET", path: "/containers/abc/export") == .unsupported("abc"))
+        #expect(Router.matchNamedContainer(method: "GET", path: "/containers/abc/export") == .export("abc"))
+        #expect(Router.matchNamedContainer(method: "GET", path: "/containers/abc/changes") == .changes("abc"))
         #expect(Router.matchNamedContainer(method: "POST", path: "/containers/abc/archive") == nil)
     }
 }

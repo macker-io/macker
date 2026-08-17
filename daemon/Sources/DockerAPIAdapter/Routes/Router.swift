@@ -66,8 +66,10 @@ public struct Router: Sendable {
             return await createNetwork(request)
         case ("POST", "/networks/prune"):
             return await pruneNetworks(request)
-        case ("POST", "/build"), ("POST", "/build/prune"), ("POST", "/commit"):
-            return Self.jsonError(status: 501, message: "image build/commit is not implemented")
+        case ("POST", "/build"), ("POST", "/build/prune"):
+            return Self.jsonError(status: 501, message: "image build is not implemented")
+        case ("POST", "/commit"):
+            return await commitContainer(request)
         default:
             if let route = Self.matchNamedContainer(method: method, path: path) {
                 return await handleNamedContainer(route, request: request)

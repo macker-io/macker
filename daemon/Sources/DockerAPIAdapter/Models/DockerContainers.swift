@@ -451,3 +451,14 @@ public struct DockerContainerStats: Encodable, Sendable {
         self.pids_stats = .init(current: stats.pids)
     }
 }
+
+/// `GET /containers/{id}/changes`.
+public struct DockerFilesystemChange: Encodable, Sendable {
+    public let Path: String
+    public let Kind: Int
+
+    public init(_ change: EngineFSChange) {
+        self.Path = change.path
+        self.Kind = change.kind.rawValue
+    }
+}
