@@ -15,6 +15,20 @@ public struct EnginePortBinding: Sendable, Codable, Equatable {
 
     public var dockerPortLine: String { "\(dockerKey) -> \(joinedHostPort)" }
 
+    /// `docker ps` PORTS cell: `0.0.0.0:18080->80/tcp`, or `80/tcp` when unpublished.
+    public var psDisplay: String {
+        if hostPort > 0 {
+            let ip = hostIP.isEmpty ? "0.0.0.0" : hostIP
+            let host = ip.contains(":") ? "[\(ip)]:\(hostPort)" : "\(ip):\(hostPort)"
+            return "\(host)->\(containerPort)/\(protocolName)"
+        }
+        return dockerKey
+    }
+
+    public static func psColumn(_ bindings: [EnginePortBinding]) -> String {
+        bindings.map(\.psDisplay).joined(separator: ", ")
+    }
+
     public init(hostIP: String = "", hostPort: Int, containerPort: Int, protocolName: String = "tcp") {
         self.hostIP = hostIP
         self.hostPort = hostPort

@@ -77,6 +77,13 @@ struct PortMappingTests {
                 "80/tcp -> 0.0.0.0:8080",
             ]
         )
+        #expect(
+            EnginePortBinding.psColumn(bindings) == "0.0.0.0:8080->80/tcp, 127.0.0.1:8443->443/tcp"
+        )
+        #expect(EnginePortBinding(hostPort: 0, containerPort: 80).psDisplay == "80/tcp")
+        #expect(
+            EnginePortBinding(hostIP: "::", hostPort: 8080, containerPort: 80).psDisplay == "[::]:8080->80/tcp"
+        )
     }
 
     @Test func specificPortPrintsHostAddresses() throws {

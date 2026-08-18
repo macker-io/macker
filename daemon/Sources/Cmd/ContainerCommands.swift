@@ -59,10 +59,11 @@ struct Ps: ParsableCommand {
                 container.Image,
                 container.Command,
                 container.Status,
+                container.portsColumn,
                 (container.Names.first ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "/")),
             ]
         }
-        Table.print(headers: ["CONTAINER ID", "IMAGE", "COMMAND", "STATUS", "NAMES"], rows: rows)
+        Table.print(headers: ["CONTAINER ID", "IMAGE", "COMMAND", "STATUS", "PORTS", "NAMES"], rows: rows)
     }
 }
 
@@ -703,6 +704,27 @@ private struct ContainerSummary: Decodable {
     var Image: String
     var Command: String
     var Status: String
+    var Ports: [Port]?
+
+    struct Port: Decodable {
+        var IP: String?
+        var PrivatePort: Int
+        var PublicPort: Int?
+        var `Type`: String?
+    }
+
+    var portsColumn: String {
+        EnginePortBinding.psColumn(
+            (Ports ?? []).map {
+                EnginePortBinding(
+                    hostIP: $0.IP ?? "",
+                    hostPort: $0.PublicPort ?? 0,
+                    containerPort: $0.PrivatePort,
+                    protocolName: $0.`Type` ?? "tcp"
+                )
+            }
+        )
+    }
 }
 
 private struct CreateBody: Encodable {
