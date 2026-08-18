@@ -11,8 +11,10 @@ let package = Package(
     products: [
         .executable(name: "App", targets: ["App"]),
         .executable(name: "macker", targets: ["cli"]),
+        .executable(name: "macker-helper", targets: ["Helper"]),
         .library(name: "ContainerEngine", targets: ["ContainerEngine"]),
         .library(name: "DockerAPIAdapter", targets: ["DockerAPIAdapter"]),
+        .library(name: "MackerHelperSupport", targets: ["MackerHelperSupport"]),
     ],
     dependencies: [
         .package(path: "./Vendor/containerization"),
@@ -35,9 +37,16 @@ let package = Package(
             name: "cli",
             dependencies: [
                 "ContainerEngine",
+                "MackerHelperSupport",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
             path: "Sources/Cmd"
+        ),
+        .target(name: "MackerHelperSupport"),
+        .executableTarget(
+            name: "Helper",
+            dependencies: ["MackerHelperSupport"],
+            path: "Sources/Helper"
         ),
         .target(
             name: "LwIPCore",
@@ -88,6 +97,7 @@ let package = Package(
             dependencies: [
                 // Link both C targets here. LwIPPort cannot depend on LwIPCore: SPM would
                 // import lwIP's headers as a Clang module, and memp_std.h's X-macros fail.
+                "MackerHelperSupport",
                 "LwIPCore",
                 "LwIPPort",
                 .product(name: "Containerization", package: "containerization"),
@@ -107,6 +117,7 @@ let package = Package(
             dependencies: [
                 "ContainerEngine",
                 "DockerAPIAdapter",
+                "MackerHelperSupport",
                 .product(name: "ContainerizationOCI", package: "containerization"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
             ]

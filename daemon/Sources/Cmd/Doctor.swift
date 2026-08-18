@@ -2,6 +2,7 @@ import ArgumentParser
 import ContainerEngine
 import Darwin
 import Foundation
+import MackerHelperSupport
 
 struct Doctor: ParsableCommand {
     static let configuration = CommandConfiguration(
@@ -14,6 +15,7 @@ struct Doctor: ParsableCommand {
         results.append(contentsOf: hostChecks())
         results.append(contentsOf: engineChecks())
         results.append(contentsOf: socketChecks())
+        results.append(contentsOf: helperChecks())
         Report.print(results)
         print("")
         let fails = results.filter { $0.status == .fail }.count
@@ -126,5 +128,36 @@ struct Doctor: ParsableCommand {
             results.append(CheckResult(status: .warn, title: "Docker socket symlink", detail: "\(compat) not linked — run `macker setup`"))
         }
         return results
+    }
+
+    private func helperChecks() -> [CheckResult] {
+        if let pong = try? HelperClient.ping() {
+            let version = pong.version.map(String.init) ?? "?"
+            return [
+                CheckResult(
+                    status: .ok,
+                    title: "Host-route helper",
+                    detail: "\(HelperPaths.label) protocol \(version)"
+                )
+            ]
+        }
+        let installed = FileManager.default.fileExists(atPath: HelperPaths.plistPath)
+            || FileManager.default.isExecutableFile(atPath: HelperPaths.installedBinaryPath)
+        if installed {
+            return [
+                CheckResult(
+                    status: .warn,
+                    title: "Host-route helper",
+                    detail: "installed but not running — sudo macker helper install"
+                )
+            ]
+        }
+        return [
+            CheckResult(
+                status: .warn,
+                title: "Host-route helper",
+                detail: "not installed — sudo macker helper install (optional; needed to curl container IPs)"
+            )
+        ]
     }
 }

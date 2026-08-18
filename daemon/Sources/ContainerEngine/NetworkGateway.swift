@@ -1,6 +1,9 @@
 import Containerization
 import ContainerizationExtras
+import Darwin
 import Foundation
+import MackerHelperSupport
+import os
 
 /// Control plane for bridge networks: IPAM, endpoint records, name resolution and ACL.
 ///
@@ -47,7 +50,7 @@ actor NetworkGateway {
             ipam[network.id] = table
         }
         if utunReady {
-            utun.addRoute(subnet: network.subnet)
+            addHostRoute(network.subnet)
         }
     }
 
@@ -197,26 +200,58 @@ actor NetworkGateway {
         forwarder = stack
     }
 
-    /// Best effort: gives the Mac a route into container subnets. Needs privileges we may not
-    /// have, and nothing here depends on it — `-p` works either way.
+    /// Host routes into container subnets. The helper (root) opens utun and passes
+    /// the fd; signed `mackerd` cannot `connect(utun)` on macOS 26. `-p` does not need this.
     private func ensureUtun() {
         guard !utunReady else { return }
         do {
-            try utun.open()
-            try utun.configure(
-                address: Self.gatewayAddress.description,
-                peer: Self.gatewayAddress.description,
-                prefix: 32
-            )
+            let routes = nets.values
+                .filter { $0.driver == "bridge" && !$0.subnet.isEmpty }
+                .map(\.subnet)
+            try applyHostNet(routes: routes)
             utun.start { [weak self] packet in
                 Task { await self?.handleUtun(packet) }
             }
             utunReady = true
-            for network in nets.values where network.driver == "bridge" && !network.subnet.isEmpty {
-                utun.addRoute(subnet: network.subnet)
-            }
+            Self.utunNote("host routes ready on \(utun.name)")
         } catch {
+            Self.utunNote("unavailable: \(error.localizedDescription)")
+            utun.closeDevice()
             utunReady = false
+        }
+    }
+
+    private func applyHostNet(routes: [String]) throws {
+        let address = Self.gatewayAddress.description
+        do {
+            let attached = try HelperClient.attach(
+                address: address,
+                peer: address,
+                prefix: 32,
+                routes: routes
+            )
+            utun.adopt(fd: attached.fd, name: attached.name)
+            return
+        } catch {
+            Self.utunNote("helper attach failed: \(error.localizedDescription)")
+            guard geteuid() == 0 else { throw error }
+        }
+        try utun.open()
+        try utun.configure(address: address, peer: address, prefix: 32)
+        for subnet in routes {
+            utun.addRoute(subnet: subnet)
+        }
+    }
+
+    private func addHostRoute(_ subnet: String) {
+        do {
+            try HelperClient.addRoute(interface: utun.name, subnet: subnet)
+        } catch {
+            if geteuid() == 0 {
+                utun.addRoute(subnet: subnet)
+            } else {
+                Self.utunNote("add-route \(subnet) failed: \(error.localizedDescription)")
+            }
         }
     }
 
@@ -225,13 +260,23 @@ actor NetworkGateway {
         utun.writeIP(packet)
     }
 
-    /// Daemon exit: drop relays, flows and the host device. A kernel forwarder will need this to
-    /// remove the `pf` rules and routes it installed.
+    private static let utunLog = Logger(subsystem: "io.macker.daemon", category: "utun")
+
+    private static func utunNote(_ message: String) {
+        fputs("macker utun: \(message)\n", stderr)
+        fflush(stderr)
+        utunLog.notice("\(message, privacy: .public)")
+    }
+
+    /// Daemon exit: drop relays, flows, host routes, and the utun fd.
     func shutdown() {
         forwarder?.closeAll()
         forwarder = nil
         for containerID in Array(links.keys) {
             detach(containerID: containerID)
+        }
+        if utunReady, !utun.name.isEmpty {
+            try? HelperClient.teardown(interface: utun.name)
         }
         utun.closeDevice()
         utunReady = false

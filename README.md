@@ -126,23 +126,35 @@ Override with `--socket`, `MACKER_HOST`, or `DOCKER_HOST` (`unix://…` or an ab
 
 ## Networking
 
-Each container is a MicroVM with its own kernel, so this is not Linux `bridge` + `veth`. The Docker names still apply:
+Each container is a MicroVM with its own kernel, so this is not Linux `bridge` + `veth`. Docker network names still apply; the paths underneath do not. Diagrams and the helper/utun path are in [docs/networking.md](docs/networking.md).
+
+```mermaid
+flowchart LR
+  B["bridge"] --> GW["NetworkGateway"]
+  GW --> L3["same-net L3 / DNS"]
+  GW --> LW["lwIP outbound and -p"]
+  GW --> UT["utun + helper → 172.17.x"]
+  H["host"] --> VM["vmnet NAT"]
+  N["none"] --> X["no NIC"]
+```
 
 | `--network` | What Macker does |
 | --- | --- |
-| `bridge` (default) | One virtio-net to a userspace L3 gateway (`eth0` is `/32`, DNS at `192.168.255.1`). Same-network containers reach each other by IP and by name. Extra bridge networks add another `/32` on the same `eth0`. `-p` publishes on the Mac. `--internal` allows same-network traffic only (no outbound NAT, no upstream DNS). |
-| `host` | Per-network vmnet NAT. `-p` is ignored. Image `EXPOSE` (and create `ExposedPorts`) are published 1:1 on the Mac (`80` → `localhost:80`). Guest `127.0.0.1` is **not** the Mac loopback. |
+| `bridge` (default) | One virtio-net to a userspace L3 gateway (`eth0` is `/32`, DNS/next-hop `192.168.255.1`). Same-network containers reach each other by IP and name. Extra bridges add another `/32` on the same `eth0`. `-p` publishes on the Mac via lwIP. `sudo macker helper install` adds a utun route so the Mac can also `curl <containerIP>`. `--internal` is same-network only. |
+| `host` | Per-network vmnet NAT. `-p` is ignored. Image `EXPOSE` is published 1:1 on the Mac (`80` → `localhost:80`). Guest `127.0.0.1` is **not** the Mac loopback. |
 | `none` | No NIC. |
 
 `macker network ls|create|rm|inspect|connect|disconnect|prune` works. Builtin `bridge` / `host` / `none` cannot be removed. Running `connect` / `disconnect` on an extra bridge adds or removes an address on `eth0`. Connecting a running container that has no bridge NIC yet still needs a stop/start (MicroVMs cannot hot-plug virtio-net). Names resolve through the gateway; `/etc/hosts` is localhost only.
 
-Outbound TCP/UDP and `-p` use the in-process lwIP forwarder (guest frames → lwIP → Mac sockets), without installing host routes or `pf`. Same-network L3 and DNS stay in the gateway. The Mac reaches published ports on localhost; it does not get Linux-`docker0`-style `curl <containerIP>`.
+lwIP is the outbound NAT and `-p` engine. utun is only the optional Mac → container-IP route. Neither path installs `pf`.
 
 ```bash
 ./.build/debug/macker network ls
 ./.build/debug/macker run --rm alpine wget -qO- https://example.com
 ./.build/debug/macker run -d --name web -p 18080:80 nginx
 curl http://127.0.0.1:18080
+sudo ./.build/debug/macker helper install   # once; then restart the daemon
+curl http://172.17.0.2                      # container IP from `inspect`
 ./.build/debug/macker run -d --name hostweb --network host nginx
 curl http://127.0.0.1:80
 ```
@@ -153,7 +165,7 @@ vmnet NAT uses the same `com.apple.security.virtualization` entitlement as Apple
 
 ## Roadmap
 
-Daily `bridge` / `host` / `none`, plus `run -it` / `exec`, is in place. Command completeness, gaps, and the implementation order are in [docs/cli-status.md](docs/cli-status.md). Bridge off-link traffic now uses the in-process lwIP forwarder.
+Daily `bridge` / `host` / `none`, plus `run -it` / `exec`, is in place. Command completeness is in [docs/cli-status.md](docs/cli-status.md). How bridge, vmnet, utun, and lwIP fit together is in [docs/networking.md](docs/networking.md).
 
 ## Make targets
 
@@ -162,7 +174,8 @@ Run these from the repo root (`make -C daemon …`) or from `daemon/`. Prefer Ma
 | Target | Purpose |
 | --- | --- |
 | `app` | Debug-build the daemon and ad-hoc sign it |
-| `macker` | Debug-build the CLI |
+| `macker` | Debug-build the CLI and `macker-helper` |
+| `helper` | Debug-build `macker-helper` |
 | `run` | `app`, then start the daemon |
 | `sign` | Re-sign an already-built debug `App` |
 | `fetch-runtime` | Download the pinned kernel + vminit into the store |

@@ -25,6 +25,7 @@ struct Setup: ParsableCommand {
         print("")
         print("Next: start the daemon, then run `macker doctor`.")
         print("Guest kernel/initfs: run `macker fetch-runtime` (or `make -C daemon fetch-runtime`).")
+        print("Host routes (optional, for curl <container IP>): `sudo macker helper install`.")
         print("Docker clients can use \(DaemonPaths.defaultHostURL) or, after the symlink, the default Docker socket.")
     }
 

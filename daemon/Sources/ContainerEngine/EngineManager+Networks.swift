@@ -3,7 +3,7 @@ import ContainerizationExtras
 import Foundation
 
 /// Docker-shaped networks on MicroVMs.
-/// Bridge: one virtio-net to ``NetworkGateway`` (L3, DNS, NAT, optional utun).
+/// Bridge: one virtio-net to ``NetworkGateway`` (L3, DNS, NAT; host routes via utun + helper).
 /// Host: per-network vmnet NAT. None: no NIC. macvlan/sidecar stay unimplemented.
 extension EngineManager {
     static let builtinBridgeName = "bridge"
