@@ -56,10 +56,11 @@ extension EngineManager {
         do {
             // Attach virtio-net ourselves. ContainerManager's single `network:` cannot
             // express none / host / multiple networks.
+            let rootfs = try await prepareRootfs(id: record.id, image: image)
             let created = try await manager.create(
                 record.id,
                 image: image,
-                rootfsSizeInBytes: Self.defaultRootfsBytes,
+                rootfs: rootfs,
                 networking: false
             ) { config in
                 if !prepared.command.isEmpty {

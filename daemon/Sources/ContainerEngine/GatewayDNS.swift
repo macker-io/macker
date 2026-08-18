@@ -31,7 +31,13 @@ enum GatewayDNS {
         return Question(name: name, type: type, dnsClass: cls, id: id)
     }
 
-    static func answer(id: UInt16, name: String, address: IPv4Address?, nxdomain: Bool = false) -> Data {
+    static func answer(
+        id: UInt16,
+        name: String,
+        address: IPv4Address?,
+        nxdomain: Bool = false,
+        type: UInt16 = typeA
+    ) -> Data {
         var out = Data()
         func append16(_ value: UInt16) {
             out.append(UInt8(value >> 8))
@@ -45,11 +51,11 @@ enum GatewayDNS {
             append16(0)
             append16(0)
             appendName(name, to: &out)
-            append16(1)
+            append16(type)
             append16(1)
             out.append(0xc0)
             out.append(0x0c)
-            append16(1)
+            append16(typeA)
             append16(1)
             out.append(contentsOf: [0, 0, 0, 30])
             append16(4)
@@ -61,7 +67,7 @@ enum GatewayDNS {
             append16(0)
             append16(0)
             appendName(name, to: &out)
-            append16(1)
+            append16(type)
             append16(1)
         }
         return out

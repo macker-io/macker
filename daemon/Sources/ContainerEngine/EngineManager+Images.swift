@@ -144,6 +144,10 @@ extension EngineManager {
         let digest = image.digest
         let reference = image.reference
         try await imageStore.delete(reference: reference, performCleanup: true)
+        let remaining = (try? await imageStore.list().filter { $0.digest == digest }) ?? []
+        if remaining.isEmpty {
+            dropUnpackedCache(digest: digest)
+        }
         await publishImage(action: "untag", digest: digest, name: reference)
         await publishImage(action: "delete", digest: digest, name: reference)
         return [
@@ -411,6 +415,7 @@ extension EngineManager {
             if !leftover {
                 deleted.append(EngineImageDeleteItem(untagged: nil, deleted: digest))
                 reclaimed += size
+                dropUnpackedCache(digest: digest)
                 await publishImage(action: "delete", digest: digest, name: digest)
             }
         }

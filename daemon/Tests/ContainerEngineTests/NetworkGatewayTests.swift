@@ -44,6 +44,18 @@ struct NetworkGatewayTests {
         #expect(nodata[3] & 0x0f == 0)
         let nx = GatewayDNS.answer(id: question.id, name: question.name, address: nil, nxdomain: true)
         #expect(nx[3] & 0x0f == 3)
+        var aaaaQuery = Data([0x00, 0x02, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+        aaaaQuery.append(contentsOf: [3, 119, 101, 98, 0, 0, 28, 0, 1]) // web AAAA IN
+        let aaaa = try #require(GatewayDNS.parseQuery(aaaaQuery))
+        #expect(aaaa.type == GatewayDNS.typeAAAA)
+        let aaaaNodata = GatewayDNS.answer(
+            id: aaaa.id,
+            name: aaaa.name,
+            address: nil,
+            type: aaaa.type
+        )
+        #expect(aaaaNodata[3] & 0x0f == 0)
+        #expect(Array(aaaaNodata.suffix(4)) == [0, 28, 0, 1])
     }
 
     @Test func ipv4EncodePacksLargePayloadLength() {

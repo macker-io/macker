@@ -3,18 +3,19 @@ import Testing
 @testable import ContainerEngine
 
 struct HostsFileTests {
-    @Test func keepsOnlyLocalhostEntries() {
+    @Test func includesOwnNamesButNotPeers() {
         let network = "net-a"
-        let selfRecord = container("aaa", name: "web", state: "created", networkID: network, ip: "172.17.0.2")
-        let running = container("bbb", name: "app", state: "running", networkID: network, ip: "172.17.0.3")
+        let selfRecord = container("aaa012345678", name: "web", state: "created", networkID: network, ip: "172.17.0.2")
+        let running = container("bbb012345678", name: "app", state: "running", networkID: network, ip: "172.17.0.3")
 
         let hosts = EngineManager.hostsFile(for: selfRecord, peers: [selfRecord, running])
         let rendered = hosts.hostsFile
         #expect(rendered.contains("127.0.0.1"))
         #expect(rendered.contains("localhost"))
-        #expect(!rendered.contains("172.17.0.2"))
+        #expect(rendered.contains("172.17.0.2"))
+        #expect(rendered.contains("web"))
+        #expect(rendered.contains("aaa012345678".prefix(12)))
         #expect(!rendered.contains("172.17.0.3"))
-        #expect(!rendered.contains(" web"))
         #expect(!rendered.contains(" app"))
     }
 

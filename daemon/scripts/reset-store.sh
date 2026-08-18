@@ -15,7 +15,7 @@ if [ ! -d "$STORE" ]; then
 fi
 
 echo "reset $STORE"
-for name in content containers volumes networks; do
+for name in content containers volumes networks unpacked; do
   path="$STORE/$name"
   if [ -e "$path" ]; then
     rm -rf "$path"

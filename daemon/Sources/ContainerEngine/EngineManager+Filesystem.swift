@@ -45,6 +45,8 @@ extension EngineManager {
     }
 
     func snapshotBaseline(_ id: String) {
+        let dest = baselineURL(id)
+        if FileManager.default.fileExists(atPath: dest.path) { return }
         let rootfs = rootfsURL(id)
         guard FileManager.default.fileExists(atPath: rootfs.path) else { return }
         guard let entries = try? FSInventory.walkEXT4(rootfs),
@@ -52,7 +54,7 @@ extension EngineManager {
         else {
             return
         }
-        try? data.write(to: baselineURL(id), options: .atomic)
+        try? data.write(to: dest, options: .atomic)
     }
 
     func requireFilesystem(_ idOrName: String) throws -> EngineContainer {

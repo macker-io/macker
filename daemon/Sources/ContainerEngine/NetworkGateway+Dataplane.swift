@@ -92,17 +92,26 @@ extension NetworkGateway {
                 containerID: containerID,
                 packet: packet,
                 datagram: datagram,
-                payload: GatewayDNS.answer(id: question.id, name: question.name, address: ip)
+                payload: GatewayDNS.answer(id: question.id, name: question.name, address: ip, type: question.type)
             )
             return
         }
-        if local != nil {
-            // The name exists: AAAA and friends are NODATA. musl reads NXDOMAIN as "no such host".
+        if local != nil || question.type == GatewayDNS.typeAAAA {
+            // Local names: AAAA is NODATA (musl treats NXDOMAIN as "no such host").
+            // Other AAAA: the dataplane is IPv4-only, so do not recurse — glibc otherwise
+            // waits through its resolver timeout (~20s) when the reply QTYPE does not match.
+            let nxdomain = local == nil && !question.name.contains(".")
             replyDNS(
                 containerID: containerID,
                 packet: packet,
                 datagram: datagram,
-                payload: GatewayDNS.answer(id: question.id, name: question.name, address: nil)
+                payload: GatewayDNS.answer(
+                    id: question.id,
+                    name: question.name,
+                    address: nil,
+                    nxdomain: nxdomain,
+                    type: question.type
+                )
             )
             return
         }
@@ -115,7 +124,13 @@ extension NetworkGateway {
             containerID: containerID,
             packet: packet,
             datagram: datagram,
-            payload: GatewayDNS.answer(id: question.id, name: question.name, address: nil, nxdomain: true)
+            payload: GatewayDNS.answer(
+                id: question.id,
+                name: question.name,
+                address: nil,
+                nxdomain: true,
+                type: question.type
+            )
         )
     }
 
