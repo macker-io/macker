@@ -564,8 +564,20 @@ extension EngineManager {
         saveContainer(updated)
     }
 
-    func stopPortPublishers(_ containerID: String) {
+    func stopPortPublishers(_ containerID: String) async {
         portPublisher.unpublish(keysMatching: "\(containerID):")
+        guard let record = containers[containerID] else { return }
+        let guest = record.endpoints.first { endpoint in
+            networks[endpoint.networkID]?.driver == "bridge" && !endpoint.ipv4Address.isEmpty
+        }
+        guard let guest, let guestIP = try? IPv4Address(guest.ipv4Address) else { return }
+        for binding in record.portBindings {
+            await networkGateway.stopPortRelay(
+                guestIP: guestIP,
+                guestPort: UInt16(binding.containerPort),
+                udp: binding.protocolName.lowercased() == "udp"
+            )
+        }
     }
 
     func resolveNetwork(_ idOrName: String) throws -> EngineNetwork {

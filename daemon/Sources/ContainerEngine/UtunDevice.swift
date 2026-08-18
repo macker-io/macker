@@ -4,9 +4,8 @@ import Foundation
 /// Host-side utun, the `docker0` equivalent: gives the Mac a route into container subnets.
 ///
 /// `open` works unprivileged, but `configure` / `addRoute` shell out to `ifconfig` and `route`,
-/// which need root. Callers treat failure as "no host route" and keep working. This device is
-/// also the base for moving outbound NAT and `-p` into the kernel (utun + `pf`) instead of
-/// terminating TCP in ``GatewayNAT``.
+/// which need root. Callers treat failure as "no host route" and keep working. Outbound NAT and
+/// `-p` stay in ``GatewayLwIP``; this device is not the default dataplane.
 final class UtunDevice: @unchecked Sendable {
     /// `CTLIOCGINFO`: resolve a kernel control name to its id.
     private static let ctlIOCGInfo = UInt(0xc064_4e03)

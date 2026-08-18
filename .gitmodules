@@ -4,3 +4,8 @@
 	# Pinned to release tag 0.41.0 (commit recorded by the parent gitlink).
 	# Upgrade: make -C daemon sync-runtime ARGS='containerization <tag>'
 	# then commit RuntimePin.json, this file, and the submodule gitlink.
+[submodule "daemon/Vendor/lwip"]
+	path = daemon/Vendor/lwip
+	url = https://github.com/lwip-tcpip/lwip.git
+	# Pinned to STABLE-2_2_1_RELEASE (commit recorded by the parent gitlink).
+	# Upgrade by checking out the desired upstream tag, then commit the gitlink.

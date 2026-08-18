@@ -142,7 +142,7 @@ actor NetworkGateway {
         link.start { [id = containerID] frame in
             Task { await self.handleFrame(containerID: id, frame: frame) }
         }
-        ensureForwarder()
+        try ensureForwarder()
         ensureUtun()
         return link.interface
     }
@@ -172,22 +172,29 @@ actor NetworkGateway {
 
     /// Binds a Mac port that relays to `guestIP:guestPort`; `-p` publishes on top of this.
     func startPortRelay(guestIP: IPv4Address, guestPort: UInt16, udp: Bool) async throws -> Int {
-        ensureForwarder()
+        try ensureForwarder()
         guard let forwarder else {
             throw EngineError.runtimeUnavailable("gateway forwarder is not ready")
         }
         return try await forwarder.listenLocal(guestIP: guestIP, guestPort: guestPort, udp: udp)
     }
 
+    func stopPortRelay(guestIP: IPv4Address, guestPort: UInt16, udp: Bool) {
+        forwarder?.stopListenLocal(guestIP: guestIP, guestPort: guestPort, udp: udp)
+    }
+
     // MARK: - Dataplane wiring
 
-    /// Today this is the userspace NAT. A privileged utun + `pf` forwarder can take its place
-    /// without touching anything above.
-    private func ensureForwarder() {
+    /// Off-link traffic is terminated by the in-process lwIP forwarder.
+    private func ensureForwarder() throws {
         guard forwarder == nil else { return }
-        forwarder = GatewayNAT { [weak self] guestIP, packet in
+        let onGuest: @Sendable (IPv4Address, Data) -> Void = { [weak self] guestIP, packet in
             Task { await self?.deliver(packet, toIP: guestIP) }
         }
+        guard let stack = GatewayLwIP(onGuest: onGuest) else {
+            throw EngineError.runtimeUnavailable("failed to start lwIP gateway forwarder")
+        }
+        forwarder = stack
     }
 
     /// Best effort: gives the Mac a route into container subnets. Needs privileges we may not

@@ -12,11 +12,20 @@ struct DaemonApp {
         logger.logLevel = .info
 
         let socketPath = parseSocketPath(from: CommandLine.arguments)
+        let instanceLock: DaemonInstanceLock
+        do {
+            instanceLock = try DaemonInstanceLock.acquire()
+        } catch {
+            logger.error("\(error.localizedDescription)")
+            exit(1)
+        }
+
         let engine: EngineManager
         do {
             engine = try EngineManager()
         } catch {
             logger.error("failed to initialize image store: \(error.localizedDescription)")
+            instanceLock.release()
             exit(1)
         }
 
@@ -38,6 +47,7 @@ struct DaemonApp {
             }
         } catch {
             logger.error("environment check failed: \(error.localizedDescription)")
+            instanceLock.release()
             exit(1)
         }
 
@@ -58,6 +68,7 @@ struct DaemonApp {
         await engine.shutdown()
         await server.stop()
         _ = await serverTask.result
+        instanceLock.release()
     }
 
     /// `--socket <path>` or `--socket=<path>`; else `MACKER_HOST` / `DOCKER_HOST`; else the store socket.

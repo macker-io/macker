@@ -1,0 +1,7 @@
+Macker's lwIP integration layer.
+
+The upstream lwIP source is pinned as the sibling submodule in ../lwip.
+See ../lwip/COPYING for its BSD-3-Clause license and upstream copyright notice.
+
+This directory contains Macker's sys_arch implementation, lwIP configuration,
+and macker_lwip.c adapter used by the daemon.

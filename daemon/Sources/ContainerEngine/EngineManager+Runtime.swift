@@ -177,7 +177,7 @@ extension EngineManager {
         ttySessions[id] = nil
         statsSamples[id] = nil
         lastStats[id] = nil
-        stopPortPublishers(id)
+        await stopPortPublishers(id)
         if let linux = vms.removeValue(forKey: id) {
             try? await linux.stop()
         }
@@ -228,7 +228,7 @@ extension EngineManager {
     }
 
     func reclaimContainerRuntime(_ id: String) async {
-        stopPortPublishers(id)
+        await stopPortPublishers(id)
         await releaseInterfaces(id)
         resetContainerFiles(id)
     }

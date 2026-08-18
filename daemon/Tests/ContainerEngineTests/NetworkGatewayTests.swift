@@ -1,8 +1,13 @@
 import ContainerizationExtras
 import Foundation
+import Network
 import Testing
+import os
 @testable import ContainerEngine
 
+typealias TestIPv4Address = ContainerizationExtras.IPv4Address
+
+@Suite(.serialized)
 struct NetworkGatewayTests {
     @Test func ipamSkipsNetworkGatewayAndBroadcast() throws {
         var table = try NetworkIPAM(subnet: "172.17.0.0/16")
@@ -101,6 +106,241 @@ struct NetworkGatewayTests {
         #expect(throws: EngineError.self) {
             _ = try NetworkAttachmentFactory.make(driver: "container:abc")
         }
+    }
+
+    @Test func lwipBridgesTCPPayloadThroughAMacSocket() throws {
+        let listener = try NWListener(using: .tcp, on: .any)
+        let listenerQueue = DispatchQueue(label: "test.lwip.listener")
+        let listenerReady = DispatchSemaphore(value: 0)
+        listener.stateUpdateHandler = { state in
+            if case .ready = state { listenerReady.signal() }
+        }
+        listener.newConnectionHandler = { connection in
+            connection.stateUpdateHandler = { state in
+                if case .ready = state {
+                    connection.send(content: Data("hello-from-host".utf8), completion: .idempotent)
+                }
+            }
+            connection.start(queue: listenerQueue)
+        }
+        listener.start(queue: listenerQueue)
+        defer { listener.cancel() }
+        #expect(listenerReady.wait(timeout: .now() + 1) == .success)
+        let hostPort = try #require(listener.port?.rawValue)
+
+        let guest = IPv4Address(0xAC11_0002)
+        let remote = IPv4Address(0x7F00_0001)
+        let outputs = OSAllocatedUnfairLock<[Data]>(initialState: [])
+        let outputSignal = DispatchSemaphore(value: 0)
+        let stack = try #require(GatewayLwIP { _, data in
+            outputs.withLock { $0.append(data) }
+            outputSignal.signal()
+        })
+        defer { stack.closeAll() }
+
+        let syn = makeTCPPacket(src: guest, dst: remote, srcPort: 40_000, dstPort: hostPort,
+                                seq: 7, flags: TCPSegment.Flags.syn.rawValue)
+        let synPacket = IPv4Packet(tos: 0, id: 1, ttl: 64, proto: Ethernet.protoTCP,
+                                   src: guest, dst: remote, payload: syn)
+        stack.handleTCP(packet: synPacket, segment: try #require(TCPSegment.parse(syn)))
+        #expect(outputSignal.wait(timeout: .now() + 1) == .success)
+        let synAckData = try #require(outputs.withLock { $0.first })
+        let synAckPacket = try #require(IPv4Packet.parse(synAckData))
+        let synAckSegment = try #require(TCPSegment.parse(synAckPacket.payload))
+        let ack = makeTCPPacket(src: guest, dst: remote, srcPort: 40_000, dstPort: hostPort,
+                                seq: 8, ack: synAckSegment.seq &+ 1, flags: TCPSegment.Flags.ack.rawValue)
+        let ackPacket = IPv4Packet(tos: 0, id: 2, ttl: 64, proto: Ethernet.protoTCP,
+                                   src: guest, dst: remote, payload: ack)
+        stack.handleTCP(packet: ackPacket, segment: try #require(TCPSegment.parse(ack)))
+
+        var receivedHostPayload = false
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline, !receivedHostPayload {
+            _ = outputSignal.wait(timeout: .now() + 0.1)
+            receivedHostPayload = outputs.withLock { packets in
+                packets.compactMap { IPv4Packet.parse($0) }
+                    .compactMap { TCPSegment.parse($0.payload)?.payload }
+                    .contains(Data("hello-from-host".utf8))
+            }
+        }
+        #expect(receivedHostPayload)
+    }
+
+    @Test func lwipTranslatesOutboundSynBackToTheOriginalPeer() throws {
+        let guest = IPv4Address(0xAC11_0002)
+        let remote = IPv4Address(0x0101_0101)
+        let tcp = makeTCPPacket(src: guest, dst: remote, srcPort: 40_000, dstPort: 443,
+                                seq: 7, flags: TCPSegment.Flags.syn.rawValue)
+        let packet = IPv4Packet(tos: 0, id: 1, ttl: 64, proto: Ethernet.protoTCP,
+                                src: guest, dst: remote, payload: tcp)
+        let output = OSAllocatedUnfairLock<Data?>(initialState: nil)
+        let signal = DispatchSemaphore(value: 0)
+        let stack = try #require(GatewayLwIP { _, data in
+            output.withLock { $0 = data }
+            signal.signal()
+        })
+        defer { stack.closeAll() }
+        let parsed = try #require(TCPSegment.parse(tcp))
+        stack.handleTCP(packet: packet, segment: parsed)
+        #expect(signal.wait(timeout: .now() + 1) == .success)
+        let replyData = try #require(output.withLock { $0 })
+        let reply = try #require(IPv4Packet.parse(replyData))
+        #expect(reply.src == remote)
+        #expect(reply.dst == guest)
+        #expect(reply.proto == Ethernet.protoTCP)
+        #expect(TCPSegment.parse(reply.payload)?.flags.contains(.synAck) == true)
+    }
+
+    @Test func lwipBridgesUDPPayloadThroughAMacSocket() throws {
+        let listener = try NWListener(using: .udp, on: .any)
+        let listenerQueue = DispatchQueue(label: "test.lwip.udp")
+        let listenerReady = DispatchSemaphore(value: 0)
+        listener.stateUpdateHandler = { state in
+            if case .ready = state { listenerReady.signal() }
+        }
+        listener.newConnectionHandler = { connection in
+            connection.receiveMessage { data, _, _, _ in
+                if data != nil {
+                    connection.send(content: Data("hello-udp".utf8), completion: .idempotent)
+                }
+            }
+            connection.start(queue: listenerQueue)
+        }
+        listener.start(queue: listenerQueue)
+        defer { listener.cancel() }
+        #expect(listenerReady.wait(timeout: .now() + 1) == .success)
+        let hostPort = try #require(listener.port?.rawValue)
+
+        let guest = IPv4Address(0xAC11_0002)
+        let remote = IPv4Address(0x7F00_0001)
+        let outputs = OSAllocatedUnfairLock<[Data]>(initialState: [])
+        let outputSignal = DispatchSemaphore(value: 0)
+        let stack = try #require(GatewayLwIP { _, data in
+            outputs.withLock { $0.append(data) }
+            outputSignal.signal()
+        })
+        defer { stack.closeAll() }
+
+        let datagram = UDPDatagram(srcPort: 40_000, dstPort: hostPort, payload: Data("ping".utf8))
+        let encoded = datagram.encode(src: guest, dst: remote)
+        let packet = IPv4Packet(tos: 0, id: 1, ttl: 64, proto: Ethernet.protoUDP,
+                                src: guest, dst: remote, payload: encoded)
+        stack.handleUDP(packet: packet, datagram: datagram)
+
+        var received = false
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline, !received {
+            _ = outputSignal.wait(timeout: .now() + 0.1)
+            received = outputs.withLock { packets in
+                packets.compactMap { IPv4Packet.parse($0) }
+                    .compactMap { UDPDatagram.parse($0.payload)?.payload }
+                    .contains(Data("hello-udp".utf8))
+            }
+        }
+        #expect(received)
+        let reply = try #require(outputs.withLock { $0.compactMap { IPv4Packet.parse($0) }.last })
+        #expect(reply.src == remote)
+        #expect(reply.dst == guest)
+    }
+
+    @Test func lwipDropsIdleOutboundUDPFlows() throws {
+        let guest = IPv4Address(0xAC11_0002)
+        let remote = IPv4Address(0x7F00_0001)
+        let created = GatewayLwIP(
+            onGuest: { _, _ in },
+            udpIdleTimeout: 0.05,
+            udpSweepInterval: 0.05
+        )
+        let stack = try #require(created)
+        defer { stack.closeAll() }
+        let datagram = UDPDatagram(srcPort: 40_000, dstPort: 9, payload: Data("x".utf8))
+        let encoded = datagram.encode(src: guest, dst: remote)
+        let packet = IPv4Packet(tos: 0, id: 1, ttl: 64, proto: Ethernet.protoUDP,
+                                src: guest, dst: remote, payload: encoded)
+        stack.handleUDP(packet: packet, datagram: datagram)
+
+        var sawFlow = false
+        let createdDeadline = Date().addingTimeInterval(1)
+        while Date() < createdDeadline, !sawFlow {
+            sawFlow = stack.udpFlowCount() > 0
+            if !sawFlow { Thread.sleep(forTimeInterval: 0.02) }
+        }
+        #expect(sawFlow)
+
+        var gone = false
+        let idleDeadline = Date().addingTimeInterval(1)
+        while Date() < idleDeadline, !gone {
+            gone = stack.udpFlowCount() == 0
+            if !gone { Thread.sleep(forTimeInterval: 0.02) }
+        }
+        #expect(gone)
+    }
+
+    @Test func lwipListenLocalOpensTCPTowardTheGuest() async throws {
+        let guest = IPv4Address(0xAC11_0002)
+        let outputs = OSAllocatedUnfairLock<[Data]>(initialState: [])
+        let stack = try #require(GatewayLwIP { _, data in
+            outputs.withLock { $0.append(data) }
+        })
+        defer { stack.closeAll() }
+
+        let port = try await stack.listenLocal(guestIP: guest, guestPort: 80, udp: false)
+        #expect(stack.relayCount() == 1)
+        let connection = NWConnection(
+            host: "127.0.0.1",
+            port: try #require(NWEndpoint.Port(rawValue: UInt16(port))),
+            using: .tcp
+        )
+        connection.start(queue: DispatchQueue(label: "test.lwip.inbound"))
+        defer { connection.cancel() }
+
+        var packet: IPv4Packet?
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline, packet == nil {
+            packet = outputs.withLock { $0.first }.flatMap { IPv4Packet.parse($0) }
+            if packet == nil { try await Task.sleep(for: .milliseconds(50)) }
+        }
+        let parsed = try #require(packet)
+        #expect(parsed.src == NetworkGateway.gatewayAddress)
+        #expect(parsed.dst == guest)
+        #expect(TCPSegment.parse(parsed.payload)?.flags.contains(.syn) == true)
+
+        stack.stopListenLocal(guestIP: guest, guestPort: 80, udp: false)
+        #expect(stack.relayCount() == 0)
+    }
+
+    private func makeTCPPacket(src: TestIPv4Address, dst: TestIPv4Address, srcPort: UInt16,
+                               dstPort: UInt16, seq: UInt32, ack: UInt32 = 0,
+                               flags: UInt8, payload: Data = Data()) -> Data {
+        var header = Data(count: TCPSegment.headerLength)
+        header[0] = UInt8(truncatingIfNeeded: srcPort >> 8)
+        header[1] = UInt8(truncatingIfNeeded: srcPort)
+        header[2] = UInt8(truncatingIfNeeded: dstPort >> 8)
+        header[3] = UInt8(truncatingIfNeeded: dstPort)
+        header[4] = UInt8(truncatingIfNeeded: seq >> 24)
+        header[5] = UInt8(truncatingIfNeeded: seq >> 16)
+        header[6] = UInt8(truncatingIfNeeded: seq >> 8)
+        header[7] = UInt8(truncatingIfNeeded: seq)
+        header[8] = UInt8(truncatingIfNeeded: ack >> 24)
+        header[9] = UInt8(truncatingIfNeeded: ack >> 16)
+        header[10] = UInt8(truncatingIfNeeded: ack >> 8)
+        header[11] = UInt8(truncatingIfNeeded: ack)
+        header[12] = 0x50
+        header[13] = flags
+        header[14] = 0xff
+        header[15] = 0xff
+        let transport = header + payload
+        var pseudo = Data()
+        pseudo.append(contentsOf: src.bytes)
+        pseudo.append(contentsOf: dst.bytes)
+        pseudo.append(0)
+        pseudo.append(Ethernet.protoTCP)
+        pseudo.append(UInt8(truncatingIfNeeded: transport.count >> 8))
+        pseudo.append(UInt8(truncatingIfNeeded: transport.count))
+        let sum = Ethernet.checksum(pseudo + transport)
+        header[16] = UInt8(truncatingIfNeeded: sum >> 8)
+        header[17] = UInt8(truncatingIfNeeded: sum)
+        return header + payload
     }
 
     @Test func gatewayAclAndDnsStayOnTheSameNetwork() async throws {

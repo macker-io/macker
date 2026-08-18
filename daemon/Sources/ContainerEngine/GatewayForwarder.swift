@@ -3,14 +3,10 @@ import Foundation
 
 /// How traffic that is *not* container-to-container leaves and enters the gateway.
 ///
-/// ``GatewayNAT`` implements this by terminating TCP/UDP in the daemon and reopening
-/// the flow with `NWConnection`. That is a consequence of virtio frames only reaching
-/// user space: without a route on the Mac, the daemon has to act as the peer.
-///
-/// A kernel implementation (privileged utun + `pf` NAT/redirect) can conform instead
-/// and forward IP without touching TCP state. Same-network forwarding, ARP, ICMP and
-/// DNS stay in ``NetworkGateway`` either way, so swapping this out does not affect
-/// IPAM, `network connect`, or the guest's single `eth0`.
+/// ``GatewayLwIP`` terminates guest TCP/UDP with a complete userspace protocol stack and
+/// reopens only the application payload on Mac sockets. Same-network forwarding, ARP, ICMP and
+/// DNS stay in ``NetworkGateway``, so this does not affect IPAM, `network connect`, or the
+/// guest's single `eth0`.
 protocol GatewayForwarder: Sendable {
     /// Guest → outside, per datagram.
     func handleUDP(packet: IPv4Packet, datagram: UDPDatagram)
@@ -28,6 +24,9 @@ protocol GatewayForwarder: Sendable {
     /// Listen on a Mac port and relay it to `guestIP:guestPort`. Used by `-p`.
     /// Returns the bound port.
     func listenLocal(guestIP: IPv4Address, guestPort: UInt16, udp: Bool) async throws -> Int
+
+    /// Drop the `-p` relay started by ``listenLocal(guestIP:guestPort:udp:)`` and its inbound flows.
+    func stopListenLocal(guestIP: IPv4Address, guestPort: UInt16, udp: Bool)
 
     /// Drop every flow and listener.
     func closeAll()

@@ -1,0 +1,52 @@
+#ifndef MACKER_LWIPOPTS_H
+#define MACKER_LWIPOPTS_H
+
+#define NO_SYS 0
+#define LWIP_SOCKET 0
+#define LWIP_NETCONN 0
+#define LWIP_RAW 1
+#define LWIP_IPV4 1
+#define LWIP_IPV6 0
+#define LWIP_ETHERNET 0
+#define LWIP_ARP 0
+#define LWIP_DHCP 0
+#define LWIP_AUTOIP 0
+#define LWIP_IGMP 0
+#define LWIP_SINGLE_NETIF 1
+#define LWIP_NETIF_API 0
+#define LWIP_TIMERS 1
+#define LWIP_TCP 1
+#define LWIP_UDP 1
+#define LWIP_ICMP 0
+#define LWIP_ICMP6 0
+#define LWIP_DNS 0
+#define LWIP_SNMP 0
+#define LWIP_MDNS_RESPONDER 0
+#define LWIP_STATS 0
+#define LWIP_DEBUG 0
+#define LWIP_PROVIDE_ERRNO 0
+#define LWIP_NETIF_HOSTNAME 0
+#define LWIP_CHECKSUM_ON_COPY 0
+#define LWIP_TCPIP_CORE_LOCKING 0
+#define LWIP_TCPIP_THREAD_STACKSIZE 0
+#define LWIP_TCPIP_THREAD_PRIO 0
+
+#define MEM_SIZE (1024 * 1024)
+#define MEMP_NUM_TCP_PCB 256
+#define MEMP_NUM_TCP_PCB_LISTEN 256
+#define MEMP_NUM_TCP_SEG 512
+#define MEMP_NUM_UDP_PCB 256
+#define MEMP_NUM_PBUF 2048
+#define PBUF_POOL_SIZE 512
+#define PBUF_POOL_BUFSIZE 1700
+#define TCP_MSS 1460
+#define TCP_WND (32 * 1024)
+/* snd_buf is a u16_t in lwIP; 65536 would wrap to zero. */
+#define TCP_SND_BUF (64 * 1024 - 1)
+#define TCP_SND_QUEUELEN (4 * TCP_SND_BUF / TCP_MSS)
+#define TCP_QUEUE_OOSEQ 1
+#define IP_REASSEMBLY 1
+#define IP_FRAG 0
+#define IP_OPTIONS_ALLOWED 1
+
+#endif

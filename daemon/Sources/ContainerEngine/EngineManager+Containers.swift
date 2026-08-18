@@ -364,7 +364,7 @@ extension EngineManager {
     }
 
     func forgetContainer(_ id: String) async {
-        stopPortPublishers(id)
+        await stopPortPublishers(id)
         await releaseInterfaces(id, keepAddresses: false)
         containers[id] = nil
         ttySessions[id] = nil

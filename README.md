@@ -120,7 +120,7 @@ The daemon listens on:
 
 `~/Library/Application Support/io.macker.daemon/macker.sock`
 
-Override with `--socket`, `MACKER_HOST`, or `DOCKER_HOST` (`unix://…` or an absolute path).
+Override with `--socket`, `MACKER_HOST`, or `DOCKER_HOST` (`unix://…` or an absolute path). Only one daemon may own the store (`daemon.lock` under Application Support); a second daemon exits with an explicit already-running error.
 
 `/var/run/docker.sock` is Docker’s name. Only `macker setup` (optionally `--force`) creates a symlink to `macker.sock`. Leave it alone if it already points at Podman or Docker Desktop.
 
@@ -136,7 +136,7 @@ Each container is a MicroVM with its own kernel, so this is not Linux `bridge` +
 
 `macker network ls|create|rm|inspect|connect|disconnect|prune` works. Builtin `bridge` / `host` / `none` cannot be removed. Running `connect` / `disconnect` on an extra bridge adds or removes an address on `eth0`. Connecting a running container that has no bridge NIC yet still needs a stop/start (MicroVMs cannot hot-plug virtio-net). Names resolve through the gateway; `/etc/hosts` is localhost only.
 
-Outbound NAT and `-p` currently terminate TCP in the daemon (guest frames → `NWConnection`). That is not required: with a privileged utun + `pf` (or equivalent kernel forwarding), the Mac can route/NAT IP like `docker0` and drop the userspace TCP proxy. Same-network L3 and DNS stay in the gateway. This is a later dataplane switch, not a redesign of IPAM / `connect` / guest `eth0`. The Mac still cannot reach container IPs directly until that utun path is privileged.
+Outbound TCP/UDP and `-p` use the in-process lwIP forwarder (guest frames → lwIP → Mac sockets), without installing host routes or `pf`. Same-network L3 and DNS stay in the gateway. The Mac reaches published ports on localhost; it does not get Linux-`docker0`-style `curl <containerIP>`.
 
 ```bash
 ./.build/debug/macker network ls
@@ -153,7 +153,7 @@ vmnet NAT uses the same `com.apple.security.virtualization` entitlement as Apple
 
 ## Roadmap
 
-Daily `bridge` / `host` / `none`, plus `run -it` / `exec`, is in place. Command completeness, gaps, and the implementation order are in [docs/cli-status.md](docs/cli-status.md). Kernel forwarding for outbound / `-p` / host-to-container IPs is listed there as a follow-up.
+Daily `bridge` / `host` / `none`, plus `run -it` / `exec`, is in place. Command completeness, gaps, and the implementation order are in [docs/cli-status.md](docs/cli-status.md). Bridge off-link traffic now uses the in-process lwIP forwarder.
 
 ## Make targets
 

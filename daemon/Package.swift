@@ -40,8 +40,56 @@ let package = Package(
             path: "Sources/Cmd"
         ),
         .target(
+            name: "LwIPCore",
+            path: "Vendor/lwip",
+            sources: [
+                "src/api/err.c",
+                "src/api/tcpip.c",
+                "src/core/def.c",
+                "src/core/inet_chksum.c",
+                "src/core/init.c",
+                "src/core/ip.c",
+                "src/core/mem.c",
+                "src/core/memp.c",
+                "src/core/netif.c",
+                "src/core/pbuf.c",
+                "src/core/raw.c",
+                "src/core/tcp.c",
+                "src/core/tcp_in.c",
+                "src/core/tcp_out.c",
+                "src/core/timeouts.c",
+                "src/core/udp.c",
+                "src/core/ipv4/ip4.c",
+                "src/core/ipv4/ip4_addr.c",
+                "src/core/ipv4/ip4_frag.c",
+            ],
+            publicHeadersPath: "src/include",
+            cSettings: [
+                .headerSearchPath("../lwip-port"),
+                .headerSearchPath("src/include"),
+            ]
+        ),
+        .target(
+            name: "LwIPPort",
+            path: "Vendor/lwip-port",
+            sources: [
+                "sys_arch.c",
+                "macker_lwip.c",
+            ],
+            publicHeadersPath: "include",
+            cSettings: [
+                .headerSearchPath("."),
+                .headerSearchPath("include"),
+                .headerSearchPath("../lwip/src/include"),
+            ]
+        ),
+        .target(
             name: "ContainerEngine",
             dependencies: [
+                // Link both C targets here. LwIPPort cannot depend on LwIPCore: SPM would
+                // import lwIP's headers as a Clang module, and memp_std.h's X-macros fail.
+                "LwIPCore",
+                "LwIPPort",
                 .product(name: "Containerization", package: "containerization"),
                 .product(name: "ContainerizationOCI", package: "containerization"),
                 .product(name: "ContainerizationOS", package: "containerization"),

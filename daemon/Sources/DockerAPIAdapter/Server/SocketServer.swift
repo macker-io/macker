@@ -31,6 +31,8 @@ public final class SocketServer: @unchecked Sendable {
     public func start() async throws {
         let parent = URL(fileURLWithPath: socketPath).deletingLastPathComponent()
         try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        // The daemon holds ``DaemonInstanceLock`` before constructing this server, so only
+        // one process may remove a stale socket left by a crash.
         try? FileManager.default.removeItem(atPath: socketPath)
 
         let router = self.router
