@@ -251,6 +251,31 @@ enum DaemonAPI {
         return String(data: data, encoding: .utf8) ?? "{}"
     }
 
+    /// Docker `--env-file`: `KEY=value` lines, `#` comments, and `KEY` copied from the host environment.
+    static func envFile(_ paths: [String]) throws -> [String] {
+        var lines: [String] = []
+        for path in paths {
+            let text: String
+            do {
+                text = try String(contentsOfFile: path, encoding: .utf8)
+            } catch {
+                throw CLIError.io("can't read env file \(path): \(error.localizedDescription)")
+            }
+            for raw in text.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline) {
+                let line = raw.trimmingCharacters(in: .whitespaces)
+                if line.isEmpty || line.hasPrefix("#") { continue }
+                if line.contains("=") {
+                    lines.append(line)
+                    continue
+                }
+                if let value = ProcessInfo.processInfo.environment[line] {
+                    lines.append("\(line)=\(value)")
+                }
+            }
+        }
+        return lines
+    }
+
     static func query(_ value: String) -> String {
         var allowed = CharacterSet.urlQueryAllowed
         allowed.remove(charactersIn: "&+=")

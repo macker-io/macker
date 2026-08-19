@@ -16,6 +16,8 @@ public struct DockerContainerSummary: Encodable, Sendable {
     public let HostConfig: HostConfig
     public let NetworkSettings: NetworkSettings
     public let Mounts: [Mount]
+    public let SizeRw: Int64
+    public let SizeRootFs: Int64
 
     public struct Port: Encodable, Sendable {
         public let IP: String
@@ -62,7 +64,7 @@ public struct DockerContainerSummary: Encodable, Sendable {
     }
 
     public struct EndpointSettings: Encodable, Sendable {
-        public let IPAMConfig: EmptyObject?
+        public let IPAMConfig: IPAMConfig?
         public let Links: [String]?
         public let Aliases: [String]
         public let NetworkID: String
@@ -75,11 +77,14 @@ public struct DockerContainerSummary: Encodable, Sendable {
         public let GlobalIPv6PrefixLen: Int
         public let MacAddress: String
         public let DriverOpts: [String: String]?
+        public let GwPriority: Int
 
-        public struct EmptyObject: Encodable, Sendable {}
+        public struct IPAMConfig: Encodable, Sendable {
+            public let IPv4Address: String
+        }
 
         public init(_ endpoint: EngineEndpoint) {
-            self.IPAMConfig = nil
+            self.IPAMConfig = endpoint.ipv4Address.isEmpty ? nil : .init(IPv4Address: endpoint.ipv4Address)
             self.Links = nil
             self.Aliases = endpoint.aliases
             self.NetworkID = endpoint.networkID
@@ -91,7 +96,8 @@ public struct DockerContainerSummary: Encodable, Sendable {
             self.GlobalIPv6Address = ""
             self.GlobalIPv6PrefixLen = 0
             self.MacAddress = endpoint.macAddress
-            self.DriverOpts = nil
+            self.DriverOpts = endpoint.driverOpts.isEmpty ? nil : endpoint.driverOpts
+            self.GwPriority = endpoint.gwPriority
         }
     }
 
@@ -110,7 +116,9 @@ public struct DockerContainerSummary: Encodable, Sendable {
         self.NetworkSettings = .init(
             Networks: Dictionary(uniqueKeysWithValues: engine.endpoints.map { ($0.networkName, EndpointSettings($0)) })
         )
-        self.Mounts = []
+        self.Mounts = engine.mounts.map(Mount.init)
+        self.SizeRw = engine.sizeRw
+        self.SizeRootFs = engine.sizeRootFs
     }
 }
 
@@ -161,9 +169,16 @@ public struct DockerPortBinding: Codable, Sendable {
 
 public struct DockerEndpointConfig: Decodable, Sendable {
     public let Aliases: [String]?
-    public let IPAMConfig: EmptyObject?
+    public let Links: [String]?
+    public let IPAMConfig: IPAMConfig?
+    public let DriverOpts: [String: String]?
+    public let GwPriority: Int?
 
-    public struct EmptyObject: Decodable, Sendable {}
+    public struct IPAMConfig: Decodable, Sendable {
+        public let IPv4Address: String?
+        public let IPv6Address: String?
+        public let LinkLocalIPs: [String]?
+    }
 }
 
 /// Docker sends Cmd/Entrypoint as either a string or an array of strings.
@@ -211,6 +226,8 @@ public struct DockerContainerInspect: Encodable, Sendable {
     public let Config: Config
     public let NetworkSettings: NetworkSettings
     public let Mounts: [DockerContainerSummary.Mount]
+    public let SizeRw: Int64
+    public let SizeRootFs: Int64
 
     public struct State: Encodable, Sendable {
         public let Status: String
@@ -260,7 +277,7 @@ public struct DockerContainerInspect: Encodable, Sendable {
         public let Networks: [String: DockerContainerSummary.EndpointSettings]
     }
 
-    public init(_ container: EngineContainer) {
+    public init(_ container: EngineContainer, sizeRw: Int64 = -1, sizeRootFs: Int64 = -1) {
         let iso = ISO8601DateFormatter()
         iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         self.Id = container.id
@@ -317,6 +334,8 @@ public struct DockerContainerInspect: Encodable, Sendable {
             })
         )
         self.Mounts = container.mounts.map(DockerContainerSummary.Mount.init)
+        self.SizeRw = sizeRw
+        self.SizeRootFs = sizeRootFs
     }
 
     private static func portBindings(_ bindings: [EnginePortBinding]) -> [String: [DockerPortBinding]] {

@@ -98,7 +98,7 @@ extension Router {
     func handleNamedContainer(_ route: NamedContainerRoute, request: HTTPRequest) async -> HTTPResponse {
         switch route {
         case .inspect(let id):
-            return await inspectContainer(id)
+            return await inspectContainer(id, request: request)
         case .top(let id):
             return await topContainer(id, request: request)
         case .logs(let id):
@@ -144,12 +144,17 @@ extension Router {
 
     func containersJSON(_ request: HTTPRequest) async -> HTTPResponse {
         let all = Self.queryFlag(request.query["all"])
+        let size = Self.queryFlag(request.query["size"])
         let filters = Self.parseFilters(request.query["filters"])
-        var containers = await engine.listContainers(all: all, filters: filters).map(DockerContainerSummary.init)
-        if let limit = Int(request.query["limit"] ?? ""), limit >= 0 {
-            containers = Array(containers.prefix(limit))
+        do {
+            var containers = try await engine.listContainers(all: all, size: size, filters: filters).map(DockerContainerSummary.init)
+            if let limit = Int(request.query["limit"] ?? ""), limit >= 0 {
+                containers = Array(containers.prefix(limit))
+            }
+            return Self.jsonOK(containers)
+        } catch {
+            return Self.engineError(error)
         }
-        return Self.jsonOK(containers)
     }
 
     func createContainer(_ request: HTTPRequest) async -> HTTPResponse {
@@ -199,25 +204,33 @@ extension Router {
         }
     }
 
-    func pruneContainers() async -> HTTPResponse {
-        let result = await engine.pruneContainers()
-        return HTTPResponse(
-            status: 200,
-            headers: [("Content-Type", "application/json")],
-            body: .buffer(JSONBody.encode(DockerContainerPruneResponse(
-                ContainersDeleted: result.deleted,
-                SpaceReclaimed: result.spaceReclaimed
-            )))
-        )
-    }
-
-    private func inspectContainer(_ id: String) async -> HTTPResponse {
+    func pruneContainers(_ request: HTTPRequest) async -> HTTPResponse {
         do {
-            let container = try await engine.inspectContainer(id)
+            let result = try await engine.pruneContainers(filters: Self.parseFilters(request.query["filters"]))
             return HTTPResponse(
                 status: 200,
                 headers: [("Content-Type", "application/json")],
-                body: .buffer(JSONBody.encode(DockerContainerInspect(container)))
+                body: .buffer(JSONBody.encode(DockerContainerPruneResponse(
+                    ContainersDeleted: result.deleted,
+                    SpaceReclaimed: result.spaceReclaimed
+                )))
+            )
+        } catch {
+            return Self.engineError(error)
+        }
+    }
+
+    private func inspectContainer(_ id: String, request: HTTPRequest) async -> HTTPResponse {
+        do {
+            let inspected = try await engine.inspectContainer(id, size: Self.queryFlag(request.query["size"]))
+            return HTTPResponse(
+                status: 200,
+                headers: [("Content-Type", "application/json")],
+                body: .buffer(JSONBody.encode(DockerContainerInspect(
+                    inspected.container,
+                    sizeRw: inspected.sizeRw,
+                    sizeRootFs: inspected.sizeRootFs
+                )))
             )
         } catch {
             return Self.engineError(error)
@@ -246,11 +259,21 @@ extension Router {
 
         let timestamps = Self.queryFlag(request.query["timestamps"])
         let follow = Self.queryFlag(request.query["follow"])
+        let details = Self.queryFlag(request.query["details"])
         let tail = request.query["tail"]
+        let since = Self.parseTimestamp(request.query["since"])
+        let until = Self.parseTimestamp(request.query["until"])
 
         do {
             let (text, tty, live) = try await engine.containerLogs(id, follow: follow)
-            let formatted = Self.formatLogs(text, timestamps: timestamps, tail: tail)
+            let formatted = Self.formatLogs(
+                text,
+                timestamps: timestamps,
+                tail: tail,
+                since: since,
+                until: until,
+                details: details
+            )
             let payload = Self.dockerLogPayload(text: formatted, tty: tty, stdout: stdout)
 
             guard follow, let session = live else {
@@ -273,7 +296,9 @@ extension Router {
                             tty: tty,
                             stdout: stdout,
                             stderr: stderr,
-                            timestamps: timestamps
+                            timestamps: timestamps,
+                            since: since,
+                            until: until
                         ),
                         to: continuation
                     )
@@ -346,7 +371,11 @@ extension Router {
     private func stopContainer(_ id: String, request: HTTPRequest) async -> HTTPResponse {
         do {
             let timeout = Int(request.query["t"] ?? "") ?? 10
-            let stopped = try await engine.stopContainer(id, timeoutSeconds: timeout)
+            let stopped = try await engine.stopContainer(
+                id,
+                timeoutSeconds: timeout,
+                signal: request.query["signal"]
+            )
             return HTTPResponse(status: stopped ? 204 : 304)
         } catch {
             return Self.engineError(error)
@@ -562,7 +591,14 @@ extension Router {
 
     static func endpointRequests(from body: DockerCreateContainerRequest) -> [EngineEndpointRequest] {
         (body.NetworkingConfig?.EndpointsConfig ?? [:]).map { name, config in
-            EngineEndpointRequest(network: name, aliases: config.Aliases ?? [])
+            EngineEndpointRequest(
+                network: name,
+                aliases: Self.endpointAliases(config),
+                ipv4: config.IPAMConfig?.IPv4Address,
+                driverOpts: config.DriverOpts ?? [:],
+                gwPriority: config.GwPriority ?? 0,
+                linkLocalIPs: config.IPAMConfig?.LinkLocalIPs ?? []
+            )
         }
     }
 
@@ -611,16 +647,48 @@ extension Router {
         )
     }
 
-    static func formatLogs(_ text: String, timestamps: Bool, tail: String?) -> String {
+    static func formatLogs(
+        _ text: String,
+        timestamps: Bool,
+        tail: String?,
+        since: Date? = nil,
+        until: Date? = nil,
+        details: Bool = false
+    ) -> String {
+        _ = details
+        let hadTrailingNewline = text.hasSuffix("\n")
         var lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        if hadTrailingNewline, lines.last == "" {
+            lines.removeLast()
+        }
+        if since != nil || until != nil {
+            lines = lines.filter { line in
+                guard let stamp = logTimestamp(line) else { return true }
+                if let since, stamp < since { return false }
+                if let until, stamp > until { return false }
+                return true
+            }
+        }
         if let tail, tail != "all", let count = Int(tail), count >= 0 {
             lines = Array(lines.suffix(count))
         }
         if timestamps {
-            let stamp = ISO8601DateFormatter().string(from: Date())
-            lines = lines.map { $0.isEmpty ? $0 : "\(stamp) \($0)" }
+            lines = lines.map { line in
+                if line.isEmpty { return line }
+                if logTimestamp(line) != nil { return line }
+                return "\(ISO8601.string(from: Date())) \(line)"
+            }
         }
-        return lines.joined(separator: "\n")
+        var result = lines.joined(separator: "\n")
+        if hadTrailingNewline, !lines.isEmpty {
+            result += "\n"
+        }
+        return result
+    }
+
+    static func logTimestamp(_ line: String) -> Date? {
+        let token = line.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? line
+        return ISO8601.parse(token)
     }
 
     static func dockerLogPayload(text: String, tty: Bool, stdout: Bool) -> Data {
@@ -640,16 +708,24 @@ extension Router {
         tty: Bool,
         stdout: Bool,
         stderr: Bool,
-        timestamps: Bool = false
+        timestamps: Bool = false,
+        since: Date? = nil,
+        until: Date? = nil
     ) -> Data {
         if !tty {
             if chunk.stdout && !stdout { return Data() }
             if !chunk.stdout && !stderr { return Data() }
         }
         let data: Data
-        if timestamps {
+        if timestamps || since != nil || until != nil {
             data = Data(
-                formatLogs(String(decoding: chunk.data, as: UTF8.self), timestamps: true, tail: nil).utf8
+                formatLogs(
+                    String(decoding: chunk.data, as: UTF8.self),
+                    timestamps: timestamps,
+                    tail: nil,
+                    since: since,
+                    until: until
+                ).utf8
             )
         } else {
             data = chunk.data

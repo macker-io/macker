@@ -41,7 +41,7 @@ public struct Router: Sendable {
         case ("POST", "/containers/create"):
             return await createContainer(request)
         case ("POST", "/containers/prune"):
-            return await pruneContainers()
+            return await pruneContainers(request)
         case ("GET", "/images/json"):
             return await imagesJSON(request)
         case ("POST", "/images/create"):
@@ -118,44 +118,11 @@ public struct Router: Sendable {
 
     static func parseTimestamp(_ raw: String?) -> Date? {
         guard let raw, !raw.isEmpty else { return nil }
-        if let seconds = TimeInterval(raw) {
-            return Date(timeIntervalSince1970: seconds)
-        }
-        if let date = ISO8601.parse(raw) {
-            return date
-        }
-        if let duration = parseGoDuration(raw) {
-            return Date().addingTimeInterval(-duration)
-        }
-        return nil
+        return ISO8601.parseTimestamp(raw)
     }
 
-    /// Go `time.ParseDuration` subset: `10s`, `5m`, `1h30m`.
     static func parseGoDuration(_ raw: String) -> TimeInterval? {
-        var text = Substring(raw)
-        var sign: TimeInterval = 1
-        if text.first == "-" {
-            sign = -1
-            text.removeFirst()
-        } else if text.first == "+" {
-            text.removeFirst()
-        }
-        guard !text.isEmpty else { return nil }
-        // Longer units first so `ms` is not parsed as `m`.
-        let units: [(String, TimeInterval)] = [
-            ("ms", 0.001), ("ns", 1e-9), ("us", 1e-6), ("µs", 1e-6), ("μs", 1e-6),
-            ("h", 3600), ("m", 60), ("s", 1),
-        ]
-        var total: TimeInterval = 0
-        while !text.isEmpty {
-            let digits = text.prefix { $0.isNumber || $0 == "." }
-            guard let value = Double(digits) else { return nil }
-            text = text.dropFirst(digits.count)
-            guard let unit = units.first(where: { text.hasPrefix($0.0) }) else { return nil }
-            text = text.dropFirst(unit.0.count)
-            total += value * unit.1
-        }
-        return sign * total
+        ISO8601.parseGoDuration(raw)
     }
 
     static func parseFilters(_ raw: String?) -> [String: [String]] {
@@ -165,6 +132,18 @@ public struct Router: Sendable {
             return [:]
         }
         return decoded
+    }
+
+    /// Docker `--link name:alias` contributes the alias (or the whole value if there is no `:`).
+    static func endpointAliases(_ config: DockerEndpointConfig?) -> [String] {
+        var aliases = config?.Aliases ?? []
+        for link in config?.Links ?? [] {
+            let alias = link.split(separator: ":").last.map(String.init) ?? link
+            if !alias.isEmpty, !aliases.contains(alias) {
+                aliases.append(alias)
+            }
+        }
+        return aliases
     }
 
     static func queryFlag(_ raw: String?) -> Bool {

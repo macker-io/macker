@@ -46,7 +46,7 @@ actor NetworkGateway {
     func registerNetwork(_ network: EngineNetwork) {
         nets[network.id] = network
         guard network.driver == "bridge", !network.subnet.isEmpty else { return }
-        if ipam[network.id] == nil, let table = try? NetworkIPAM(subnet: network.subnet) {
+        if ipam[network.id] == nil, let table = try? NetworkIPAM(network: network) {
             ipam[network.id] = table
         }
         if utunReady {

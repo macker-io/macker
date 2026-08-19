@@ -23,8 +23,32 @@ extension EngineManager {
         if let drivers = filters["driver"], !drivers.isEmpty {
             items = items.filter { drivers.contains($0.network.driver) }
         }
+        if let scopes = filters["scope"], !scopes.isEmpty {
+            items = items.filter { scopes.contains($0.network.scope) }
+        }
         if let labels = filters["label"], !labels.isEmpty {
             items = items.filter { FilterMatch.labels($0.network.labels, specs: labels) }
+        }
+        if let excluded = filters["label!"], !excluded.isEmpty {
+            items = items.filter { !FilterMatch.labels($0.network.labels, specs: excluded) }
+        }
+        if let dangling = filters["dangling"], !dangling.isEmpty {
+            let wantUnused = FilterMatch.isTrue(dangling)
+            items = items.filter { wantUnused ? $0.containers.isEmpty : !$0.containers.isEmpty }
+        }
+        if let types = filters["type"], !types.isEmpty {
+            items = items.filter { item in
+                types.contains { type in
+                    switch type {
+                    case "builtin", "predefined": item.network.builtin
+                    case "custom": !item.network.builtin
+                    default: false
+                    }
+                }
+            }
+        }
+        if let until = filters["until"]?.compactMap(ISO8601.parseTimestamp), let cutoff = until.min() {
+            items = items.filter { $0.network.created < cutoff }
         }
         return items.sorted { $0.network.name < $1.network.name }
     }
@@ -38,6 +62,16 @@ extension EngineManager {
         let driver = spec.driver.isEmpty ? "bridge" : spec.driver
         guard driver == "bridge" else {
             throw EngineError.invalidArgument("network driver \"\(driver)\" is not supported")
+        }
+        guard spec.enableIPv4 else {
+            throw EngineError.invalidArgument("IPv4 cannot be disabled")
+        }
+        if spec.enableIPv6 {
+            throw EngineError.notImplemented("IPv6 is not implemented")
+        }
+        let ipamDriver = spec.ipamDriver.isEmpty ? "default" : spec.ipamDriver
+        guard ipamDriver == "default" else {
+            throw EngineError.invalidArgument("ipam driver \"\(ipamDriver)\" is not supported")
         }
 
         let raw = spec.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -55,7 +89,10 @@ extension EngineManager {
         }
 
         let subnet = try spec.subnet.map { try Self.normalizedSubnet($0) } ?? nextSubnet()
-        let gateway = spec.gateway?.isEmpty == false ? spec.gateway! : Self.gateway(for: subnet)
+        let cidr = try CIDRv4(subnet)
+        let gateway = try Self.resolvedGateway(spec.gateway, subnet: cidr)
+        let ipRange = try spec.ipRange.map { try Self.normalizedIPRange($0, subnet: cidr) } ?? ""
+        let auxiliary = try Self.normalizedAuxiliaryAddresses(spec.auxiliaryAddresses, subnet: cidr)
         let network = EngineNetwork(
             id: Self.makeContainerID(),
             name: name,
@@ -66,7 +103,14 @@ extension EngineManager {
             subnet: subnet,
             gateway: gateway,
             internalNetwork: spec.internalNetwork,
-            builtin: false
+            builtin: false,
+            options: spec.options,
+            ipRange: ipRange,
+            auxiliaryAddresses: auxiliary,
+            ipamDriver: ipamDriver,
+            ipamOptions: spec.ipamOptions,
+            enableIPv4: true,
+            enableIPv6: false
         )
         try persistNetwork(network)
         networks[network.id] = network
@@ -99,7 +143,7 @@ extension EngineManager {
         var deleted: [String] = []
         for item in unused {
             try await deleteNetwork(item.network.id)
-            deleted.append(item.network.id)
+            deleted.append(item.network.name)
         }
         return (deleted, 0)
     }
@@ -113,10 +157,17 @@ extension EngineManager {
             throw EngineError.conflict("container \(container.name) is already connected to \(network.name)")
         }
         try validateAttachment(mode: container.networkMode, extra: network)
+        if let ipv6 = spec.ipv6, !ipv6.isEmpty {
+            throw EngineError.notImplemented("IPv6 is not implemented")
+        }
+        if let ipv4 = spec.ipv4, !ipv4.isEmpty, network.driver != "bridge" {
+            throw EngineError.invalidArgument("cannot assign a static IP on \(network.driver) networks")
+        }
 
-        var attached = endpoint(for: network, aliases: spec.aliases)
+        let request = spec.asRequest(network: network.name)
+        var attached = endpoint(for: network, request: request)
         if container.state == "running" {
-            attached = try await attachRunningEndpoint(container, network: network, aliases: spec.aliases)
+            attached = try await attachRunningEndpoint(container, network: network, request: request)
         }
         if container.networkMode == "none", network.driver != "none" {
             container.endpoints = [attached]
@@ -149,7 +200,7 @@ extension EngineManager {
         container.endpoints.removeAll { $0.networkID == network.id }
         if container.endpoints.isEmpty {
             let none = try resolveNetwork(Self.builtinNoneName)
-            container.endpoints = [endpoint(for: none, aliases: [])]
+            container.endpoints = [endpoint(for: none, request: EngineEndpointRequest(network: none.name))]
             container.networkMode = "none"
         } else if let primary = container.endpoints.first {
             container.networkMode = primary.networkName
@@ -182,7 +233,7 @@ extension EngineManager {
             let network = try resolveNetwork(request.network)
             try validateAttachment(mode: mode, extra: network)
             if !endpoints.contains(where: { $0.networkID == network.id }) {
-                endpoints.append(endpoint(for: network, aliases: request.aliases))
+                endpoints.append(endpoint(for: network, request: request))
             }
         }
 
@@ -385,7 +436,7 @@ extension EngineManager {
             try await networkGateway.reserve(network.id, key: key, ip: existing)
             ip = existing
         } else {
-            ip = try await networkGateway.allocate(network.id, key: key)
+            ip = try await allocateBridgeIP(networkID: network.id, key: key, requested: nil)
         }
         record.endpoints[index].ipv4Address = ip.description
         record.endpoints[index].ipv4Prefix = 32
@@ -413,7 +464,7 @@ extension EngineManager {
     private func attachRunningEndpoint(
         _ container: EngineContainer,
         network: EngineNetwork,
-        aliases: [String]
+        request: EngineEndpointRequest
     ) async throws -> EngineEndpoint {
         _ = try NetworkAttachmentFactory.make(driver: network.driver)
         if network.driver == "host" {
@@ -426,7 +477,13 @@ extension EngineManager {
                 try await agent.up(name: nic.interfaceName, mtu: nil)
             }
             setGuestNicInUse(container.id, networkID: network.id, inUse: true)
-            return nic.asEndpoint(network: network, aliases: aliases)
+            return nic.asEndpoint(
+                network: network,
+                aliases: request.aliases,
+                driverOpts: request.driverOpts,
+                gwPriority: request.gwPriority,
+                linkLocalIPs: request.linkLocalIPs
+            )
         }
         guard network.driver == "bridge" else {
             throw EngineError.notImplemented("connecting a running container to \(network.name) is not implemented")
@@ -442,7 +499,7 @@ extension EngineManager {
         await prepareGateway()
         await networkGateway.registerNetwork(network)
         let key = NetworkGateway.endpointKey(containerID: container.id, networkID: network.id)
-        let ip = try await networkGateway.allocate(network.id, key: key)
+        let ip = try await allocateBridgeIP(networkID: network.id, key: key, requested: request.ipv4)
         try await addGuestBridgeAddress(container.id, ip: ip.description)
         await networkGateway.bind(
             containerID: container.id,
@@ -450,7 +507,7 @@ extension EngineManager {
             hostname: container.hostname,
             network: network,
             ip: ip,
-            aliases: aliases
+            aliases: request.aliases
         )
         let mac = container.endpoints.first(where: { !$0.macAddress.isEmpty })?.macAddress ?? ""
         return EngineEndpoint(
@@ -460,7 +517,10 @@ extension EngineManager {
             ipv4Prefix: 32,
             gateway: NetworkGateway.gatewayAddress.description,
             macAddress: mac,
-            aliases: aliases
+            aliases: request.aliases,
+            driverOpts: request.driverOpts,
+            gwPriority: request.gwPriority,
+            linkLocalIPs: request.linkLocalIPs
         )
     }
 
@@ -662,16 +722,36 @@ extension EngineManager {
         return EngineNetworkInspect(network: network, containers: attached.sorted { $0.name < $1.name })
     }
 
-    private func endpoint(for network: EngineNetwork, aliases: [String]) -> EngineEndpoint {
+    private func endpoint(for network: EngineNetwork, request: EngineEndpointRequest) -> EngineEndpoint {
         EngineEndpoint(
             networkID: network.id,
             networkName: network.name,
-            ipv4Address: "",
+            ipv4Address: request.ipv4 ?? "",
             ipv4Prefix: prefixLength(network.subnet),
             gateway: network.gateway,
             macAddress: "",
-            aliases: aliases
+            aliases: request.aliases,
+            driverOpts: request.driverOpts,
+            gwPriority: request.gwPriority,
+            linkLocalIPs: request.linkLocalIPs
         )
+    }
+
+    private func allocateBridgeIP(networkID: String, key: String, requested: String?) async throws -> IPv4Address {
+        if let requested, !requested.isEmpty {
+            let ip = try parseIPv4(requested)
+            try await networkGateway.reserve(networkID, key: key, ip: ip)
+            return ip
+        }
+        return try await networkGateway.allocate(networkID, key: key)
+    }
+
+    private func parseIPv4(_ raw: String) throws -> IPv4Address {
+        do {
+            return try IPv4Address(raw)
+        } catch {
+            throw EngineError.invalidArgument("invalid IPv4 address \(raw)")
+        }
     }
 
     private func validateAttachment(mode: String, extra: EngineNetwork) throws {
@@ -749,6 +829,53 @@ extension EngineManager {
             return try CIDRv4(raw).description
         } catch {
             throw EngineError.invalidArgument("invalid subnet \(raw)")
+        }
+    }
+
+    private static func normalizedIPRange(_ raw: String, subnet: CIDRv4) throws -> String {
+        let range: CIDRv4
+        do {
+            range = try CIDRv4(raw)
+        } catch {
+            throw EngineError.invalidArgument("invalid ip-range \(raw)")
+        }
+        guard range.lower.value >= subnet.lower.value, range.upper.value <= subnet.upper.value else {
+            throw EngineError.invalidArgument("ip-range \(raw) is not contained in subnet \(subnet)")
+        }
+        return range.description
+    }
+
+    private static func resolvedGateway(_ raw: String?, subnet: CIDRv4) throws -> String {
+        guard let raw, !raw.isEmpty else {
+            return gateway(for: subnet.description)
+        }
+        let ip = try parseAddress(raw, what: "gateway")
+        guard subnet.contains(ip) else {
+            throw EngineError.invalidArgument("gateway \(raw) is not in subnet \(subnet)")
+        }
+        return ip.description
+    }
+
+    private static func normalizedAuxiliaryAddresses(
+        _ addresses: [String: String],
+        subnet: CIDRv4
+    ) throws -> [String: String] {
+        var result: [String: String] = [:]
+        for (name, raw) in addresses {
+            let ip = try parseAddress(raw, what: "aux-address")
+            guard subnet.contains(ip) else {
+                throw EngineError.invalidArgument("aux-address \(raw) is not in subnet \(subnet)")
+            }
+            result[name] = ip.description
+        }
+        return result
+    }
+
+    private static func parseAddress(_ raw: String, what: String) throws -> IPv4Address {
+        do {
+            return try IPv4Address(raw)
+        } catch {
+            throw EngineError.invalidArgument("invalid \(what) \(raw)")
         }
     }
 

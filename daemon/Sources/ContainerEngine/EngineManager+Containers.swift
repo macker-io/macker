@@ -2,26 +2,85 @@ import Containerization
 import Foundation
 
 extension EngineManager {
-    public func listContainers(all: Bool = true, filters: [String: [String]] = [:]) -> [EngineContainerSummary] {
-        var items = containers.values.filter { all || $0.isActive }.map(\.summary)
+    public func listContainers(
+        all: Bool = true,
+        size: Bool = false,
+        filters: [String: [String]] = [:]
+    ) throws -> [EngineContainerSummary] {
+        var records = Array(containers.values.filter { all || $0.isActive })
         if let names = filters["name"], !names.isEmpty {
-            items = items.filter { item in names.contains { needle in item.names.contains { $0.contains(needle) } } }
+            records = records.filter { item in
+                names.contains { needle in item.name.contains(needle) || item.id.contains(needle) }
+            }
         }
         if let ids = filters["id"], !ids.isEmpty {
-            items = items.filter { item in ids.contains { item.id.hasPrefix($0) || item.id == $0 } }
+            records = records.filter { item in ids.contains { item.id.hasPrefix($0) || item.id == $0 } }
         }
         if let statuses = filters["status"], !statuses.isEmpty {
-            items = items.filter { statuses.contains($0.state) }
+            records = records.filter { statuses.contains($0.state) }
         }
         if let ancestors = filters["ancestor"], !ancestors.isEmpty {
-            items = items.filter { item in
+            records = records.filter { item in
                 ancestors.contains { item.image.contains($0) || item.imageID.contains($0) }
             }
         }
         if let labels = filters["label"], !labels.isEmpty {
-            items = items.filter { FilterMatch.labels($0.labels, specs: labels) }
+            records = records.filter { FilterMatch.labels($0.labels, specs: labels) }
         }
-        return items.sorted { $0.created > $1.created }
+        if let excluded = filters["label!"], !excluded.isEmpty {
+            records = records.filter { !FilterMatch.labels($0.labels, specs: excluded) }
+        }
+        if let exited = filters["exited"], !exited.isEmpty {
+            records = records.filter { exited.contains(String($0.exitCode)) }
+        }
+        if let volumes = filters["volume"], !volumes.isEmpty {
+            records = records.filter { item in
+                volumes.contains { needle in
+                    item.mounts.contains { $0.name.contains(needle) || $0.source.contains(needle) || $0.destination.contains(needle) }
+                }
+            }
+        }
+        if let networks = filters["network"], !networks.isEmpty {
+            records = records.filter { item in
+                networks.contains { needle in
+                    item.networkMode.contains(needle)
+                        || item.endpoints.contains { $0.networkName.contains(needle) || $0.networkID.hasPrefix(needle) }
+                }
+            }
+        }
+        if let published = filters["publish"], !published.isEmpty {
+            records = records.filter { item in
+                published.contains { needle in item.portBindings.contains { Self.portMatches($0, spec: needle, host: true) } }
+            }
+        }
+        if let exposed = filters["expose"], !exposed.isEmpty {
+            records = records.filter { item in
+                exposed.contains { needle in
+                    item.portBindings.contains { Self.portMatches($0, spec: needle, host: false) }
+                        || item.exposedPorts.contains { Self.portMatches($0, spec: needle, host: false) }
+                }
+            }
+        }
+        if let since = filters["since"]?.first {
+            let created = try resolveContainer(since).created
+            records = records.filter { $0.created > created }
+        }
+        if let before = filters["before"]?.first {
+            let created = try resolveContainer(before).created
+            records = records.filter { $0.created < created }
+        }
+        if let until = filters["until"]?.compactMap(ISO8601.parseTimestamp), let cutoff = until.min() {
+            records = records.filter { $0.created < cutoff }
+        }
+        var items = records.map(\.summary).sorted { $0.created > $1.created }
+        if size {
+            for index in items.indices {
+                let bytes = containerDiskSize(items[index].id)
+                items[index].sizeRw = bytes
+                items[index].sizeRootFs = bytes
+            }
+        }
+        return items
     }
 
     public func createContainer(_ spec: EngineContainerCreateSpec) async throws -> EngineContainerCreateResult {
@@ -73,8 +132,13 @@ extension EngineManager {
         return EngineContainerCreateResult(id: id, warnings: warnings)
     }
 
-    public func inspectContainer(_ idOrName: String) async throws -> EngineContainer {
-        try resolveContainer(idOrName)
+    public func inspectContainer(_ idOrName: String, size: Bool = false) async throws -> (container: EngineContainer, sizeRw: Int64, sizeRootFs: Int64) {
+        let container = try resolveContainer(idOrName)
+        guard size else {
+            return (container, -1, -1)
+        }
+        let bytes = containerDiskSize(container.id)
+        return (container, bytes, bytes)
     }
 
     public func startContainer(_ idOrName: String) async throws -> Bool {
@@ -97,13 +161,15 @@ extension EngineManager {
         return true
     }
 
-    public func stopContainer(_ idOrName: String, timeoutSeconds: Int = 10) async throws -> Bool {
+    public func stopContainer(_ idOrName: String, timeoutSeconds: Int = 10, signal: String? = nil) async throws -> Bool {
         let container = try resolveContainer(idOrName)
         if container.state == "exited" || container.state == "created" {
             return false
         }
-        await stopVM(container.id, timeoutSeconds: timeoutSeconds)
-        await handleVMExit(id: container.id, code: 143, action: "stop")
+        let parsed = signal.map { Self.parsedKillSignal($0) } ?? .term
+        let code = parsed.rawValue == 9 ? 137 : 128 + Int(parsed.rawValue)
+        await stopVM(container.id, timeoutSeconds: timeoutSeconds, signal: parsed)
+        await handleVMExit(id: container.id, code: code, action: "stop")
         return true
     }
 
@@ -193,20 +259,26 @@ extension EngineManager {
         await publish(EngineEvent(type: "container", action: "destroy", actorID: container.id, attributes: ["name": container.name]))
     }
 
-    public func pruneContainers() async -> (deleted: [String], spaceReclaimed: Int64) {
-        let stopped = containers.values.filter { $0.state == "exited" || $0.state == "created" || $0.state == "dead" }
-        var deleted: [String] = []
-        for container in stopped {
-            finishAttachSubscribers(container.id, extra: nil)
-            await finishExecs(forContainer: container.id, code: 0)
-            for (id, exec) in execs where exec.containerID == container.id {
-                execs[id] = nil
-            }
-            await forgetContainer(container.id)
-            deleted.append(container.id)
-            await publish(EngineEvent(type: "container", action: "destroy", actorID: container.id, attributes: ["name": container.name]))
+    public func pruneContainers(filters: [String: [String]] = [:]) async throws -> (deleted: [String], spaceReclaimed: Int64) {
+        let unused = try listContainers(all: true, filters: filters).filter {
+            $0.state == "exited" || $0.state == "created" || $0.state == "dead"
         }
-        return (deleted, 0)
+        var deleted: [String] = []
+        var space: Int64 = 0
+        for item in unused {
+            let id = item.id
+            space += containerDiskSize(id)
+            finishAttachSubscribers(id, extra: nil)
+            await finishExecs(forContainer: id, code: 0)
+            for (execID, exec) in execs where exec.containerID == id {
+                execs[execID] = nil
+            }
+            let name = item.names.first.map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "/")) } ?? id
+            await forgetContainer(id)
+            deleted.append(id)
+            await publish(EngineEvent(type: "container", action: "destroy", actorID: id, attributes: ["name": name]))
+        }
+        return (deleted, space)
     }
 
     public func containerLogs(_ idOrName: String, follow: Bool = false) async throws -> (text: String, tty: Bool, live: EngineIOSession?) {
@@ -480,5 +552,29 @@ extension EngineManager {
 
     static func runtimeURL(id: String, root: URL) -> URL {
         root.appendingPathComponent(id, isDirectory: true)
+    }
+
+    private func containerDiskSize(_ id: String) -> Int64 {
+        let rootfs = Self.runtimeURL(id: id, root: containerRoot).appendingPathComponent("rootfs.ext4")
+        let values = try? rootfs.resourceValues(forKeys: [.fileSizeKey])
+        return Int64(values?.fileSize ?? 0)
+    }
+
+    private static func portMatches(_ binding: EnginePortBinding, spec: String, host: Bool) -> Bool {
+        let parts = spec.split(separator: "/", maxSplits: 1)
+        let portSpec = String(parts[0])
+        let proto = parts.count == 2 ? String(parts[1]).lowercased() : nil
+        if let proto, proto != binding.protocolName.lowercased() {
+            return false
+        }
+        let port = host ? binding.hostPort : binding.containerPort
+        if let exact = Int(portSpec) {
+            return port == exact
+        }
+        let range = portSpec.split(separator: "-", maxSplits: 1)
+        if range.count == 2, let lower = Int(range[0]), let upper = Int(range[1]) {
+            return port >= lower && port <= upper
+        }
+        return false
     }
 }

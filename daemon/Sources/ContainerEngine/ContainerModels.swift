@@ -13,6 +13,10 @@ public struct EngineContainerSummary: Sendable {
     public let networkMode: String
     public let ports: [EnginePortBinding]
     public let endpoints: [EngineEndpoint]
+    public let exitCode: Int
+    public let mounts: [EngineMount]
+    public var sizeRw: Int64
+    public var sizeRootFs: Int64
 
     public init(
         id: String,
@@ -26,7 +30,11 @@ public struct EngineContainerSummary: Sendable {
         created: Date,
         networkMode: String = "default",
         ports: [EnginePortBinding] = [],
-        endpoints: [EngineEndpoint] = []
+        endpoints: [EngineEndpoint] = [],
+        exitCode: Int = 0,
+        mounts: [EngineMount] = [],
+        sizeRw: Int64 = -1,
+        sizeRootFs: Int64 = -1
     ) {
         self.id = id
         self.names = names
@@ -40,6 +48,10 @@ public struct EngineContainerSummary: Sendable {
         self.networkMode = networkMode
         self.ports = ports
         self.endpoints = endpoints
+        self.exitCode = exitCode
+        self.mounts = mounts
+        self.sizeRw = sizeRw
+        self.sizeRootFs = sizeRootFs
     }
 }
 
@@ -177,7 +189,9 @@ public struct EngineContainer: Sendable, Codable {
             created: created,
             networkMode: networkMode,
             ports: portBindings,
-            endpoints: endpoints
+            endpoints: endpoints,
+            exitCode: exitCode,
+            mounts: mounts
         )
     }
 

@@ -84,8 +84,15 @@ extension Router {
                     name: body.Name,
                     driver: body.Driver ?? "bridge",
                     labels: body.Labels ?? [:],
+                    options: body.Options ?? [:],
                     subnet: ipam?.Subnet,
                     gateway: ipam?.Gateway,
+                    ipRange: ipam?.IPRange,
+                    auxiliaryAddresses: ipam?.AuxiliaryAddresses ?? [:],
+                    ipamDriver: body.IPAM?.Driver ?? "default",
+                    ipamOptions: body.IPAM?.Options ?? [:],
+                    enableIPv4: body.EnableIPv4 ?? true,
+                    enableIPv6: body.EnableIPv6 ?? false,
                     internalNetwork: body.Internal ?? false
                 )
             )
@@ -138,7 +145,15 @@ extension Router {
         do {
             try await engine.connectNetwork(
                 name,
-                spec: EngineNetworkConnectSpec(container: container, aliases: body.EndpointConfig?.Aliases ?? [])
+                spec: EngineNetworkConnectSpec(
+                    container: container,
+                    aliases: Self.endpointAliases(body.EndpointConfig),
+                    ipv4: body.EndpointConfig?.IPAMConfig?.IPv4Address,
+                    ipv6: body.EndpointConfig?.IPAMConfig?.IPv6Address,
+                    driverOpts: body.EndpointConfig?.DriverOpts ?? [:],
+                    gwPriority: body.EndpointConfig?.GwPriority ?? 0,
+                    linkLocalIPs: body.EndpointConfig?.IPAMConfig?.LinkLocalIPs ?? []
+                )
             )
             return HTTPResponse(status: 200)
         } catch {

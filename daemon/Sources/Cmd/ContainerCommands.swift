@@ -42,28 +42,108 @@ struct ContainerCreateOptions: ParsableArguments {
     var command: [String] = []
 }
 
-struct Ps: ParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "List containers.")
-
+struct ContainerListOptions: ParsableArguments {
     @Flag(name: .shortAndLong, help: "Show all containers (default hides stopped).")
     var all = false
 
-    func run() throws { try Self.list(all: all) }
+    @Flag(name: [.customShort("q"), .long], help: "Only display container IDs.")
+    var quiet = false
 
-    static func list(all: Bool) throws {
-        let path = all ? "/containers/json?all=1" : "/containers/json"
+    @Option(name: [.customShort("f"), .long], help: "Filter output (e.g. 'status=running', 'label=key=value').")
+    var filter: [String] = []
+
+    @Option(help: "Format output using a custom template (table, {{.Field}}, json).")
+    var format: String?
+
+    @Option(name: [.customShort("n"), .customLong("last")], help: "Show n last created containers (includes all states).")
+    var last: Int?
+
+    @Flag(name: [.customShort("l"), .customLong("latest")], help: "Show the latest created container (includes all states).")
+    var latest = false
+
+    @Flag(name: .customLong("no-trunc"), help: "Don't truncate output.")
+    var noTrunc = false
+
+    @Flag(name: .shortAndLong, help: "Display total file sizes.")
+    var size = false
+}
+
+struct Ps: ParsableCommand {
+    static let configuration = CommandConfiguration(abstract: "List containers.")
+
+    @OptionGroup var options: ContainerListOptions
+
+    func run() throws { try Self.list(options) }
+
+    static func list(_ options: ContainerListOptions) throws {
+        var query: [String] = []
+        let all = options.all || options.latest || options.last != nil
+        if all { query.append("all=1") }
+        if options.size { query.append("size=1") }
+        if options.latest {
+            query.append("limit=1")
+        } else if let last = options.last {
+            query.append("limit=\(max(last, 0))")
+        }
+        if !options.filter.isEmpty {
+            query.append("filters=\(DaemonAPI.query(try DaemonAPI.filtersJSON(options.filter)))")
+        }
+        let path = query.isEmpty ? "/containers/json" : "/containers/json?\(query.joined(separator: "&"))"
         let containers = try DaemonAPI.decode([ContainerSummary].self, from: DaemonAPI.get(path))
-        let rows = containers.map { container in
-            [
-                Format.shortID(container.Id),
-                container.Image,
-                container.Command,
-                container.Status,
-                container.portsColumn,
-                (container.Names.first ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "/")),
+
+        if options.quiet {
+            for container in containers {
+                print(options.noTrunc ? container.Id : Format.shortID(container.Id))
+            }
+            return
+        }
+
+        let rows: [[(String, String)]] = containers.map { container in
+            let name = (container.Names.first ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let labels = (container.Labels ?? [:]).keys.sorted().map { key in
+                "\(key)=\(container.Labels?[key] ?? "")"
+            }.joined(separator: ",")
+            let size: String
+            if let bytes = container.SizeRw, bytes >= 0 {
+                size = Format.size(bytes)
+            } else {
+                size = ""
+            }
+            return [
+                ("ID", options.noTrunc ? container.Id : Format.shortID(container.Id)),
+                ("Image", container.Image),
+                ("Command", options.noTrunc ? container.Command : Format.ellipsis(container.Command, 20)),
+                ("CreatedAt", Format.createdAt(container.Created ?? 0)),
+                ("RunningFor", Format.timeAgo(container.Created ?? 0)),
+                ("Ports", container.portsColumn),
+                ("Status", container.Status),
+                ("Size", size),
+                ("Names", name),
+                ("Labels", labels),
+                ("Mounts", (container.Mounts ?? []).map(\.Destination).joined(separator: ",")),
+                ("Networks", (container.NetworkSettings?.Networks ?? [:]).keys.sorted().joined(separator: ",")),
+                ("State", container.State ?? ""),
             ]
         }
-        Table.print(headers: ["CONTAINER ID", "IMAGE", "COMMAND", "STATUS", "PORTS", "NAMES"], rows: rows)
+
+        if let format = options.format, !FormatTemplate.isBareTable(format) {
+            try FormatTemplate.print(format: format, rows: rows)
+            return
+        }
+
+        func value(_ key: String, _ row: [(String, String)]) -> String {
+            row.first { $0.0 == key }?.1 ?? ""
+        }
+        var headers = ["CONTAINER ID", "IMAGE", "COMMAND", "STATUS", "PORTS", "NAMES"]
+        if options.size { headers.append("SIZE") }
+        Table.print(headers: headers, rows: rows.map { row in
+            var cells = [
+                value("ID", row), value("Image", row), value("Command", row),
+                value("Status", row), value("Ports", row), value("Names", row),
+            ]
+            if options.size { cells.append(value("Size", row)) }
+            return cells
+        })
     }
 }
 
@@ -85,7 +165,12 @@ struct Run: ParsableCommand {
             print(id)
             return
         }
-        try Self.attachAndStart(id: id, interactive: options.interactive, tty: options.tty)
+        try ContainerAttach.attachAndStart(
+            id: id,
+            interactive: options.interactive,
+            tty: options.tty,
+            deleteOnFailure: true
+        )
         let wait = try DaemonAPI.decode(
             WaitResponse.self,
             from: DaemonAPI.post("/containers/\(DaemonAPI.path(id))/wait", timeoutSeconds: nil)
@@ -96,48 +181,6 @@ struct Run: ParsableCommand {
         if wait.StatusCode != 0 {
             throw ExitCode(Int32(truncatingIfNeeded: wait.StatusCode))
         }
-    }
-
-    private static func attachAndStart(id: String, interactive: Bool, tty: Bool) throws {
-        let query = interactive
-            ? "stream=1&stdout=1&stderr=1&stdin=1"
-            : "stream=1&stdout=1&stderr=1"
-        let gate = DispatchSemaphore(value: 0)
-        let done = DispatchSemaphore(value: 0)
-        let attachError = OSAllocatedUnfairLock<Error?>(uncheckedState: nil)
-        DispatchQueue.global(qos: .userInitiated).async {
-            do {
-                try DaemonAPI.hijack(
-                    path: "/containers/\(DaemonAPI.path(id))/attach?\(query)",
-                    stdin: interactive,
-                    tty: tty,
-                    resizePath: tty ? "/containers/\(DaemonAPI.path(id))/resize" : nil,
-                    onUpgraded: { gate.signal() }
-                )
-            } catch {
-                attachError.withLock { $0 = error }
-                gate.signal()
-            }
-            done.signal()
-        }
-        gate.wait()
-        if let error = attachError.withLock({ $0 }) {
-            _ = try? DaemonAPI.delete("/containers/\(DaemonAPI.path(id))?force=1&v=1")
-            done.wait()
-            throw error
-        }
-        let interrupt = ProcessSignalProxy(enabled: !tty, signals: [(SIGINT, "SIGINT")]) { _ in
-            _ = try? DaemonAPI.post("/containers/\(DaemonAPI.path(id))/stop?t=1")
-        }
-        defer { interrupt.restore() }
-        do {
-            try DaemonAPI.requireOK(DaemonAPI.post("/containers/\(DaemonAPI.path(id))/start", timeoutSeconds: 300))
-        } catch {
-            _ = try? DaemonAPI.delete("/containers/\(DaemonAPI.path(id))?force=1&v=1")
-            done.wait()
-            throw error
-        }
-        done.wait()
     }
 }
 
@@ -217,16 +260,61 @@ struct Create: ParsableCommand {
 
 struct Start: ParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Start one or more stopped containers.")
+
+    @Flag(name: [.customShort("a"), .long], help: "Attach STDOUT/STDERR and forward signals.")
+    var attach = false
+
+    @Flag(name: [.customShort("i"), .long], help: "Attach container's STDIN.")
+    var interactive = false
+
+    @Option(name: .customLong("detach-keys"), help: "Override the key sequence for detaching a container.")
+    var detachKeys: String?
+
     @Argument var containers: [String]
-    func run() throws { try ContainerAction.post("start", containers, timeoutSeconds: 300) }
+
+    func run() throws {
+        if attach || interactive {
+            guard containers.count == 1 else {
+                throw CLIError.io("you cannot start and attach multiple containers at once")
+            }
+            let id = containers[0]
+            let info = try DaemonAPI.decode(
+                AttachInspect.self,
+                from: DaemonAPI.get("/containers/\(DaemonAPI.path(id))/json")
+            )
+            try ContainerAttach.attachAndStart(
+                id: id,
+                interactive: interactive,
+                tty: info.Config.Tty == true,
+                detachKeys: detachKeys
+            )
+            let wait = try DaemonAPI.decode(
+                WaitResponse.self,
+                from: DaemonAPI.post("/containers/\(DaemonAPI.path(id))/wait", timeoutSeconds: nil)
+            )
+            if wait.StatusCode != 0 {
+                throw ExitCode(Int32(truncatingIfNeeded: wait.StatusCode))
+            }
+            return
+        }
+        try ContainerAction.post("start", containers, timeoutSeconds: 300)
+    }
 }
 
 struct Stop: ParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Stop one or more running containers.")
     @Option(name: .shortAndLong, help: "Seconds to wait before killing the container.")
     var time: Int = 10
+
+    @Option(help: "Signal to send to the container.")
+    var signal: String?
+
     @Argument var containers: [String]
-    func run() throws { try ContainerAction.post("stop", containers, query: "t=\(time)", timeoutSeconds: time + 30) }
+    func run() throws {
+        var query = "t=\(time)"
+        if let signal { query += "&signal=\(DaemonAPI.query(signal))" }
+        try ContainerAction.post("stop", containers, query: query, timeoutSeconds: time + 30)
+    }
 }
 
 struct Restart: ParsableCommand {
@@ -263,10 +351,18 @@ struct Rm: ParsableCommand {
     var force = false
     @Flag(name: .customShort("v"), help: "Remove anonymous volumes.")
     var volumes = false
+    @Flag(name: [.customShort("l"), .long], help: "Remove the specified link (legacy; no-op).")
+    var link = false
     @Argument var containers: [String]
-    func run() throws { try Self.remove(containers, force: force, volumes: volumes) }
+    func run() throws { try Self.remove(containers, force: force, volumes: volumes, link: link) }
 
-    static func remove(_ containers: [String], force: Bool, volumes: Bool) throws {
+    static func remove(_ containers: [String], force: Bool, volumes: Bool, link: Bool = false) throws {
+        if link {
+            for id in containers {
+                print(id)
+            }
+            return
+        }
         for id in containers {
             var path = "/containers/\(DaemonAPI.path(id))?"
             if force { path += "force=1&" }
@@ -312,6 +408,12 @@ struct Exec: ParsableCommand {
     @Flag(help: "Give extended privileges to the command.")
     var privileged = false
 
+    @Option(name: .customLong("detach-keys"), help: "Override the key sequence for detaching a container.")
+    var detachKeys: String?
+
+    @Option(name: .customLong("env-file"), help: "Read in a file of environment variables.")
+    var envFile: [String] = []
+
     @Argument(help: "Container name or ID.")
     var container: String
 
@@ -332,6 +434,7 @@ struct Exec: ParsableCommand {
     private func runExec() throws {
         // Inspect first so "no such container" wins over TTY/start errors, matching Docker CLI.
         _ = try DaemonAPI.requireOK(DaemonAPI.get("/containers/\(DaemonAPI.path(container))/json"))
+        let env = try DaemonAPI.envFile(envFile) + env
         let created = try DaemonAPI.decode(
             ExecCreateResponse.self,
             from: DaemonAPI.post(
@@ -341,6 +444,7 @@ struct Exec: ParsableCommand {
                         AttachStdin: interactive,
                         AttachStdout: true,
                         AttachStderr: true,
+                        DetachKeys: detachKeys,
                         Tty: tty,
                         Env: env.isEmpty ? nil : env,
                         Cmd: command,
@@ -361,12 +465,14 @@ struct Exec: ParsableCommand {
             killPath: "/exec/\(DaemonAPI.path(created.Id))/kill"
         )
         defer { proxy.restore() }
+        let keys: [UInt8]? = interactive ? (try detachKeys.map(DetachKeys.parse) ?? DetachKeys.default) : nil
         try DaemonAPI.hijack(
             path: "/exec/\(DaemonAPI.path(created.Id))/start",
             body: start,
             stdin: interactive,
             tty: tty,
-            resizePath: tty ? "/exec/\(DaemonAPI.path(created.Id))/resize" : nil
+            resizePath: tty ? "/exec/\(DaemonAPI.path(created.Id))/resize" : nil,
+            detachKeys: keys
         )
         let inspect = try DaemonAPI.decode(
             ExecInspectResponse.self,
@@ -460,19 +566,44 @@ struct Logs: ParsableCommand {
     var follow = false
     @Flag(name: .shortAndLong, help: "Show timestamps.")
     var timestamps = false
-    @Option(help: "Number of lines to show from the end of the logs.")
+    @Option(name: [.customShort("n"), .customLong("tail")], help: "Number of lines to show from the end of the logs.")
     var tail: String?
+    @Option(help: "Show logs since timestamp (RFC3339 or Unix) or duration (e.g. 42m).")
+    var since: String?
+    @Option(help: "Show logs before timestamp (RFC3339 or Unix) or duration (e.g. 42m).")
+    var until: String?
+    @Flag(help: "Show extra details provided to logs.")
+    var details = false
     @Argument var container: String
 
     func run() throws {
-        try Self.printLogs(id: container, follow: follow, timestamps: timestamps, tail: tail)
+        try Self.printLogs(
+            id: container,
+            follow: follow,
+            timestamps: timestamps,
+            tail: tail,
+            since: since,
+            until: until,
+            details: details
+        )
     }
 
-    static func printLogs(id: String, follow: Bool, timestamps: Bool, tail: String?) throws {
+    static func printLogs(
+        id: String,
+        follow: Bool,
+        timestamps: Bool,
+        tail: String?,
+        since: String? = nil,
+        until: String? = nil,
+        details: Bool = false
+    ) throws {
         var path = "/containers/\(DaemonAPI.path(id))/logs?stdout=1&stderr=1"
         if follow { path += "&follow=1" }
         if timestamps { path += "&timestamps=1" }
+        if details { path += "&details=1" }
         if let tail { path += "&tail=\(DaemonAPI.query(tail))" }
+        if let since { path += "&since=\(DaemonAPI.query(since))" }
+        if let until { path += "&until=\(DaemonAPI.query(until))" }
         let status = try DaemonAPI.streamBytes(
             method: "GET",
             path: path,
@@ -506,10 +637,14 @@ struct Top: ParsableCommand {
 
     @Argument var container: String
 
+    @Argument(parsing: .allUnrecognized, help: "Arguments to pass to ps.")
+    var ps: [String] = []
+
     func run() throws {
         var path = "/containers/\(DaemonAPI.path(container))/top"
-        if let psArgs {
-            path += "?ps_args=\(DaemonAPI.query(psArgs))"
+        let args = ps.isEmpty ? psArgs : ps.joined(separator: " ")
+        if let args, !args.isEmpty {
+            path += "?ps_args=\(DaemonAPI.query(args))"
         }
         let top = try DaemonAPI.decode(TopResponse.self, from: DaemonAPI.get(path))
         Table.print(headers: top.Titles, rows: top.Processes)
@@ -522,23 +657,42 @@ struct Stats: ParsableCommand {
     @Flag(name: .customLong("no-stream"), help: "Disable streaming stats and only pull the first result.")
     var noStream = false
 
+    @Flag(name: [.customShort("a"), .long], help: "Show all containers (default hides stopped).")
+    var all = false
+
+    @Option(help: "Format output using a custom template (table, {{.Field}}, json).")
+    var format: String?
+
+    @Flag(name: .customLong("no-trunc"), help: "Don't truncate output.")
+    var noTrunc = false
+
     @Argument var containers: [String] = []
 
     func run() throws {
-        let ids = try Self.resolve(containers)
+        let ids = try Self.resolve(containers, all: all)
         guard !ids.isEmpty else {
-            Table.print(headers: Self.headers, rows: [])
+            if format == nil || FormatTemplate.isBareTable(format ?? "table") {
+                Table.print(headers: Self.headers, rows: [])
+            }
             return
         }
         if noStream {
-            Table.print(headers: Self.headers, rows: try ids.map { try Self.row(for: $0) })
+            try Self.printSnapshot(ids: ids, format: format, noTrunc: noTrunc)
             return
         }
         var printed = 0
         while true {
-            let rows = try ids.map { try Self.row(for: $0) }
-            Self.redraw(headers: Self.headers, rows: rows, previousRows: printed)
-            printed = 1 + rows.count
+            let rows = try ids.map { try Self.fields(for: $0, noTrunc: noTrunc) }
+            if let format, !FormatTemplate.isBareTable(format) {
+                try FormatTemplate.print(format: format, rows: rows)
+            } else {
+                Self.redraw(
+                    headers: Self.headers,
+                    rows: rows.map { Self.cells($0) },
+                    previousRows: printed
+                )
+                printed = 1 + rows.count
+            }
             Thread.sleep(forTimeInterval: 1)
         }
     }
@@ -547,18 +701,52 @@ struct Stats: ParsableCommand {
         "CONTAINER ID", "NAME", "CPU %", "MEM USAGE / LIMIT", "MEM %", "NET I/O", "PIDS",
     ]
 
-    private static func resolve(_ names: [String]) throws -> [String] {
+    private static func resolve(_ names: [String], all: Bool) throws -> [String] {
         if !names.isEmpty { return names }
-        let running = try DaemonAPI.decode([ContainerSummary].self, from: DaemonAPI.get("/containers/json"))
+        let path = all ? "/containers/json?all=1" : "/containers/json"
+        let running = try DaemonAPI.decode([ContainerSummary].self, from: DaemonAPI.get(path))
         return running.map(\.Id)
     }
 
-    private static func row(for id: String) throws -> [String] {
-        let stats = try DaemonAPI.decode(
-            StatsResponse.self,
-            from: DaemonAPI.get("/containers/\(DaemonAPI.path(id))/stats?stream=0", timeoutSeconds: 15)
-        )
-        return stats.row
+    private static func printSnapshot(ids: [String], format: String?, noTrunc: Bool) throws {
+        let rows = try ids.map { try fields(for: $0, noTrunc: noTrunc) }
+        if let format, !FormatTemplate.isBareTable(format) {
+            try FormatTemplate.print(format: format, rows: rows)
+            return
+        }
+        Table.print(headers: headers, rows: rows.map { cells($0) })
+    }
+
+    private static func fields(for id: String, noTrunc: Bool) throws -> [(String, String)] {
+        let stats: StatsResponse
+        do {
+            stats = try DaemonAPI.decode(
+                StatsResponse.self,
+                from: DaemonAPI.get("/containers/\(DaemonAPI.path(id))/stats?stream=0", timeoutSeconds: 15)
+            )
+        } catch {
+            return zeroFields(id: id, noTrunc: noTrunc)
+        }
+        return stats.fields(noTrunc: noTrunc)
+    }
+
+    private static func zeroFields(id: String, noTrunc: Bool) -> [(String, String)] {
+        [
+            ("ID", noTrunc ? id : Format.shortID(id)),
+            ("Name", id),
+            ("CPUPerc", "0.00%"),
+            ("MemUsage", "0B / 0B"),
+            ("MemPerc", "0.00%"),
+            ("NetIO", "0B / 0B"),
+            ("BlockIO", "0B / 0B"),
+            ("PIDs", "0"),
+        ]
+    }
+
+    private static func cells(_ row: [(String, String)]) -> [String] {
+        ["ID", "Name", "CPUPerc", "MemUsage", "MemPerc", "NetIO", "PIDs"].map { key in
+            row.first { $0.0 == key }?.1 ?? ""
+        }
     }
 
     private static func redraw(headers: [String], rows: [[String]], previousRows: Int) {
@@ -576,35 +764,67 @@ struct Inspect: ParsableCommand {
     @Option(name: [.customShort("f"), .long], help: "Format output using a custom template (table, {{.Field}}, json).")
     var format: String?
 
+    @Flag(name: .shortAndLong, help: "Display total file sizes if the type is container.")
+    var size = false
+
+    @Option(help: "Return JSON for a specified type (container, image, volume, network).")
+    var type: String?
+
     @Argument var names: [String]
-    func run() throws { try Self.inspect(names, prefer: .auto, format: format) }
+    func run() throws {
+        try Self.inspect(names, prefer: try Self.kind(type) ?? .auto, format: format, size: size)
+    }
+
+    private static func kind(_ type: String?) throws -> Kind? {
+        guard let type, !type.isEmpty else { return nil }
+        switch type {
+        case "container": return .container
+        case "image": return .image
+        case "volume": return .volume
+        case "network": return .network
+        default: throw CLIError.io("unknown type: \(type)")
+        }
+    }
 
     enum Kind {
         case auto, image, container, volume, network
 
         var searchOrder: [Kind] {
             switch self {
-            case .image: [.image, .container, .volume, .network]
-            case .container: [.container, .image, .volume, .network]
-            case .volume: [.volume, .container, .image, .network]
-            case .network: [.network, .container, .image, .volume]
+            case .image: [.image]
+            case .container: [.container]
+            case .volume: [.volume]
+            case .network: [.network]
             case .auto: [.container, .image, .volume, .network]
             }
         }
 
-        func path(for name: String) -> String? {
+        func path(for name: String, verbose: Bool = false, size: Bool = false) -> String? {
             switch self {
-            case .container: "/containers/\(DaemonAPI.path(name))/json"
-            case .image: "/images/\(DaemonAPI.path(name))/json"
-            case .volume: "/volumes/\(DaemonAPI.path(name))"
-            case .network: "/networks/\(DaemonAPI.path(name))"
-            case .auto: nil
+            case .container:
+                let path = "/containers/\(DaemonAPI.path(name))/json"
+                return size ? "\(path)?size=1" : path
+            case .image:
+                return "/images/\(DaemonAPI.path(name))/json"
+            case .volume:
+                return "/volumes/\(DaemonAPI.path(name))"
+            case .network:
+                let path = "/networks/\(DaemonAPI.path(name))"
+                return verbose ? "\(path)?verbose=1" : path
+            case .auto:
+                return nil
             }
         }
     }
 
-    static func inspect(_ names: [String], prefer: Kind, format: String? = nil) throws {
-        let objects = try names.map { try fetch($0, prefer: prefer) }
+    static func inspect(
+        _ names: [String],
+        prefer: Kind,
+        format: String? = nil,
+        verbose: Bool = false,
+        size: Bool = false
+    ) throws {
+        let objects = try names.map { try fetch($0, prefer: prefer, verbose: verbose, size: size) }
         if let format, !FormatTemplate.isBareTable(format) {
             try FormatTemplate.print(format: format, objects: objects)
             return
@@ -615,10 +835,10 @@ struct Inspect: ParsableCommand {
         }
     }
 
-    private static func fetch(_ name: String, prefer: Kind) throws -> Any {
+    private static func fetch(_ name: String, prefer: Kind, verbose: Bool, size: Bool) throws -> Any {
         var lastError: Error = CLIError.http("no such object: \(name)")
         for kind in prefer.searchOrder {
-            guard let path = kind.path(for: name) else { continue }
+            guard let path = kind.path(for: name, verbose: verbose, size: size) else { continue }
             do {
                 let response = try DaemonAPI.get(path)
                 if response.statusCode == 404 { continue }
@@ -655,10 +875,27 @@ struct Port: ParsableCommand {
 
 struct ContainerPrune: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "prune", abstract: "Remove all stopped containers.")
-    @Flag(name: .shortAndLong) var force = false
+
+    @Flag(name: .shortAndLong, help: "Do not prompt for confirmation.")
+    var force = false
+
+    @Option(help: "Filter what to prune (e.g. 'until=24h', 'label=key=value').")
+    var filter: [String] = []
+
     func run() throws {
         guard Prompt.confirm("This will remove all stopped containers.", force: force) else { return }
-        try DaemonAPI.printJSON(try DaemonAPI.requireOK(DaemonAPI.post("/containers/prune")).body)
+        var path = "/containers/prune"
+        if !filter.isEmpty {
+            path += "?filters=\(DaemonAPI.query(try DaemonAPI.filtersJSON(filter)))"
+        }
+        let result = try DaemonAPI.decode(ContainerPruneResponse.self, from: DaemonAPI.post(path))
+        if let ids = result.ContainersDeleted, !ids.isEmpty {
+            print("Deleted Containers:")
+            for id in ids {
+                print(id)
+            }
+        }
+        print("Total reclaimed space: \(Format.size(result.SpaceReclaimed ?? 0))")
     }
 }
 
@@ -677,22 +914,34 @@ struct ContainerGroup: ParsableCommand {
 
 struct ContainerLs: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "ls", abstract: "List containers.")
-    @Flag(name: .shortAndLong) var all = false
-    func run() throws { try Ps.list(all: all) }
+    @OptionGroup var options: ContainerListOptions
+    func run() throws { try Ps.list(options) }
 }
 
 struct ContainerRm: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "rm", abstract: "Remove one or more containers.")
     @Flag(name: .shortAndLong) var force = false
     @Flag(name: .customShort("v")) var volumes = false
+    @Flag(name: [.customShort("l"), .long], help: "Remove the specified link (legacy; no-op).")
+    var link = false
     @Argument var containers: [String]
-    func run() throws { try Rm.remove(containers, force: force, volumes: volumes) }
+    func run() throws { try Rm.remove(containers, force: force, volumes: volumes, link: link) }
 }
 
 struct ContainerInspect: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "inspect", abstract: "Display detailed information on one or more containers.")
+    static let configuration = CommandConfiguration(
+        commandName: "inspect",
+        abstract: "Display detailed information on one or more containers."
+    )
+
+    @Option(name: [.customShort("f"), .long], help: "Format output using a custom template (table, {{.Field}}, json).")
+    var format: String?
+
+    @Flag(name: .shortAndLong, help: "Display total file sizes.")
+    var size = false
+
     @Argument var containers: [String]
-    func run() throws { try Inspect.inspect(containers, prefer: .container) }
+    func run() throws { try Inspect.inspect(containers, prefer: .container, format: format, size: size) }
 }
 
 private enum ContainerAction {
@@ -706,19 +955,95 @@ private enum ContainerAction {
     }
 }
 
+private enum ContainerAttach {
+    static func attachAndStart(
+        id: String,
+        interactive: Bool,
+        tty: Bool,
+        detachKeys: String? = nil,
+        deleteOnFailure: Bool = false
+    ) throws {
+        let query = interactive
+            ? "stream=1&stdout=1&stderr=1&stdin=1"
+            : "stream=1&stdout=1&stderr=1"
+        let keys: [UInt8]?
+        if interactive {
+            keys = try detachKeys.map(DetachKeys.parse) ?? DetachKeys.default
+        } else {
+            keys = nil
+        }
+        let gate = DispatchSemaphore(value: 0)
+        let done = DispatchSemaphore(value: 0)
+        let attachError = OSAllocatedUnfairLock<Error?>(uncheckedState: nil)
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try DaemonAPI.hijack(
+                    path: "/containers/\(DaemonAPI.path(id))/attach?\(query)",
+                    stdin: interactive,
+                    tty: tty,
+                    resizePath: tty ? "/containers/\(DaemonAPI.path(id))/resize" : nil,
+                    onUpgraded: { gate.signal() },
+                    detachKeys: keys
+                )
+            } catch {
+                attachError.withLock { $0 = error }
+                gate.signal()
+            }
+            done.signal()
+        }
+        gate.wait()
+        if let error = attachError.withLock({ $0 }) {
+            if deleteOnFailure {
+                _ = try? DaemonAPI.delete("/containers/\(DaemonAPI.path(id))?force=1&v=1")
+            }
+            done.wait()
+            throw error
+        }
+        let interrupt = ProcessSignalProxy(enabled: !tty, signals: [(SIGINT, "SIGINT")]) { _ in
+            _ = try? DaemonAPI.post("/containers/\(DaemonAPI.path(id))/stop?t=1")
+        }
+        defer { interrupt.restore() }
+        do {
+            try DaemonAPI.requireOK(DaemonAPI.post("/containers/\(DaemonAPI.path(id))/start", timeoutSeconds: 300))
+        } catch {
+            if deleteOnFailure {
+                _ = try? DaemonAPI.delete("/containers/\(DaemonAPI.path(id))?force=1&v=1")
+            }
+            done.wait()
+            throw error
+        }
+        done.wait()
+    }
+}
+
 private struct ContainerSummary: Decodable {
     var Id: String
     var Names: [String]
     var Image: String
     var Command: String
+    var Created: Int64?
     var Status: String
+    var State: String?
+    var Labels: [String: String]?
+    var SizeRw: Int64?
     var Ports: [Port]?
+    var Mounts: [Mount]?
+    var NetworkSettings: NetworkSettings?
 
     struct Port: Decodable {
         var IP: String?
         var PrivatePort: Int
         var PublicPort: Int?
         var `Type`: String?
+    }
+
+    struct Mount: Decodable {
+        var Destination: String
+    }
+
+    struct NetworkSettings: Decodable {
+        var Networks: [String: Empty]?
+        struct Empty: Decodable {}
     }
 
     var portsColumn: String {
@@ -788,6 +1113,7 @@ private struct ExecCreateBody: Encodable {
     var AttachStdin: Bool
     var AttachStdout: Bool
     var AttachStderr: Bool
+    var DetachKeys: String?
     var Tty: Bool
     var Env: [String]?
     var Cmd: [String]
@@ -845,7 +1171,7 @@ private struct StatsResponse: Decodable {
         var current: Int
     }
 
-    var row: [String] {
+    func fields(noTrunc: Bool) -> [(String, String)] {
         let cpuDelta = Double(cpu_stats.cpu_usage.total_usage) - Double(precpu_stats.cpu_usage.total_usage)
         let sysDelta = Double(cpu_stats.system_cpu_usage ?? 0) - Double(precpu_stats.system_cpu_usage ?? 0)
         let cpus = Double(max(cpu_stats.online_cpus ?? 1, 1))
@@ -855,14 +1181,22 @@ private struct StatsResponse: Decodable {
         let rx = networks?.values.reduce(UInt64(0)) { $0 + $1.rx_bytes } ?? 0
         let tx = networks?.values.reduce(UInt64(0)) { $0 + $1.tx_bytes } ?? 0
         let name = self.name.hasPrefix("/") ? String(self.name.dropFirst()) : self.name
+        let short = noTrunc ? id : Format.shortID(id)
         return [
-            Format.shortID(id),
-            name,
-            String(format: "%.2f%%", cpuPercent),
-            "\(Format.size(Int64(clamping: memory_stats.usage))) / \(Format.size(Int64(clamping: limit)))",
-            String(format: "%.2f%%", memPercent),
-            "\(Format.size(Int64(clamping: rx))) / \(Format.size(Int64(clamping: tx)))",
-            "\(pids_stats?.current ?? 0)",
+            ("ID", short),
+            ("Name", name),
+            ("CPUPerc", String(format: "%.2f%%", cpuPercent)),
+            ("MemUsage", "\(Format.size(Int64(clamping: memory_stats.usage))) / \(Format.size(Int64(clamping: limit)))"),
+            ("MemPerc", String(format: "%.2f%%", memPercent)),
+            ("NetIO", "\(Format.size(Int64(clamping: rx))) / \(Format.size(Int64(clamping: tx)))"),
+            ("BlockIO", "0B / 0B"),
+            ("PIDs", "\(pids_stats?.current ?? 0)"),
+            ("Container", short),
         ]
     }
+}
+
+private struct ContainerPruneResponse: Decodable {
+    var ContainersDeleted: [String]?
+    var SpaceReclaimed: Int64?
 }

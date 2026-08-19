@@ -7,6 +7,7 @@ public struct DockerNetwork: Encodable, Sendable {
     public let Created: String
     public let Scope: String
     public let Driver: String
+    public let EnableIPv4: Bool
     public let EnableIPv6: Bool
     public let IPAM: IPAM
     public let Internal: Bool
@@ -23,7 +24,9 @@ public struct DockerNetwork: Encodable, Sendable {
 
         public struct Config: Encodable, Sendable {
             public let Subnet: String
+            public let IPRange: String
             public let Gateway: String
+            public let AuxiliaryAddresses: [String: String]
         }
     }
 
@@ -44,13 +47,21 @@ public struct DockerNetwork: Encodable, Sendable {
         self.Created = iso.string(from: network.created)
         self.Scope = network.scope
         self.Driver = network.driver
-        self.EnableIPv6 = false
+        self.EnableIPv4 = network.enableIPv4
+        self.EnableIPv6 = network.enableIPv6
         self.IPAM = .init(
-            Driver: "default",
+            Driver: network.ipamDriver,
             Config: network.subnet.isEmpty
                 ? []
-                : [.init(Subnet: network.subnet, Gateway: network.gateway)],
-            Options: [:]
+                : [
+                    .init(
+                        Subnet: network.subnet,
+                        IPRange: network.ipRange,
+                        Gateway: network.gateway,
+                        AuxiliaryAddresses: network.auxiliaryAddresses
+                    )
+                ],
+            Options: network.ipamOptions
         )
         self.Internal = network.internalNetwork
         self.Attachable = false
@@ -67,7 +78,7 @@ public struct DockerNetwork: Encodable, Sendable {
                 )
             )
         })
-        self.Options = [:]
+        self.Options = network.options
         self.Labels = network.labels
     }
 }
@@ -76,30 +87,42 @@ public struct DockerCreateNetworkRequest: Decodable, Sendable {
     public let Name: String?
     public let Driver: String?
     public let Internal: Bool?
+    public let EnableIPv4: Bool?
+    public let EnableIPv6: Bool?
     public let Labels: [String: String]?
+    public let Options: [String: String]?
     public let IPAM: IPAM?
 
     public init(
         Name: String? = nil,
         Driver: String? = nil,
         Internal: Bool? = nil,
+        EnableIPv4: Bool? = nil,
+        EnableIPv6: Bool? = nil,
         Labels: [String: String]? = nil,
+        Options: [String: String]? = nil,
         IPAM: IPAM? = nil
     ) {
         self.Name = Name
         self.Driver = Driver
         self.Internal = Internal
+        self.EnableIPv4 = EnableIPv4
+        self.EnableIPv6 = EnableIPv6
         self.Labels = Labels
+        self.Options = Options
         self.IPAM = IPAM
     }
 
     public struct IPAM: Decodable, Sendable {
         public let Driver: String?
         public let Config: [Config]?
+        public let Options: [String: String]?
 
         public struct Config: Decodable, Sendable {
             public let Subnet: String?
+            public let IPRange: String?
             public let Gateway: String?
+            public let AuxiliaryAddresses: [String: String]?
         }
     }
 }

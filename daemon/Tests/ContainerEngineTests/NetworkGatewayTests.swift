@@ -30,6 +30,31 @@ struct NetworkGatewayTests {
         #expect(table.address(for: "e")?.description == "172.17.0.3")
     }
 
+    @Test func ipamHonorsIPRangeAndReservedAddresses() throws {
+        var table = try NetworkIPAM(
+            subnet: "172.17.0.0/16",
+            ipRange: "172.17.0.128/25",
+            reserved: [IPv4Address(0xAC11_0080)] // 172.17.0.128
+        )
+        let first = try table.allocate(id: "a")
+        #expect(first.description == "172.17.0.129")
+        #expect(throws: EngineError.self) {
+            try table.reserve(id: "b", ip: IPv4Address(0xAC11_0002)) // outside ip-range
+        }
+        #expect(throws: EngineError.self) {
+            try table.reserve(id: "b", ip: IPv4Address(0xAC11_0080)) // reserved
+        }
+        try table.reserve(id: "b", ip: IPv4Address(0xAC11_0082)) // 172.17.0.130
+        let next = try table.allocate(id: "c")
+        #expect(next.description == "172.17.0.131")
+    }
+
+    @Test func ipamRejectsIPRangeOutsideSubnet() {
+        #expect(throws: EngineError.self) {
+            _ = try NetworkIPAM(subnet: "172.17.0.0/16", ipRange: "10.0.0.0/24")
+        }
+    }
+
     @Test func dnsAnswersARecords() throws {
         let ip = IPv4Address(0xAC11_0002)
         var query = Data([0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
