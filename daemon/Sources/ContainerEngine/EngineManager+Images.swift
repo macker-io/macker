@@ -6,17 +6,28 @@ import Foundation
 
 extension EngineManager {
     /// Pulls `name:tag` from a registry. SDK progress callbacks are bridged to an `AsyncSequence`.
+    /// A missing `tag` on a name without an embedded tag/digest pulls every tag (Docker `pull -a`).
     public func pullImage(
         name: String,
-        tag: String,
+        tag: String? = nil,
         platform: String? = nil,
         registryAuth: String? = nil
     ) -> AsyncThrowingStream<ImagePullEvent, Error> {
+        let effectiveTag = tag.flatMap { $0.isEmpty ? nil : $0 }
         let reference: String
+        let ociPlatform: Platform
         do {
-            reference = try Self.normalizedReference(name: name, tag: tag)
+            reference = try Self.normalizedReference(name: name, tag: effectiveTag)
+            ociPlatform = try Self.buildPlatform(platform)
         } catch {
             return Self.failedImageProgress(error)
+        }
+        // Docker API: an empty tag with a name-only reference pulls all tags of the repository.
+        if effectiveTag == nil,
+            let parsed = try? Reference.parse(name),
+            parsed.tag == nil, parsed.digest == nil
+        {
+            return pullAllTags(repository: Self.repository(from: reference), platform: ociPlatform, registryAuth: registryAuth)
         }
         let auth = authStore.authentication(reference: reference, header: registryAuth)
         let store = imageStore
@@ -24,13 +35,6 @@ extension EngineManager {
             let task = Task {
                 do {
                     continuation.yield(.status("Pulling from \(Self.repository(from: reference))", id: tag))
-
-                    let ociPlatform: Platform? = {
-                        if let platform, !platform.isEmpty {
-                            return try? Platform(from: platform)
-                        }
-                        return Platform.current
-                    }()
 
                     let progressState = ProgressAccumulator()
                     let image = try await store.pull(
@@ -71,10 +75,71 @@ extension EngineManager {
         }
     }
 
+    /// `docker pull -a`: list every tag of the repository and pull each one sequentially.
+    private func pullAllTags(
+        repository: String,
+        platform: Platform,
+        registryAuth: String?
+    ) -> AsyncThrowingStream<ImagePullEvent, Error> {
+        let auth = authStore.authentication(reference: repository, header: registryAuth)
+        let store = imageStore
+        let shortRepository = Self.repository(from: repository)
+        return AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    let tags = try await RegistryTags.list(reference: repository, auth: auth)
+                    guard !tags.isEmpty else {
+                        throw EngineError.pullFailed("no tags found for \(shortRepository)")
+                    }
+
+                    for tag in tags {
+                        try Task.checkCancellation()
+                        let tagReference = "\(repository):\(tag)"
+                        continuation.yield(.status("Pulling from \(shortRepository)", id: tag))
+                        let progressState = ProgressAccumulator()
+                        let image = try await store.pull(
+                            reference: tagReference,
+                            platform: platform,
+                            auth: auth,
+                            progress: { events in
+                                let snapshot = await progressState.apply(events)
+                                continuation.yield(
+                                    .progress(
+                                        id: tag,
+                                        status: "Downloading",
+                                        current: snapshot.current,
+                                        total: snapshot.total
+                                    )
+                                )
+                            }
+                        )
+                        await self.publish(
+                            EngineEvent(
+                                type: "image",
+                                action: "pull",
+                                actorID: image.digest,
+                                attributes: ["name": tagReference]
+                            )
+                        )
+                        continuation.yield(.status("Digest: \(image.digest)", id: nil))
+                        continuation.yield(.status("Status: Downloaded newer image for \(tagReference)", id: nil))
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: RegistryErrorMapper.map(error, reference: repository, operation: .pull))
+                }
+            }
+            continuation.onTermination = { _ in
+                task.cancel()
+            }
+        }
+    }
+
     /// Local OCI images grouped by digest, with size / created metadata.
     /// `all: false` hides dangling (untagged) images, matching `GET /images/json`.
     public func listImages(all: Bool = true, filters: [String: [String]] = [:]) async throws -> [EngineImageSummary] {
         let groups = try await imagesGroupedByDigest()
+        let membersByDigest = Dictionary(uniqueKeysWithValues: groups.map { ($0.digest, $0.members) })
         var summaries: [EngineImageSummary] = []
         summaries.reserveCapacity(groups.count)
         for (digest, members) in groups {
@@ -106,7 +171,31 @@ extension EngineManager {
         } else if FilterMatch.isFalse(filters["dangling"]) || !all {
             result = result.filter { !$0.isDangling }
         }
+        if let labels = filters["label"], !labels.isEmpty {
+            var kept: [EngineImageSummary] = []
+            for summary in result {
+                guard let primary = membersByDigest[summary.id]?.first else { continue }
+                if FilterMatch.labels(await configLabels(of: primary), specs: labels) {
+                    kept.append(summary)
+                }
+            }
+            result = kept
+        }
+        if let before = filters["before"]?.first {
+            let date = await Self.createdDate(of: try await resolveImage(before))
+            result = result.filter { $0.created < date }
+        }
+        if let since = filters["since"]?.first {
+            let date = await Self.createdDate(of: try await resolveImage(since))
+            result = result.filter { $0.created > date }
+        }
         return result
+    }
+
+    /// Image config labels for the preferred platform.
+    func configLabels(of image: Containerization.Image) async -> [String: String] {
+        let platform = await Self.preferredPlatform(for: image)
+        return (try? await image.config(for: platform))?.config?.labels ?? [:]
     }
 
     public func inspectImage(name: String) async throws -> EngineImageInspect {
@@ -139,21 +228,56 @@ extension EngineManager {
         )
     }
 
-    public func deleteImage(name: String) async throws -> [EngineImageDeleteItem] {
+    /// Deletes one image. Without `force` Docker semantics apply: an image used by a container
+    /// is a conflict, and a multi-tag image only gets the requested reference untagged.
+    /// `noPrune` keeps orphaned layer blobs and the unpacked runtime cache.
+    public func deleteImage(name: String, force: Bool = false, noPrune: Bool = false) async throws -> [EngineImageDeleteItem] {
         let image = try await resolveImage(name)
         let digest = image.digest
         let reference = image.reference
-        try await imageStore.delete(reference: reference, performCleanup: true)
-        let remaining = (try? await imageStore.list().filter { $0.digest == digest }) ?? []
-        if remaining.isEmpty {
-            dropUnpackedCache(digest: digest)
+        let siblings = (try? await imageStore.list().filter { $0.digest == digest }) ?? [image]
+        let inUse = imageInUse(digest: digest, members: siblings)
+
+        if !force {
+            if inUse {
+                throw EngineError.conflict(
+                    "conflict: unable to remove repository reference \"\(reference)\" (must force) - image is being used by a container"
+                )
+            }
+            if siblings.count > 1 {
+                try await imageStore.delete(reference: reference, performCleanup: false)
+                await publishImage(action: "untag", digest: digest, name: reference)
+                return [EngineImageDeleteItem(untagged: reference, deleted: nil)]
+            }
+            try await imageStore.delete(reference: reference, performCleanup: !noPrune)
+            if !noPrune {
+                dropUnpackedCache(digest: digest)
+            }
+            await publishImage(action: "untag", digest: digest, name: reference)
+            await publishImage(action: "delete", digest: digest, name: reference)
+            return [
+                EngineImageDeleteItem(untagged: reference, deleted: nil),
+                EngineImageDeleteItem(untagged: nil, deleted: digest),
+            ]
         }
-        await publishImage(action: "untag", digest: digest, name: reference)
-        await publishImage(action: "delete", digest: digest, name: reference)
-        return [
-            EngineImageDeleteItem(untagged: reference, deleted: nil),
-            EngineImageDeleteItem(untagged: nil, deleted: digest),
-        ]
+
+        // Force: untag every stored reference of the digest. Layers (and the delete event)
+        // only go away when no container uses the image, mirroring Docker.
+        var items: [EngineImageDeleteItem] = []
+        for sibling in siblings {
+            try? await imageStore.delete(reference: sibling.reference, performCleanup: false)
+            items.append(EngineImageDeleteItem(untagged: sibling.reference, deleted: nil))
+            await publishImage(action: "untag", digest: digest, name: sibling.reference)
+        }
+        if !inUse {
+            if !noPrune {
+                _ = try? await imageStore.cleanUpOrphanedBlobs()
+                dropUnpackedCache(digest: digest)
+            }
+            items.append(EngineImageDeleteItem(untagged: nil, deleted: digest))
+            await publishImage(action: "delete", digest: digest, name: reference)
+        }
+        return items
     }
 
     func resolveImage(_ name: String) async throws -> Containerization.Image {
@@ -251,6 +375,19 @@ extension EngineManager {
         return reference
     }
 
+    /// Hub short names (`alpine`) and `docker.io/library/alpine` are the same repository.
+    static func canonicalRepository(_ reference: String) -> String {
+        let repo = repository(from: reference)
+        if let normalized = try? normalizedReference(name: repo, tag: nil) {
+            return repository(from: normalized)
+        }
+        return repo
+    }
+
+    static func sameRepository(_ lhs: String, _ rhs: String) -> Bool {
+        canonicalRepository(lhs) == canonicalRepository(rhs)
+    }
+
     static func preferredPlatform(for image: Containerization.Image) async -> Platform {
         if let _ = try? await image.config(for: .current) {
             return .current
@@ -298,9 +435,14 @@ extension EngineManager {
         return ports
     }
 
-    public func imageHistory(name: String) async throws -> [EngineImageHistoryItem] {
+    public func imageHistory(name: String, platform rawPlatform: String? = nil) async throws -> [EngineImageHistoryItem] {
         let image = try await resolveImage(name)
-        let platform = await Self.preferredPlatform(for: image)
+        let platform: Platform
+        if let rawPlatform, !rawPlatform.isEmpty {
+            platform = try Self.buildPlatform(rawPlatform)
+        } else {
+            platform = await Self.preferredPlatform(for: image)
+        }
         let manifest = try await image.manifest(for: platform)
         let configBlob = try await image.getContent(digest: manifest.config.digest)
         let config: ContainerizationOCI.Image = try configBlob.decode()
@@ -332,18 +474,38 @@ extension EngineManager {
         )
     }
 
+    /// Pushes `name:tag` to a registry. An empty `tag` on a name-only reference pushes
+    /// every local tag of the repository (Docker `push -a` / empty API `tag`).
     public func pushImage(
         name: String,
         tag: String?,
+        platform: String? = nil,
         registryAuth: String? = nil
+    ) -> AsyncThrowingStream<ImagePullEvent, Error> {
+        let effectiveTag = tag.flatMap { $0.isEmpty ? nil : $0 }
+        if effectiveTag == nil,
+            let parsed = try? Reference.parse(name.removingPercentEncoding ?? name),
+            parsed.tag == nil, parsed.digest == nil
+        {
+            return pushAllTags(name: name.removingPercentEncoding ?? name, platform: platform, registryAuth: registryAuth)
+        }
+        return pushSingleImage(name: name, tag: effectiveTag, platform: platform, registryAuth: registryAuth)
+    }
+
+    private func pushSingleImage(
+        name: String,
+        tag: String?,
+        platform: String?,
+        registryAuth: String?
     ) -> AsyncThrowingStream<ImagePullEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 var reference = name
                 do {
+                    let ociPlatform = try Self.buildPlatform(platform)
                     let image = try await self.resolveImage(name)
                     reference = image.reference
-                    if let tag, !tag.isEmpty {
+                    if let tag {
                         reference = try Self.normalizedReference(name: Self.repository(from: reference), tag: tag)
                     }
                     let auth = self.authStore.authentication(reference: reference, header: registryAuth)
@@ -352,7 +514,7 @@ extension EngineManager {
                     let progressState = ProgressAccumulator()
                     try await self.imageStore.push(
                         reference: reference,
-                        platform: Platform.current,
+                        platform: ociPlatform,
                         auth: auth,
                         progress: { events in
                             let snapshot = await progressState.apply(events)
@@ -384,11 +546,79 @@ extension EngineManager {
         }
     }
 
+    /// `docker push -a`: push every local tag of the repository sequentially.
+    private func pushAllTags(
+        name: String,
+        platform: String?,
+        registryAuth: String?
+    ) -> AsyncThrowingStream<ImagePullEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    let ociPlatform = try Self.buildPlatform(platform)
+                    let normalized = try Self.normalizedReference(name: name, tag: nil)
+                    let repository = Self.repository(from: normalized)
+                    let references = try await self.imageStore.list()
+                        .map(\.reference)
+                        .filter { Self.canonicalRepository($0) == repository }
+                        .sorted()
+                    guard !references.isEmpty else {
+                        throw EngineError.imageNotFound("An image does not exist locally with the tag: \(name)")
+                    }
+                    continuation.yield(.status("The push refers to repository [\(repository)]", id: nil))
+                    for reference in references {
+                        try Task.checkCancellation()
+                        let tag = Self.tag(from: reference) ?? "latest"
+                        let auth = self.authStore.authentication(reference: reference, header: registryAuth)
+                        let progressState = ProgressAccumulator()
+                        try await self.imageStore.push(
+                            reference: reference,
+                            platform: ociPlatform,
+                            auth: auth,
+                            progress: { events in
+                                let snapshot = await progressState.apply(events)
+                                continuation.yield(
+                                    .progress(
+                                        id: tag,
+                                        status: "Pushing",
+                                        current: snapshot.current,
+                                        total: snapshot.total
+                                    )
+                                )
+                            }
+                        )
+                        let image = try await self.imageStore.get(reference: reference)
+                        continuation.yield(.status("Digest: \(image.digest)", id: tag))
+                        await self.publish(
+                            EngineEvent(
+                                type: "image",
+                                action: "push",
+                                actorID: image.digest,
+                                attributes: ["name": reference]
+                            )
+                        )
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: RegistryErrorMapper.map(error, reference: name, operation: .push))
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    static func tag(from reference: String) -> String? {
+        guard !reference.contains("@"),
+            let colon = reference.lastIndex(of: ":"), !reference[colon...].contains("/")
+        else { return nil }
+        return String(reference[reference.index(after: colon)...])
+    }
+
     private static func failedImageProgress(_ error: Error) -> AsyncThrowingStream<ImagePullEvent, Error> {
         AsyncThrowingStream { $0.finish(throwing: error) }
     }
 
-    public func pruneImages(danglingOnly: Bool, until: Date?) async throws -> EngineImagePruneResult {
+    public func pruneImages(danglingOnly: Bool, until: Date?, labels: [String] = []) async throws -> EngineImagePruneResult {
         var deleted: [EngineImageDeleteItem] = []
         var reclaimed: Int64 = 0
 
@@ -400,6 +630,7 @@ extension EngineManager {
                 let created = await Self.createdDate(of: primary)
                 if created >= until { continue }
             }
+            if !labels.isEmpty, !FilterMatch.labels(await configLabels(of: primary), specs: labels) { continue }
 
             let size = await Self.totalSize(of: primary)
             var leftover = false
@@ -440,11 +671,18 @@ extension EngineManager {
         return groups.sorted(by: { $0.key < $1.key }).map { ($0.key, $0.value) }
     }
 
-    public func searchImages(term: String, limit: Int) async throws -> [EngineImageSearchResult] {
+    public func searchImages(
+        term: String,
+        limit: Int,
+        filters: [String: [String]] = [:]
+    ) async throws -> [EngineImageSearchResult] {
+        let requested = max(1, min(limit, 100))
+        // Filters are client-side; fetch a full Hub page so `--limit` still applies after matching.
+        let pageSize = filters.isEmpty ? requested : 100
         var components = URLComponents(string: "https://hub.docker.com/v2/search/repositories/")!
         components.queryItems = [
             URLQueryItem(name: "query", value: term),
-            URLQueryItem(name: "page_size", value: String(max(1, min(limit, 100)))),
+            URLQueryItem(name: "page_size", value: String(pageSize)),
         ]
         guard let url = components.url else {
             throw EngineError.invalidReference("invalid search term")
@@ -456,7 +694,7 @@ extension EngineManager {
         }
 
         let decoded = try JSONDecoder().decode(HubSearchResponse.self, from: data)
-        return (decoded.results ?? []).map {
+        let items = (decoded.results ?? []).map {
             EngineImageSearchResult(
                 name: $0.repoName ?? $0.name ?? "",
                 description: $0.shortDescription ?? $0.description ?? "",
@@ -465,9 +703,51 @@ extension EngineManager {
                 isAutomated: $0.isAutomated ?? false
             )
         }
+        return Array(try Self.filterSearchResults(items, filters: filters).prefix(requested))
     }
 
-    public func exportImages(names: [String]) async throws -> Data {
+    static func filterSearchResults(
+        _ items: [EngineImageSearchResult],
+        filters: [String: [String]]
+    ) throws -> [EngineImageSearchResult] {
+        var result = items
+        for (key, values) in filters {
+            switch key {
+            case "stars":
+                let minima = try values.map { value -> Int in
+                    guard let count = Int(value) else {
+                        throw EngineError.invalidArgument("invalid filter \"stars=\(value)\"")
+                    }
+                    return count
+                }
+                let minimum = minima.max() ?? 0
+                result = result.filter { $0.starCount >= minimum }
+            case "is-official":
+                guard let want = searchBool(values) else {
+                    throw EngineError.invalidArgument("invalid filter \"is-official\"")
+                }
+                result = result.filter { $0.isOfficial == want }
+            case "is-automated":
+                guard let want = searchBool(values) else {
+                    throw EngineError.invalidArgument("invalid filter \"is-automated\"")
+                }
+                result = result.filter { $0.isAutomated == want }
+            default:
+                throw EngineError.invalidArgument("invalid filter \"\(key)\"")
+            }
+        }
+        return result
+    }
+
+    private static func searchBool(_ values: [String]) -> Bool? {
+        if FilterMatch.isTrue(values) { return true }
+        if FilterMatch.isFalse(values) { return false }
+        return nil
+    }
+
+    /// Exports images as an OCI-layout tar. Defaults to the host platform (pulls are
+    /// platform-filtered); `--platform` picks a different single manifest.
+    public func exportImages(names: [String], platform: String? = nil) async throws -> Data {
         guard !names.isEmpty else {
             throw EngineError.invalidReference("at least one image name is required")
         }
@@ -480,8 +760,7 @@ extension EngineManager {
 
         let oci = work.appendingPathComponent("oci", isDirectory: true)
         try FileManager.default.createDirectory(at: oci, withIntermediateDirectories: true)
-        // Pulls are platform-filtered; export the host platform so missing sibling manifests are skipped.
-        try await imageStore.save(references: references, out: oci, platform: .current)
+        try await imageStore.save(references: references, out: oci, platform: Self.buildPlatform(platform))
 
         let tar = work.appendingPathComponent("images.tar")
         try Self.runTar(["-C", oci.path, "-cf", tar.path, "."])

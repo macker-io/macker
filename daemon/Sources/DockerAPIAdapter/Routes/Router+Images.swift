@@ -47,15 +47,15 @@ extension Router {
         case .inspect(let name):
             return await inspectImage(name)
         case .history(let name):
-            return await imageHistory(name)
+            return await imageHistory(name, request: request)
         case .exportOne(let name):
-            return await exportImages([name])
+            return await exportImages([name], request: request)
         case .tag(let name):
             return await tagImage(name, request: request)
         case .push(let name):
             return await pushImage(name, request: request)
         case .delete(let name):
-            return await deleteImage(name)
+            return await deleteImage(name, request: request)
         }
     }
 
@@ -65,7 +65,7 @@ extension Router {
             let images = try await engine.listImages(all: Self.queryFlag(request.query["all"]), filters: filters)
             return Self.jsonOK(images.map(DockerImageSummary.init))
         } catch {
-            return Self.jsonError(status: 500, message: error.localizedDescription)
+            return Self.engineError(error)
         }
     }
 
@@ -88,7 +88,8 @@ extension Router {
         guard let fromImage = request.query["fromImage"], !fromImage.isEmpty else {
             return Self.jsonError(status: 400, message: "fromImage or fromSrc query parameter is required")
         }
-        let tag = request.query["tag"].flatMap { $0.isEmpty ? nil : $0 } ?? "latest"
+        // Docker API: an empty/absent tag on a name-only reference pulls all tags of the repository.
+        let tag = request.query["tag"].flatMap { $0.isEmpty ? nil : $0 }
         return Self.progressStream(
             await engine.pullImage(
                 name: fromImage,
@@ -99,9 +100,10 @@ extension Router {
         )
     }
 
-    func imageHistory(_ name: String) async -> HTTPResponse {
+    func imageHistory(_ name: String, request: HTTPRequest) async -> HTTPResponse {
         do {
-            return Self.jsonOK(try await engine.imageHistory(name: name).map(DockerImageHistoryItem.init))
+            let items = try await engine.imageHistory(name: name, platform: request.query["platform"])
+            return Self.jsonOK(items.map(DockerImageHistoryItem.init))
         } catch {
             return Self.engineError(error)
         }
@@ -120,10 +122,12 @@ extension Router {
     }
 
     func pushImage(_ name: String, request: HTTPRequest) async -> HTTPResponse {
+        // Docker API: an empty/absent tag on a name-only reference pushes all local tags.
         Self.progressStream(
             await engine.pushImage(
                 name: name,
                 tag: request.query["tag"],
+                platform: request.query["platform"],
                 registryAuth: request.headers["x-registry-auth"]
             )
         )
@@ -135,7 +139,13 @@ extension Router {
         }
         let limit = Int(request.query["limit"] ?? "") ?? 25
         do {
-            return Self.jsonOK(try await engine.searchImages(term: term, limit: limit).map(DockerImageSearchItem.init))
+            return Self.jsonOK(
+                try await engine.searchImages(
+                    term: term,
+                    limit: limit,
+                    filters: Self.parseFilters(request.query["filters"])
+                ).map(DockerImageSearchItem.init)
+            )
         } catch {
             return Self.engineError(error)
         }
@@ -146,15 +156,16 @@ extension Router {
         let dangling = filters["dangling"]?.contains(where: { $0 == "false" || $0 == "0" }) != true
         let until = filters["until"]?.first.flatMap(Self.parseTimestamp)
         do {
-            return Self.jsonOK(DockerImagePruneResponse(try await engine.pruneImages(danglingOnly: dangling, until: until)))
+            let labels = filters["label"] ?? []
+            return Self.jsonOK(DockerImagePruneResponse(try await engine.pruneImages(danglingOnly: dangling, until: until, labels: labels)))
         } catch {
             return Self.engineError(error)
         }
     }
 
-    func exportImages(_ names: [String]) async -> HTTPResponse {
+    func exportImages(_ names: [String], request: HTTPRequest) async -> HTTPResponse {
         do {
-            let data = try await engine.exportImages(names: names)
+            let data = try await engine.exportImages(names: names, platform: request.query["platform"])
             var buffer = ByteBuffer()
             buffer.writeBytes(data)
             return HTTPResponse(
@@ -203,9 +214,11 @@ extension Router {
         }
     }
 
-    func deleteImage(_ name: String) async -> HTTPResponse {
+    func deleteImage(_ name: String, request: HTTPRequest) async -> HTTPResponse {
         do {
-            return Self.jsonOK(try await engine.deleteImage(name: name).map(DockerImageDeleteItem.init))
+            let force = Self.queryFlag(request.query["force"])
+            let noPrune = Self.queryFlag(request.query["noprune"])
+            return Self.jsonOK(try await engine.deleteImage(name: name, force: force, noPrune: noPrune).map(DockerImageDeleteItem.init))
         } catch {
             return Self.engineError(error)
         }

@@ -156,14 +156,24 @@ enum DaemonAPI {
     }
 
     /// Pull/push/import NDJSON progress. Throws if the stream reports an error line or a non-200 status.
+    /// Quiet mode swallows progress and returns Docker's quiet-mode tokens (pull: references, push: digests).
+    enum QuietProgress {
+        case off
+        case pull
+        case push
+    }
+
+    @discardableResult
     static func streamProgress(
         method: String = "POST",
         path: String,
         bodyFile: URL? = nil,
-        contentType: String = "application/json"
-    ) throws {
+        contentType: String = "application/json",
+        quiet: QuietProgress = .off
+    ) throws -> [String] {
         let printer = ProgressPrinter()
         var failed: String?
+        var captured: [String] = []
         let status = try streamLines(
             method: method,
             path: path,
@@ -175,6 +185,12 @@ enum DaemonAPI {
                 failed = message
                 return
             }
+            if quiet != .off {
+                if let token = quietToken(in: line, capturing: quiet), !captured.contains(token) {
+                    captured.append(token)
+                }
+                return
+            }
             printer.write(line)
         }
         printer.finish()
@@ -183,6 +199,28 @@ enum DaemonAPI {
         }
         if status != 200 {
             try exitWithDaemonError(CLIError.http("request failed with HTTP \(status)"))
+        }
+        return captured
+    }
+
+    /// Pull `-q` prints `Status: Downloaded newer image for <ref>`; push `-q` prints `Digest: sha256:…`.
+    private static func quietToken(in line: String, capturing: QuietProgress) -> String? {
+        guard let progress = try? JSONDecoder().decode(ProgressLine.self, from: Data(line.utf8)),
+            let status = progress.status
+        else { return nil }
+        switch capturing {
+        case .off:
+            return nil
+        case .pull:
+            let marker = "Downloaded newer image for "
+            guard let range = status.range(of: marker) else { return nil }
+            let reference = status[range.upperBound...].trimmingCharacters(in: .whitespaces)
+            return reference.isEmpty ? nil : reference
+        case .push:
+            let marker = "Digest: "
+            guard status.hasPrefix(marker) else { return nil }
+            let digest = status.dropFirst(marker.count).trimmingCharacters(in: .whitespaces)
+            return digest.isEmpty ? nil : String(digest)
         }
     }
 
@@ -197,6 +235,20 @@ enum DaemonAPI {
             return false
         }
         return message.range(of: "no such image", options: .caseInsensitive) != nil
+    }
+
+    /// `key=value` pairs to the daemon's `filters` JSON (`{"key":["value"]}`).
+    static func filtersJSON(_ filters: [String]) throws -> String {
+        var map: [String: [String]] = [:]
+        for raw in filters {
+            let parts = raw.split(separator: "=", maxSplits: 1)
+            guard parts.count == 2, !parts[0].isEmpty else {
+                throw CLIError.io("invalid filter \"\(raw)\"")
+            }
+            map[String(parts[0]), default: []].append(String(parts[1]))
+        }
+        let data = try JSONSerialization.data(withJSONObject: map)
+        return String(data: data, encoding: .utf8) ?? "{}"
     }
 
     static func query(_ value: String) -> String {
@@ -215,6 +267,19 @@ enum DaemonAPI {
         if let text = String(data: pretty, encoding: .utf8) {
             print(text)
         }
+    }
+
+    /// `pull -a` / `push -a` take a repository name, not `name:tag` or a digest.
+    static func requireNameOnly(_ image: String) throws {
+        let lastComponent = image.split(separator: "/").last ?? Substring(image)
+        guard !image.contains("@"), !lastComponent.contains(":") else {
+            throw ValidationError("tag can't be used with --all-tags/-a")
+        }
+    }
+
+    static func warnIgnoredPlatform(_ platform: String?, command: String) {
+        guard let platform, !platform.isEmpty else { return }
+        fputs("WARNING: --platform is ignored; \(command) keeps the host platform\n", stderr)
     }
 
     static func splitReference(_ raw: String) -> (name: String, tag: String) {

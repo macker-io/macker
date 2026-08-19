@@ -49,7 +49,7 @@ public struct Router: Sendable {
         case ("GET", "/images/search"):
             return await searchImages(request)
         case ("GET", "/images/get"):
-            return await exportImages(request.queryAll["names"] ?? request.query["names"].map { [$0] } ?? [])
+            return await exportImages(request.queryAll["names"] ?? request.query["names"].map { [$0] } ?? [], request: request)
         case ("POST", "/images/load"):
             return await loadImages(request)
         case ("POST", "/images/prune"):

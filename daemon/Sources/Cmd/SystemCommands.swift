@@ -43,7 +43,7 @@ struct Events: ParsableCommand {
         if let since { query.append("since=\(DaemonAPI.query(since))") }
         if let until { query.append("until=\(DaemonAPI.query(until))") }
         if !filter.isEmpty {
-            query.append("filters=\(DaemonAPI.query(try Self.encodeFilters(filter)))")
+            query.append("filters=\(DaemonAPI.query(try DaemonAPI.filtersJSON(filter)))")
         }
         let path = query.isEmpty ? "/events" : "/events?\(query.joined(separator: "&"))"
         let status = try DaemonAPI.streamLines(method: "GET", path: path, timeoutSeconds: nil) { line in
@@ -52,20 +52,6 @@ struct Events: ParsableCommand {
         if status >= 400 {
             throw CLIError.http("events failed with HTTP \(status)")
         }
-    }
-
-    private static func encodeFilters(_ specs: [String]) throws -> String {
-        var map: [String: [String]] = [:]
-        for spec in specs {
-            guard let eq = spec.firstIndex(of: "=") else {
-                throw CLIError.http("Invalid filter '\(spec)'")
-            }
-            let key = String(spec[..<eq])
-            let value = String(spec[spec.index(after: eq)...])
-            map[key, default: []].append(value)
-        }
-        let data = try JSONEncoder().encode(map)
-        return String(data: data, encoding: .utf8) ?? "{}"
     }
 }
 

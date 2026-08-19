@@ -44,14 +44,25 @@ enum Format {
         return String(hex.prefix(12))
     }
 
-    static func historyID(_ id: String, truncating: Bool) -> String {
-        truncating ? shortID(id) : id
-    }
-
     static func createdBy(_ text: String, truncating: Bool) -> String {
         let cleaned = text.replacingOccurrences(of: "\t", with: " ")
         guard truncating, cleaned.count > 45 else { return cleaned }
         return String(cleaned.prefix(42)) + "..."
+    }
+
+    /// Docker `--format .CreatedAt`: Go's default time rendering in UTC.
+    static func createdAt(_ unix: Int64) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss '+0000 UTC'"
+        return formatter.string(from: Date(timeIntervalSince1970: TimeInterval(unix)))
+    }
+
+    /// Docker ellipsis truncation: keep `limit - 3` chars and append "...".
+    static func ellipsis(_ text: String, _ limit: Int = 45) -> String {
+        guard text.count > limit else { return text }
+        return String(text.prefix(limit - 3)) + "..."
     }
 
     /// Docker `units.HumanDuration` plus `" ago"`.
