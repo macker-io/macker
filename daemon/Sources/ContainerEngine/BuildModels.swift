@@ -12,6 +12,9 @@ public struct EngineBuildSpec: Sendable {
     public var pull: Bool
     public var quiet: Bool
     public var platform: String?
+    public var networkMode: String
+    public var extraHosts: [String]
+    public var memory: Int64
 
     public init(
         tags: [String] = [],
@@ -22,7 +25,10 @@ public struct EngineBuildSpec: Sendable {
         noCache: Bool = false,
         pull: Bool = false,
         quiet: Bool = false,
-        platform: String? = nil
+        platform: String? = nil,
+        networkMode: String = "",
+        extraHosts: [String] = [],
+        memory: Int64 = 0
     ) {
         self.tags = tags
         self.dockerfile = dockerfile.isEmpty ? BuildContext.defaultDockerfile : dockerfile
@@ -33,6 +39,9 @@ public struct EngineBuildSpec: Sendable {
         self.pull = pull
         self.quiet = quiet
         self.platform = platform
+        self.networkMode = networkMode
+        self.extraHosts = extraHosts
+        self.memory = memory
     }
 }
 

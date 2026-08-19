@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import ContainerEngine
+@testable import DockerAPIAdapter
 
 struct BuildStepTests {
     @Test func cacheKeyTracksParentInstructionAndInputs() {
@@ -169,5 +170,37 @@ struct BuildStepTests {
             process.waitUntilExit()
             #expect(listing.contains("root"))
         }
+    }
+
+    @Test func buildSpecReadsNetworkHostsAndMemory() {
+        let request = HTTPRequest(
+            method: "POST",
+            path: "/build",
+            query: [
+                "networkmode": "none",
+                "extrahosts": "db.local:10.1.2.3, host.docker.internal:host-gateway",
+                "memory": "134217728",
+            ]
+        )
+        let spec = Router.buildSpec(from: request)
+        #expect(spec.networkMode == "none")
+        #expect(spec.extraHosts == ["db.local:10.1.2.3", "host.docker.internal:host-gateway"])
+        #expect(spec.memory == 134_217_728)
+        #expect(throws: EngineError.self) {
+            try EngineManager.validateBuildSpec(EngineBuildSpec(networkMode: "container:abc"))
+        }
+        #expect(throws: EngineError.self) {
+            try EngineManager.validateBuildSpec(EngineBuildSpec(extraHosts: ["badhost"]))
+        }
+    }
+
+    @Test func buildCacheIDMatchesDigestPrefixes() {
+        let digest = "sha256:abcdef0123456789"
+        #expect(EngineManager.buildCacheIDMatches(digest, ids: ["sha256:abcdef"]))
+        #expect(EngineManager.buildCacheIDMatches(digest, ids: ["abcdef"]))
+        #expect(!EngineManager.buildCacheIDMatches(digest, ids: ["ffff"]))
+        #expect(!EngineManager.buildCacheIDMatches(digest, ids: ["sha256:"]))
+        #expect(EngineManager.unsupportedBuildNetwork(" container:abc ") == "container:abc")
+        #expect(EngineManager.unsupportedBuildNetwork("bridge") == nil)
     }
 }

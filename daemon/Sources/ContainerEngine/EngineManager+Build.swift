@@ -57,28 +57,44 @@ extension EngineManager {
         }
     }
 
-    /// `POST /build/prune`: drop the untagged intermediate images the cache points at.
-    public func pruneBuildCache() async throws -> EngineBuildPruneResult {
+    /// `POST /build/prune`: drop unused classic-builder intermediate images.
+    public func pruneBuildCache(all: Bool = false, filters: [String: [String]] = [:]) async throws -> EngineBuildPruneResult {
         var cache = BuildCache(store: imageStore.path)
         let stored = try await imageStore.list()
         var tagged: Set<String> = []
         for image in stored where !Self.isDigestReference(image.reference) {
             tagged.insert(image.digest)
         }
+        let until = filters["until"]?.compactMap(ISO8601.parseTimestamp).min()
+        let ids = filters["id"] ?? []
 
         var deleted: [String] = []
         var reclaimed: Int64 = 0
         var dropped: Set<String> = []
+
         for reference in cache.references {
-            dropped.insert(reference)
-            guard let image = stored.first(where: { $0.reference == reference }) else { continue }
-            guard !tagged.contains(image.digest) else { continue }
-            reclaimed += await Self.totalSize(of: image)
-            try? await imageStore.delete(reference: reference, performCleanup: false)
-            deleted.append(image.digest)
-            await publish(
-                EngineEvent(type: "image", action: "delete", actorID: image.digest, attributes: ["name": reference])
-            )
+            guard let image = stored.first(where: { $0.reference == reference }) else {
+                dropped.insert(reference)
+                continue
+            }
+            if let pruned = await pruneBuildCacheImage(
+                image, tagged: tagged, until: until, ids: ids, cacheReference: reference
+            ) {
+                deleted.append(pruned.digest)
+                reclaimed += pruned.size
+                if let drop = pruned.drop { dropped.insert(drop) }
+            }
+        }
+        if all {
+            let cached = Set(cache.references)
+            for image in stored where Self.isDigestReference(image.reference) && !cached.contains(image.reference) {
+                if let pruned = await pruneBuildCacheImage(
+                    image, tagged: tagged, until: until, ids: ids, cacheReference: nil
+                ) {
+                    deleted.append(pruned.digest)
+                    reclaimed += pruned.size
+                }
+            }
         }
         cache.forget(references: dropped)
         let cleanup = try await imageStore.cleanUpOrphanedBlobs()
@@ -86,12 +102,48 @@ extension EngineManager {
         return EngineBuildPruneResult(deleted: deleted, spaceReclaimed: reclaimed)
     }
 
+    private func pruneBuildCacheImage(
+        _ image: Containerization.Image,
+        tagged: Set<String>,
+        until: Date?,
+        ids: [String],
+        cacheReference: String?
+    ) async -> (digest: String, size: Int64, drop: String?)? {
+        if tagged.contains(image.digest) { return nil }
+        if containers.values.contains(where: { $0.imageID == image.digest || $0.image == image.reference }) {
+            return nil
+        }
+        if let until {
+            let created = await Self.createdDate(of: image)
+            if created >= until { return nil }
+        }
+        if !ids.isEmpty, !Self.buildCacheIDMatches(image.digest, ids: ids) { return nil }
+
+        let size = await Self.totalSize(of: image)
+        try? await imageStore.delete(reference: image.reference, performCleanup: false)
+        await publish(
+            EngineEvent(type: "image", action: "delete", actorID: image.digest, attributes: ["name": image.reference])
+        )
+        return (image.digest, size, cacheReference)
+    }
+
+    static func buildCacheIDMatches(_ digest: String, ids: [String]) -> Bool {
+        let hex = digest.hasPrefix("sha256:") ? String(digest.dropFirst("sha256:".count)) : digest
+        return ids.contains { id in
+            guard !id.isEmpty else { return false }
+            let needle = id.hasPrefix("sha256:") ? String(id.dropFirst("sha256:".count)) : id
+            guard !needle.isEmpty else { return false }
+            return digest == id || digest.hasPrefix(id) || hex.hasPrefix(needle)
+        }
+    }
+
     private func performBuild(
         spec: EngineBuildSpec,
         contextArchive: URL,
         emit: @escaping @Sendable (EngineBuildEvent) -> Void
     ) async throws -> String {
-        try await withScratch("macker-build") { work in
+        try Self.validateBuildSpec(spec)
+        return try await withScratch("macker-build") { work in
             let context = work.appendingPathComponent("context", isDirectory: true)
             try FileManager.default.createDirectory(at: context, withIntermediateDirectories: true)
             try TarArchive.extract(contextArchive, to: context)
@@ -277,7 +329,7 @@ extension EngineManager {
         case "RUN":
             if let cacheKey, try await useCache(cacheKey, cache: cache, state: &state, emit: emit) { return }
             let stepWork = try Self.stepDirectory(work, step: step)
-            let layer = try await runInstruction(instruction, state: state, work: stepWork, emit: emit)
+            let layer = try await runInstruction(instruction, state: state, spec: spec, work: stepWork, emit: emit)
             try await commitStep(
                 state: &state,
                 layer: layer,
@@ -490,6 +542,26 @@ extension EngineManager {
     }
 
     /// Global `ARG`s take the value passed with `--build-arg`, else their default.
+    public static func unsupportedBuildNetwork(_ raw: String) -> String? {
+        let mode = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if mode.hasPrefix("container:") || mode == "macvlan" || mode == "ipvlan" {
+            return mode
+        }
+        return nil
+    }
+
+    static func validateBuildSpec(_ spec: EngineBuildSpec) throws {
+        if let mode = unsupportedBuildNetwork(spec.networkMode) {
+            throw EngineError.notImplemented("network mode \(mode) is not implemented")
+        }
+        if spec.memory < 0 {
+            throw EngineError.invalidArgument("invalid memory: \(spec.memory)")
+        }
+        for extra in spec.extraHosts {
+            _ = try EngineExtraHost.parse(extra)
+        }
+    }
+
     static func declaredArgs(_ declared: [DockerfileArg], provided: [String: String]) -> [String: String] {
         var values: [String: String] = [:]
         for arg in declared {

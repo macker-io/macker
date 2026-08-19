@@ -19,7 +19,24 @@ extension Router {
             return Self.jsonError(status: 400, message: "a build context tar is required")
         }
 
-        let spec = EngineBuildSpec(
+        let spec = Self.buildSpec(from: request)
+        return Self.buildStream(await engine.buildImage(spec: spec, contextArchive: context), quiet: spec.quiet)
+    }
+
+    func pruneBuildCache(_ request: HTTPRequest) async -> HTTPResponse {
+        do {
+            let result = try await engine.pruneBuildCache(
+                all: Self.queryFlag(request.query["all"]),
+                filters: Self.parseFilters(request.query["filters"])
+            )
+            return Self.jsonOK(DockerBuildPruneResponse(result))
+        } catch {
+            return Self.engineError(error)
+        }
+    }
+
+    static func buildSpec(from request: HTTPRequest) -> EngineBuildSpec {
+        EngineBuildSpec(
             tags: request.queryAll["t"] ?? request.query["t"].map { [$0] } ?? [],
             dockerfile: request.query["dockerfile"] ?? BuildContext.defaultDockerfile,
             buildArgs: Self.decodeStringMap(request.query["buildargs"]),
@@ -28,18 +45,16 @@ extension Router {
             noCache: Self.queryFlag(request.query["nocache"]),
             pull: Self.queryFlag(request.query["pull"]),
             quiet: Self.queryFlag(request.query["q"]),
-            platform: request.query["platform"]
+            platform: request.query["platform"],
+            networkMode: request.query["networkmode"] ?? "",
+            extraHosts: Self.extraHosts(request.query["extrahosts"]),
+            memory: Int64(request.query["memory"] ?? "") ?? 0
         )
-        return Self.buildStream(await engine.buildImage(spec: spec, contextArchive: context), quiet: spec.quiet)
     }
 
-    func pruneBuildCache() async -> HTTPResponse {
-        do {
-            let result = try await engine.pruneBuildCache()
-            return Self.jsonOK(DockerBuildPruneResponse(result))
-        } catch {
-            return Self.engineError(error)
-        }
+    static func extraHosts(_ raw: String?) -> [String] {
+        guard let raw, !raw.isEmpty else { return [] }
+        return raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
     }
 
     /// Docker's build response: `{"stream":…}` lines, `{"aux":{"ID":…}}` for the image,

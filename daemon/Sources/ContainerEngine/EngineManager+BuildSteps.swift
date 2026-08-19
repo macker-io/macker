@@ -18,6 +18,7 @@ extension EngineManager {
     func runInstruction(
         _ instruction: DockerfileInstruction,
         state: BuildStageState,
+        spec: EngineBuildSpec,
         work: URL,
         emit: @escaping @Sendable (EngineBuildEvent) -> Void
     ) async throws -> ImageLayerBlob? {
@@ -38,7 +39,10 @@ extension EngineManager {
                 env: Self.buildArgEnvironment(state),
                 cmd: command,
                 entrypoint: [],
-                labels: [Self.buildContainerLabel: "1"]
+                labels: [Self.buildContainerLabel: "1"],
+                memory: spec.memory,
+                networkMode: spec.networkMode.isEmpty ? "default" : spec.networkMode,
+                extraHosts: spec.extraHosts
             )
         )
         let id = created.id

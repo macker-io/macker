@@ -69,7 +69,7 @@ public struct Router: Sendable {
         case ("POST", "/build"):
             return await buildImage(request)
         case ("POST", "/build/prune"):
-            return await pruneBuildCache()
+            return await pruneBuildCache(request)
         case ("POST", "/commit"):
             return await commitContainer(request)
         default:
