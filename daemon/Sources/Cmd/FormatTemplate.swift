@@ -1,8 +1,8 @@
 import Foundation
 
-/// Docker `--format` subset shared by `images` / `history` / `search`:
-/// optional `table` prefix, `{{.Field}}` placeholders, `{{json .}}`, bare `json`,
-/// and `\t` / `\n` / `\\` escapes. Pipelines and control flow are not supported.
+/// Docker `--format` subset shared by `images` / `history` / `search` / system commands:
+/// optional `table` prefix, `{{.Field}}` (dotted paths for JSON objects), `{{json .}}`,
+/// bare `json`, and `\t` / `\n` / `\\` escapes. Pipelines and control flow are not supported.
 enum FormatTemplate {
     struct Template {
         enum Part {
@@ -106,6 +106,98 @@ enum FormatTemplate {
         for row in rows {
             Swift.print(try render(template, row: row))
         }
+    }
+
+    /// Prints JSON objects (`version` / `info` / `events` / `system df`). `{{.Client.Version}}` walks nested keys.
+    static func print(format raw: String, objects: [Any]) throws {
+        try print(try parse(raw), objects: objects)
+    }
+
+    static func print(_ template: Template, objects: [Any]) throws {
+        if template.table {
+            let split: (String) -> [String] = { $0.split(separator: "\t", omittingEmptySubsequences: false).map(String.init) }
+            let rendered = try objects.map { split(try render(template, object: $0)) }
+            Table.print(headers: split(template.header), rows: rendered)
+            return
+        }
+        for object in objects {
+            Swift.print(try render(template, object: object))
+        }
+    }
+
+    static func render(_ template: Template, object: Any) throws -> String {
+        try template.parts.map { part in
+            switch part {
+            case .literal(let text):
+                return text
+            case .field(let name):
+                return stringValue(try lookup(name, in: object))
+            case .json:
+                return jsonCompact(object)
+            }
+        }.joined()
+    }
+
+    static func lookup(_ path: String, in object: Any) throws -> Any {
+        var current = object
+        for key in path.split(separator: ".") {
+            current = try child(String(key), of: current)
+        }
+        return current
+    }
+
+    private static func child(_ key: String, of object: Any) throws -> Any {
+        guard let dict = dictionary(object) else {
+            throw CLIError.io("unknown field \"\(key)\" in --format")
+        }
+        if let value = dict[key] { return value }
+        if let pair = dict.first(where: { $0.key.lowercased() == key.lowercased() }) {
+            return pair.value
+        }
+        throw CLIError.io("unknown field \"\(key)\" in --format")
+    }
+
+    private static func dictionary(_ object: Any) -> [String: Any]? {
+        if let dict = object as? [String: Any] { return dict }
+        guard let dict = object as? NSDictionary else { return nil }
+        var result: [String: Any] = [:]
+        result.reserveCapacity(dict.count)
+        for (key, value) in dict {
+            if let key = key as? String {
+                result[key] = value
+            }
+        }
+        return result
+    }
+
+    private static func stringValue(_ value: Any) -> String {
+        if value is NSNull { return "" }
+        if let text = value as? String { return text }
+        if let flag = value as? Bool { return flag ? "true" : "false" }
+        if let number = value as? NSNumber {
+            if CFGetTypeID(number) == CFBooleanGetTypeID() {
+                return number.boolValue ? "true" : "false"
+            }
+            return number.stringValue
+        }
+        return jsonCompact(value)
+    }
+
+    static func jsonCompact(_ value: Any) -> String {
+        if value is NSNull { return "null" }
+        if let text = value as? String { return "\"\(escape(text))\"" }
+        if let flag = value as? Bool { return flag ? "true" : "false" }
+        if let number = value as? NSNumber {
+            if CFGetTypeID(number) == CFBooleanGetTypeID() {
+                return number.boolValue ? "true" : "false"
+            }
+            return number.stringValue
+        }
+        guard JSONSerialization.isValidJSONObject(value),
+            let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]),
+            let text = String(data: data, encoding: .utf8)
+        else { return "" }
+        return text
     }
 
     private static func render(_ template: Template, row: [(String, String)]) throws -> String {

@@ -50,6 +50,29 @@ enum Format {
         return String(cleaned.prefix(42)) + "..."
     }
 
+    /// Docker events default timestamp (`RFC3339Nano` with a fixed 9-digit fraction).
+    static func rfc3339Nano(time: Int64, timeNano: Int64) -> String {
+        let nanos = timeNano != 0 ? timeNano : time * 1_000_000_000
+        let seconds = nanos / 1_000_000_000
+        let fraction = abs(nanos % 1_000_000_000)
+        let date = Date(timeIntervalSince1970: TimeInterval(seconds))
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+        let stamp = formatter.string(from: date)
+        let offset = TimeZone.current.secondsFromGMT(for: date)
+        let zone: String
+        if offset == 0 {
+            zone = "Z"
+        } else {
+            let sign = offset >= 0 ? "+" : "-"
+            let total = abs(offset)
+            zone = String(format: "%@%02d:%02d", sign, total / 3600, (total % 3600) / 60)
+        }
+        return String(format: "%@.%09d%@", stamp, fraction, zone)
+    }
+
     /// Docker `--format .CreatedAt`: Go's default time rendering in UTC.
     static func createdAt(_ unix: Int64) -> String {
         let formatter = DateFormatter()
