@@ -104,9 +104,25 @@ extension EngineManager {
         return (deleted, reclaimed)
     }
 
-    func resolveMounts(_ requests: [EngineVolumeRequest]) async throws -> [EngineMount] {
+    func resolveMounts(_ requests: [EngineVolumeRequest], tmpfsRoot: URL? = nil) async throws -> [EngineMount] {
         var mounts: [EngineMount] = []
         for request in requests {
+            if request.type == "tmpfs" {
+                let root = tmpfsRoot ?? FileManager.default.temporaryDirectory
+                let leaf = request.destination.replacingOccurrences(of: "/", with: "_")
+                let dir = root.appendingPathComponent(leaf.isEmpty ? "tmpfs" : leaf, isDirectory: true)
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                mounts.append(
+                    EngineMount(
+                        type: "tmpfs",
+                        name: "",
+                        source: dir.path,
+                        destination: request.destination,
+                        rw: true
+                    )
+                )
+                continue
+            }
             if request.type == "bind" {
                 mounts.append(
                     EngineMount(
@@ -148,6 +164,30 @@ extension EngineManager {
             )
         }
         return mounts
+    }
+
+    func volumesFrom(_ specs: [String]) throws -> [EngineVolumeRequest] {
+        var requests: [EngineVolumeRequest] = []
+        for spec in specs {
+            let parsed = EngineVolumeSpec.parseVolumesFrom(spec)
+            let source = try resolveContainer(parsed.name)
+            for mount in source.mounts {
+                var readOnly = !mount.rw
+                if let override = parsed.readOnly {
+                    readOnly = override
+                }
+                requests.append(
+                    EngineVolumeRequest(
+                        type: mount.type == "bind" ? "bind" : (mount.type == "tmpfs" ? "tmpfs" : "volume"),
+                        source: mount.type == "volume" ? mount.name : mount.source,
+                        destination: mount.destination,
+                        readOnly: readOnly,
+                        anonymous: false
+                    )
+                )
+            }
+        }
+        return requests
     }
 
     func resolveVolume(_ name: String) throws -> EngineVolume {

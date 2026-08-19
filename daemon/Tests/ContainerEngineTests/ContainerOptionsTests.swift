@@ -124,6 +124,97 @@ struct ContainerOptionsTests {
             }
         }
     }
+
+    @Test func restartPolicyParsesAndDecides() throws {
+        #expect(try EngineRestartPolicy.parse("no") == .none)
+        #expect(try EngineRestartPolicy.parse("always").name == "always")
+        let limited = try EngineRestartPolicy.parse("on-failure:2")
+        #expect(limited.maximumRetryCount == 2)
+        #expect(limited.shouldRestart(exitCode: 1, action: "die", restartCount: 0))
+        #expect(!limited.shouldRestart(exitCode: 1, action: "die", restartCount: 2))
+        #expect(!limited.shouldRestart(exitCode: 0, action: "die", restartCount: 0))
+        let always = try EngineRestartPolicy.parse("always")
+        #expect(always.shouldRestart(exitCode: 0, action: "stop", restartCount: 0))
+        #expect(!always.shouldRestart(exitCode: 0, action: "shutdown", restartCount: 0))
+        let unlessStopped = try EngineRestartPolicy.parse("unless-stopped")
+        #expect(!unlessStopped.shouldRestart(exitCode: 0, action: "stop", restartCount: 0))
+        #expect(unlessStopped.shouldRestart(exitCode: 1, action: "die", restartCount: 0))
+        let onFailure = try EngineRestartPolicy.parse("on-failure")
+        #expect(!onFailure.shouldRestart(exitCode: 137, action: "stop", restartCount: 0))
+        #expect(!onFailure.shouldRestart(exitCode: 137, action: "kill", restartCount: 0))
+        #expect(onFailure.shouldRestart(exitCode: 1, action: "die", restartCount: 0))
+        #expect(throws: EngineError.self) {
+            _ = try EngineRestartPolicy.parse("maybe")
+        }
+    }
+
+    @Test func networkAttachSpecParsesAdvancedSyntax() throws {
+        let spec = try EngineNetworkAttachSpec.parse("name=front,ip=172.20.0.10,alias=web,alias=api,mac=aa:bb:cc:dd:ee:ff")
+        #expect(spec.name == "front")
+        #expect(spec.ipv4 == "172.20.0.10")
+        #expect(spec.aliases == ["web", "api"])
+        #expect(spec.macAddress == "aa:bb:cc:dd:ee:ff")
+        let request = try spec.asRequest()
+        #expect(request.ipv4 == "172.20.0.10")
+        #expect(request.macAddress == "aa:bb:cc:dd:ee:ff")
+        #expect(throws: EngineError.self) {
+            _ = try EngineNetworkAttachSpec.parse("name=front,ip6=fe80::1").asRequest()
+        }
+    }
+
+    @Test func volumeSpecParsesMountTmpfsAndVolumesFrom() throws {
+        let bind = try EngineVolumeSpec.parseMount("type=bind,source=/tmp/data,target=/data,readonly")
+        #expect(bind.type == "bind")
+        #expect(bind.source == "/tmp/data")
+        #expect(bind.destination == "/data")
+        #expect(bind.readOnly)
+        let tmpfs = try EngineVolumeSpec.parseTmpfs("/run:rw,noexec")
+        #expect(tmpfs.type == "tmpfs")
+        #expect(tmpfs.destination == "/run")
+        let from = EngineVolumeSpec.parseVolumesFrom("web:ro")
+        #expect(from.name == "web")
+        #expect(from.readOnly == true)
+    }
+
+    @Test func extraHostAndLabelFileParse() throws {
+        let extra = try EngineExtraHost.parse("db.local:10.1.2.3")
+        #expect(extra.host == "db.local")
+        #expect(extra.ip == "10.1.2.3")
+        let gateway = try EngineExtraHost.parse("host.docker.internal:host-gateway")
+        #expect(gateway.ip == NetworkGateway.gatewayAddress.description)
+        let labels = EngineLabelFile.parse("# comment\nenv=prod\nempty=\nflag\n")
+        #expect(labels["env"] == "prod")
+        #expect(labels["empty"] == "")
+        #expect(labels["flag"] == "")
+    }
+
+    @Test func volumeRequestsIncludeTmpfsAndMounts() throws {
+        let json = """
+        {"Image":"alpine","HostConfig":{"Tmpfs":{"/run":"rw"},"Mounts":[{"Type":"tmpfs","Target":"/tmp"},{"Type":"bind","Source":"/host","Target":"/c","ReadOnly":true}]}}
+        """
+        let body = try JSONDecoder().decode(DockerCreateContainerRequest.self, from: Data(json.utf8))
+        let requests = Router.volumeRequests(from: body)
+        #expect(requests.contains { $0.type == "tmpfs" && $0.destination == "/run" })
+        #expect(requests.contains { $0.type == "tmpfs" && $0.destination == "/tmp" })
+        #expect(requests.contains { $0.type == "bind" && $0.source == "/host" && $0.readOnly })
+    }
+
+    @Test func publishAllAddsMissingExposedPorts() {
+        let exposed = [
+            EnginePortBinding(hostIP: "", hostPort: 80, containerPort: 80, protocolName: "tcp"),
+            EnginePortBinding(hostIP: "", hostPort: 443, containerPort: 443, protocolName: "tcp"),
+        ]
+        var published = [
+            EnginePortBinding(hostIP: "0.0.0.0", hostPort: 8080, containerPort: 80, protocolName: "tcp")
+        ]
+        for port in exposed where !published.contains(where: { $0.dockerKey == port.dockerKey }) {
+            published.append(
+                EnginePortBinding(hostIP: "", hostPort: 0, containerPort: port.containerPort, protocolName: port.protocolName)
+            )
+        }
+        #expect(published.contains { $0.containerPort == 80 && $0.hostPort == 8080 })
+        #expect(published.contains { $0.containerPort == 443 && $0.hostPort == 0 })
+    }
 }
 
 private func withSeededEngine(

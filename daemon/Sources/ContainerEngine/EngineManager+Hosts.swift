@@ -22,6 +22,10 @@ extension EngineManager {
         if !names.isEmpty {
             hosts.entries.append(Hosts.Entry(ipAddress: ip, hostnames: names))
         }
+        for extra in record.run.extraHosts {
+            guard let parsed = try? EngineExtraHost.parse(extra) else { continue }
+            hosts.entries.append(Hosts.Entry(ipAddress: parsed.ip, hostnames: [parsed.host]))
+        }
         return hosts
     }
 }

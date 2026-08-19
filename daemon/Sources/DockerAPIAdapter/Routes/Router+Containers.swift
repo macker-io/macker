@@ -183,8 +183,34 @@ extension Router {
                 volumeRequests: Self.volumeRequests(from: body),
                 portBindings: try Self.portBindings(from: body),
                 exposedPorts: try Self.exposedPorts(from: body),
-                endpointRequests: Self.endpointRequests(from: body)
+                endpointRequests: try Self.endpointRequests(from: body),
+                extraHosts: body.HostConfig?.ExtraHosts ?? [],
+                dns: body.HostConfig?.Dns ?? [],
+                dnsSearch: body.HostConfig?.DnsSearch ?? [],
+                dnsOptions: body.HostConfig?.DnsOptions ?? [],
+                restartPolicy: try Self.restartPolicy(body.HostConfig?.RestartPolicy),
+                stopSignal: body.HostConfig?.StopSignal ?? "",
+                stopTimeout: body.HostConfig?.StopTimeout ?? 0,
+                privileged: body.HostConfig?.Privileged ?? false,
+                readonlyRootfs: body.HostConfig?.ReadonlyRootfs ?? false,
+                domainname: body.Domainname ?? "",
+                groupAdd: body.HostConfig?.GroupAdd ?? [],
+                publishAllPorts: body.HostConfig?.PublishAllPorts ?? false,
+                volumesFrom: body.HostConfig?.VolumesFrom ?? [],
+                healthcheck: body.Healthcheck.map {
+                    EngineHealthcheck(
+                        test: $0.Test ?? [],
+                        intervalNanos: $0.Interval ?? 0,
+                        timeoutNanos: $0.Timeout ?? 0,
+                        startPeriodNanos: $0.StartPeriod ?? 0,
+                        startIntervalNanos: $0.StartInterval ?? 0,
+                        retries: $0.Retries ?? 0
+                    )
+                }
             )
+            if let driver = body.HostConfig?.VolumeDriver, !driver.isEmpty, driver != "local" {
+                return Self.jsonError(status: 400, message: "volume driver \"\(driver)\" is not supported")
+            }
         } catch {
             return Self.jsonError(status: 400, message: "invalid container config: \(error.localizedDescription)")
         }
@@ -370,7 +396,7 @@ extension Router {
 
     private func stopContainer(_ id: String, request: HTTPRequest) async -> HTTPResponse {
         do {
-            let timeout = Int(request.query["t"] ?? "") ?? 10
+            let timeout = request.query["t"].flatMap(Int.init)
             let stopped = try await engine.stopContainer(
                 id,
                 timeoutSeconds: timeout,
@@ -589,17 +615,29 @@ extension Router {
         return bindings
     }
 
-    static func endpointRequests(from body: DockerCreateContainerRequest) -> [EngineEndpointRequest] {
-        (body.NetworkingConfig?.EndpointsConfig ?? [:]).map { name, config in
-            EngineEndpointRequest(
+    static func endpointRequests(from body: DockerCreateContainerRequest) throws -> [EngineEndpointRequest] {
+        try (body.NetworkingConfig?.EndpointsConfig ?? [:]).map { name, config in
+            if let ip6 = config.IPAMConfig?.IPv6Address, !ip6.isEmpty {
+                throw EngineError.notImplemented("IPv6 is not implemented")
+            }
+            return EngineEndpointRequest(
                 network: name,
                 aliases: Self.endpointAliases(config),
                 ipv4: config.IPAMConfig?.IPv4Address,
+                macAddress: config.MacAddress,
                 driverOpts: config.DriverOpts ?? [:],
                 gwPriority: config.GwPriority ?? 0,
                 linkLocalIPs: config.IPAMConfig?.LinkLocalIPs ?? []
             )
         }
+    }
+
+    static func restartPolicy(_ policy: DockerCreateContainerRequest.HostConfig.RestartPolicy?) throws -> EngineRestartPolicy {
+        guard let name = policy?.Name, !name.isEmpty else { return .none }
+        if name == "on-failure" {
+            return EngineRestartPolicy(name: "on-failure", maximumRetryCount: policy?.MaximumRetryCount ?? 0)
+        }
+        return try EngineRestartPolicy.parse(name)
     }
 
     static func volumeRequests(from body: DockerCreateContainerRequest) -> [EngineVolumeRequest] {
@@ -618,15 +656,25 @@ extension Router {
             let destination = mount.Target ?? ""
             guard !destination.isEmpty else { continue }
             let type = (mount.`Type` ?? "volume").lowercased()
+            if type == "tmpfs" {
+                requests.append(EngineVolumeRequest(type: "tmpfs", source: "", destination: destination, readOnly: false))
+                continue
+            }
+            if type != "bind" && type != "volume" {
+                continue
+            }
             requests.append(
                 EngineVolumeRequest(
-                    type: type == "bind" ? "bind" : "volume",
+                    type: type,
                     source: mount.Source ?? "",
                     destination: destination,
                     readOnly: mount.ReadOnly ?? false,
-                    anonymous: type != "bind" && (mount.Source ?? "").isEmpty
+                    anonymous: type == "volume" && (mount.Source ?? "").isEmpty
                 )
             )
+        }
+        for destination in body.HostConfig?.Tmpfs?.keys.sorted() ?? [] {
+            requests.append(EngineVolumeRequest(type: "tmpfs", source: "", destination: destination, readOnly: false))
         }
         return requests
     }

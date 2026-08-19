@@ -569,10 +569,22 @@ extension EngineManager {
         guard attached.contains(where: { $0.driver != "none" }) else {
             return nil
         }
+        var nameservers: [String]
         if attached.contains(where: { $0.driver == "bridge" }) {
-            return DNS(nameservers: [NetworkGateway.gatewayAddress.description])
+            nameservers = [NetworkGateway.gatewayAddress.description]
+        } else if !record.run.dns.isEmpty {
+            nameservers = record.run.dns
+        } else {
+            nameservers = DNS.defaultNameservers + ["8.8.8.8"]
         }
-        return DNS(nameservers: DNS.defaultNameservers + ["8.8.8.8"])
+        var dns = DNS(nameservers: nameservers)
+        if !record.run.dnsSearch.isEmpty {
+            dns.searchDomains = record.run.dnsSearch
+        }
+        if !record.run.dnsOptions.isEmpty {
+            dns.options = record.run.dnsOptions
+        }
+        return dns
     }
 
     func startPortPublishers(_ record: EngineContainer) async throws {
@@ -729,7 +741,7 @@ extension EngineManager {
             ipv4Address: request.ipv4 ?? "",
             ipv4Prefix: prefixLength(network.subnet),
             gateway: network.gateway,
-            macAddress: "",
+            macAddress: request.macAddress ?? "",
             aliases: request.aliases,
             driverOpts: request.driverOpts,
             gwPriority: request.gwPriority,

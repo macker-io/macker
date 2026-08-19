@@ -75,6 +75,20 @@ public struct EngineContainerCreateSpec: Sendable {
     public var portBindings: [EnginePortBinding]
     public var exposedPorts: [EnginePortBinding]
     public var endpointRequests: [EngineEndpointRequest]
+    public var extraHosts: [String]
+    public var dns: [String]
+    public var dnsSearch: [String]
+    public var dnsOptions: [String]
+    public var restartPolicy: EngineRestartPolicy
+    public var stopSignal: String
+    public var stopTimeout: Int
+    public var privileged: Bool
+    public var readonlyRootfs: Bool
+    public var domainname: String
+    public var groupAdd: [String]
+    public var publishAllPorts: Bool
+    public var volumesFrom: [String]
+    public var healthcheck: EngineHealthcheck?
 
     public init(
         name: String? = nil,
@@ -95,7 +109,21 @@ public struct EngineContainerCreateSpec: Sendable {
         volumeRequests: [EngineVolumeRequest] = [],
         portBindings: [EnginePortBinding] = [],
         exposedPorts: [EnginePortBinding] = [],
-        endpointRequests: [EngineEndpointRequest] = []
+        endpointRequests: [EngineEndpointRequest] = [],
+        extraHosts: [String] = [],
+        dns: [String] = [],
+        dnsSearch: [String] = [],
+        dnsOptions: [String] = [],
+        restartPolicy: EngineRestartPolicy = .none,
+        stopSignal: String = "",
+        stopTimeout: Int = 0,
+        privileged: Bool = false,
+        readonlyRootfs: Bool = false,
+        domainname: String = "",
+        groupAdd: [String] = [],
+        publishAllPorts: Bool = false,
+        volumesFrom: [String] = [],
+        healthcheck: EngineHealthcheck? = nil
     ) {
         self.name = name
         self.image = image
@@ -116,6 +144,20 @@ public struct EngineContainerCreateSpec: Sendable {
         self.portBindings = portBindings
         self.exposedPorts = exposedPorts
         self.endpointRequests = endpointRequests
+        self.extraHosts = extraHosts
+        self.dns = dns
+        self.dnsSearch = dnsSearch
+        self.dnsOptions = dnsOptions
+        self.restartPolicy = restartPolicy
+        self.stopSignal = stopSignal
+        self.stopTimeout = stopTimeout
+        self.privileged = privileged
+        self.readonlyRootfs = readonlyRootfs
+        self.domainname = domainname
+        self.groupAdd = groupAdd
+        self.publishAllPorts = publishAllPorts
+        self.volumesFrom = volumesFrom
+        self.healthcheck = healthcheck
     }
 }
 
@@ -147,11 +189,100 @@ public struct EngineContainer: Sendable, Codable {
     public var endpoints: [EngineEndpoint] = []
     public var portBindings: [EnginePortBinding] = []
     public var exposedPorts: [EnginePortBinding] = []
+    public var run: EngineContainerRunConfig = EngineContainerRunConfig()
 
     enum CodingKeys: String, CodingKey {
         case id, name, image, imageID, command, env, workingDir, user, hostname, labels
         case state, created, startedAt, finishedAt, exitCode, autoRemove, memory, nanoCpus
-        case networkMode, tty, openStdin, mounts, endpoints, portBindings, exposedPorts
+        case networkMode, tty, openStdin, mounts, endpoints, portBindings, exposedPorts, run
+    }
+
+    public init(
+        id: String,
+        name: String,
+        image: String,
+        imageID: String,
+        command: [String],
+        env: [String],
+        workingDir: String,
+        user: String,
+        hostname: String,
+        labels: [String: String],
+        state: String,
+        created: Date,
+        startedAt: Date?,
+        finishedAt: Date?,
+        exitCode: Int,
+        logs: String = "",
+        autoRemove: Bool,
+        memory: Int64,
+        nanoCpus: Int64,
+        networkMode: String,
+        tty: Bool,
+        openStdin: Bool,
+        mounts: [EngineMount],
+        endpoints: [EngineEndpoint] = [],
+        portBindings: [EnginePortBinding] = [],
+        exposedPorts: [EnginePortBinding] = [],
+        run: EngineContainerRunConfig = EngineContainerRunConfig()
+    ) {
+        self.id = id
+        self.name = name
+        self.image = image
+        self.imageID = imageID
+        self.command = command
+        self.env = env
+        self.workingDir = workingDir
+        self.user = user
+        self.hostname = hostname
+        self.labels = labels
+        self.state = state
+        self.created = created
+        self.startedAt = startedAt
+        self.finishedAt = finishedAt
+        self.exitCode = exitCode
+        self.logs = logs
+        self.autoRemove = autoRemove
+        self.memory = memory
+        self.nanoCpus = nanoCpus
+        self.networkMode = networkMode
+        self.tty = tty
+        self.openStdin = openStdin
+        self.mounts = mounts
+        self.endpoints = endpoints
+        self.portBindings = portBindings
+        self.exposedPorts = exposedPorts
+        self.run = run
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        image = try c.decode(String.self, forKey: .image)
+        imageID = try c.decode(String.self, forKey: .imageID)
+        command = try c.decode([String].self, forKey: .command)
+        env = try c.decode([String].self, forKey: .env)
+        workingDir = try c.decode(String.self, forKey: .workingDir)
+        user = try c.decode(String.self, forKey: .user)
+        hostname = try c.decode(String.self, forKey: .hostname)
+        labels = try c.decode([String: String].self, forKey: .labels)
+        state = try c.decode(String.self, forKey: .state)
+        created = try c.decode(Date.self, forKey: .created)
+        startedAt = try c.decodeIfPresent(Date.self, forKey: .startedAt)
+        finishedAt = try c.decodeIfPresent(Date.self, forKey: .finishedAt)
+        exitCode = try c.decode(Int.self, forKey: .exitCode)
+        autoRemove = try c.decode(Bool.self, forKey: .autoRemove)
+        memory = try c.decode(Int64.self, forKey: .memory)
+        nanoCpus = try c.decode(Int64.self, forKey: .nanoCpus)
+        networkMode = try c.decode(String.self, forKey: .networkMode)
+        tty = try c.decode(Bool.self, forKey: .tty)
+        openStdin = try c.decode(Bool.self, forKey: .openStdin)
+        mounts = try c.decode([EngineMount].self, forKey: .mounts)
+        endpoints = try c.decodeIfPresent([EngineEndpoint].self, forKey: .endpoints) ?? []
+        portBindings = try c.decodeIfPresent([EnginePortBinding].self, forKey: .portBindings) ?? []
+        exposedPorts = try c.decodeIfPresent([EnginePortBinding].self, forKey: .exposedPorts) ?? []
+        run = try c.decodeIfPresent(EngineContainerRunConfig.self, forKey: .run) ?? EngineContainerRunConfig()
     }
 
     public var isActive: Bool { state == "running" || state == "paused" }

@@ -19,6 +19,16 @@ struct HostsFileTests {
         #expect(!rendered.contains(" app"))
     }
 
+    @Test func extraHostsAreAppended() {
+        var record = container("ccc012345678", name: "db", state: "created", networkID: "net-a", ip: "172.17.0.4")
+        record.run.extraHosts = ["foo.local:10.0.0.9", "host.docker.internal:host-gateway"]
+        let rendered = EngineManager.hostsFile(for: record, peers: [record]).hostsFile
+        #expect(rendered.contains("10.0.0.9"))
+        #expect(rendered.contains("foo.local"))
+        #expect(rendered.contains(NetworkGateway.gatewayAddress.description))
+        #expect(rendered.contains("host.docker.internal"))
+    }
+
     private func container(
         _ id: String,
         name: String,

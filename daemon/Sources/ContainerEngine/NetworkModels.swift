@@ -134,6 +134,7 @@ public struct EngineEndpointRequest: Sendable {
     public var network: String
     public var aliases: [String]
     public var ipv4: String?
+    public var macAddress: String?
     public var driverOpts: [String: String]
     public var gwPriority: Int
     public var linkLocalIPs: [String]
@@ -142,6 +143,7 @@ public struct EngineEndpointRequest: Sendable {
         network: String,
         aliases: [String] = [],
         ipv4: String? = nil,
+        macAddress: String? = nil,
         driverOpts: [String: String] = [:],
         gwPriority: Int = 0,
         linkLocalIPs: [String] = []
@@ -149,6 +151,7 @@ public struct EngineEndpointRequest: Sendable {
         self.network = network
         self.aliases = aliases
         self.ipv4 = ipv4
+        self.macAddress = macAddress
         self.driverOpts = driverOpts
         self.gwPriority = gwPriority
         self.linkLocalIPs = linkLocalIPs

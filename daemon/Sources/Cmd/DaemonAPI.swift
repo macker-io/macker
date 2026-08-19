@@ -251,6 +251,23 @@ enum DaemonAPI {
         return String(data: data, encoding: .utf8) ?? "{}"
     }
 
+    /// Docker `--label-file`: `KEY=value` lines and `#` comments.
+    static func labelFile(_ paths: [String]) throws -> [String: String] {
+        var labels: [String: String] = [:]
+        for path in paths {
+            let text: String
+            do {
+                text = try String(contentsOfFile: path, encoding: .utf8)
+            } catch {
+                throw CLIError.io("can't read label file \(path): \(error.localizedDescription)")
+            }
+            for (key, value) in EngineLabelFile.parse(text) {
+                labels[key] = value
+            }
+        }
+        return labels
+    }
+
     /// Docker `--env-file`: `KEY=value` lines, `#` comments, and `KEY` copied from the host environment.
     static func envFile(_ paths: [String]) throws -> [String] {
         var lines: [String] = []

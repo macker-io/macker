@@ -90,10 +90,25 @@ extension EngineManager {
         let command = (spec.entrypoint ?? image.entrypoint) + (spec.cmd ?? image.cmd)
         let env = image.env + spec.env
         let now = Date()
-        let mounts = try await resolveMounts(spec.volumeRequests)
+        let tmpfsRoot = Self.runtimeURL(id: id, root: containerRoot).appendingPathComponent("tmpfs", isDirectory: true)
+        let fromVolumes = try volumesFrom(spec.volumesFrom)
+        let mounts = try await resolveMounts(spec.volumeRequests + fromVolumes, tmpfsRoot: tmpfsRoot)
         let attached = try attachCreateEndpoints(spec)
-        let portBindings = attached.mode == "host" || attached.mode == "none" ? [] : spec.portBindings
         let exposedPorts = EnginePortBinding.merging(image.exposedPorts, spec.exposedPorts)
+        var portBindings = attached.mode == "host" || attached.mode == "none" ? [] : spec.portBindings
+        if spec.publishAllPorts, attached.mode != "host", attached.mode != "none" {
+            for port in exposedPorts where !portBindings.contains(where: { $0.dockerKey == port.dockerKey }) {
+                portBindings.append(
+                    EnginePortBinding(hostIP: "", hostPort: 0, containerPort: port.containerPort, protocolName: port.protocolName)
+                )
+            }
+        }
+        if spec.autoRemove, spec.restartPolicy.name != "no" {
+            throw EngineError.invalidArgument("Conflicting options: --restart and --rm")
+        }
+        for extra in spec.extraHosts {
+            _ = try EngineExtraHost.parse(extra)
+        }
         let record = EngineContainer(
             id: id,
             name: name,
@@ -120,7 +135,22 @@ extension EngineManager {
             mounts: mounts,
             endpoints: attached.endpoints,
             portBindings: portBindings,
-            exposedPorts: exposedPorts
+            exposedPorts: exposedPorts,
+            run: EngineContainerRunConfig(
+                extraHosts: spec.extraHosts,
+                dns: spec.dns,
+                dnsSearch: spec.dnsSearch,
+                dnsOptions: spec.dnsOptions,
+                restartPolicy: spec.restartPolicy,
+                stopSignal: spec.stopSignal,
+                stopTimeout: spec.stopTimeout,
+                privileged: spec.privileged,
+                readonlyRootfs: spec.readonlyRootfs,
+                domainname: spec.domainname,
+                groupAdd: spec.groupAdd,
+                publishAllPorts: spec.publishAllPorts,
+                healthcheck: spec.healthcheck
+            )
         )
         try persistContainer(record)
         containers[id] = record
@@ -161,15 +191,22 @@ extension EngineManager {
         return true
     }
 
-    public func stopContainer(_ idOrName: String, timeoutSeconds: Int = 10, signal: String? = nil) async throws -> Bool {
+    public func stopContainer(
+        _ idOrName: String,
+        timeoutSeconds: Int? = nil,
+        signal: String? = nil,
+        action: String = "stop"
+    ) async throws -> Bool {
         let container = try resolveContainer(idOrName)
         if container.state == "exited" || container.state == "created" {
             return false
         }
-        let parsed = signal.map { Self.parsedKillSignal($0) } ?? .term
+        let timeout = timeoutSeconds ?? (container.run.stopTimeout > 0 ? container.run.stopTimeout : 10)
+        let rawSignal = signal ?? (container.run.stopSignal.isEmpty ? nil : container.run.stopSignal)
+        let parsed = rawSignal.map { Self.parsedKillSignal($0) } ?? .term
         let code = parsed.rawValue == 9 ? 137 : 128 + Int(parsed.rawValue)
-        await stopVM(container.id, timeoutSeconds: timeoutSeconds, signal: parsed)
-        await handleVMExit(id: container.id, code: code, action: "stop")
+        await stopVM(container.id, timeoutSeconds: timeout, signal: parsed)
+        await handleVMExit(id: container.id, code: code, action: action)
         return true
     }
 
@@ -390,6 +427,26 @@ extension EngineManager {
         container.exitCode = exitCode
         container.finishedAt = Date()
         let id = container.id
+        let restart = container.run.restartPolicy.shouldRestart(
+            exitCode: exitCode,
+            action: action,
+            restartCount: container.run.restartCount
+        )
+        await publish(EngineEvent(type: "container", action: action, actorID: id, attributes: ["name": container.name]))
+        if restart {
+            container.run.restartCount += 1
+            saveContainer(container)
+            finishAttachSubscribers(id, extra: "container \(String(id.prefix(12))) \(action)\n")
+            await finishExecs(forContainer: id, code: exitCode)
+            do {
+                _ = try await startContainer(id)
+            } catch {
+                container.state = "exited"
+                saveContainer(container)
+                finishWaiters(id: id, code: exitCode)
+            }
+            return
+        }
         if container.autoRemove {
             await forgetContainer(id)
         } else {
@@ -398,7 +455,6 @@ extension EngineManager {
         finishWaiters(id: id, code: exitCode)
         finishAttachSubscribers(id, extra: "container \(String(id.prefix(12))) \(action)\n")
         await finishExecs(forContainer: id, code: exitCode)
-        await publish(EngineEvent(type: "container", action: action, actorID: id, attributes: ["name": container.name]))
     }
 
     private func finishWaiters(id: String, code: Int) {
@@ -425,7 +481,7 @@ extension EngineManager {
     public func shutdown() async {
         let ids = containers.values.filter(\.isActive).map(\.id)
         for id in ids {
-            _ = try? await stopContainer(id, timeoutSeconds: 10)
+            _ = try? await stopContainer(id, timeoutSeconds: 10, action: "shutdown")
         }
         await networkGateway.shutdown()
     }

@@ -124,6 +124,7 @@ public struct DockerContainerSummary: Encodable, Sendable {
 
 public struct DockerCreateContainerRequest: Decodable, Sendable {
     public let Hostname: String?
+    public let Domainname: String?
     public let User: String?
     public let Env: [String]?
     public let Cmd: FlexibleStringList?
@@ -135,10 +136,20 @@ public struct DockerCreateContainerRequest: Decodable, Sendable {
     public let OpenStdin: Bool?
     public let Volumes: [String: EmptyObject]?
     public let ExposedPorts: [String: EmptyObject]?
+    public let Healthcheck: Healthcheck?
     public let HostConfig: HostConfig?
     public let NetworkingConfig: NetworkingConfig?
 
     public struct EmptyObject: Decodable, Sendable {}
+
+    public struct Healthcheck: Decodable, Sendable {
+        public let Test: [String]?
+        public let Interval: Int64?
+        public let Timeout: Int64?
+        public let StartPeriod: Int64?
+        public let StartInterval: Int64?
+        public let Retries: Int?
+    }
 
     public struct HostConfig: Decodable, Sendable {
         public let Memory: Int64?
@@ -148,6 +159,25 @@ public struct DockerCreateContainerRequest: Decodable, Sendable {
         public let Binds: [String]?
         public let Mounts: [DockerMountConfig]?
         public let PortBindings: [String: [DockerPortBinding]]?
+        public let PublishAllPorts: Bool?
+        public let Privileged: Bool?
+        public let ReadonlyRootfs: Bool?
+        public let Dns: [String]?
+        public let DnsSearch: [String]?
+        public let DnsOptions: [String]?
+        public let ExtraHosts: [String]?
+        public let RestartPolicy: RestartPolicy?
+        public let StopSignal: String?
+        public let StopTimeout: Int?
+        public let GroupAdd: [String]?
+        public let VolumesFrom: [String]?
+        public let Tmpfs: [String: String]?
+        public let VolumeDriver: String?
+
+        public struct RestartPolicy: Decodable, Sendable {
+            public let Name: String?
+            public let MaximumRetryCount: Int?
+        }
     }
 
     public struct NetworkingConfig: Decodable, Sendable {
@@ -170,6 +200,7 @@ public struct DockerPortBinding: Codable, Sendable {
 public struct DockerEndpointConfig: Decodable, Sendable {
     public let Aliases: [String]?
     public let Links: [String]?
+    public let MacAddress: String?
     public let IPAMConfig: IPAMConfig?
     public let DriverOpts: [String: String]?
     public let GwPriority: Int?
@@ -248,11 +279,28 @@ public struct DockerContainerInspect: Encodable, Sendable {
         public let Memory: Int64
         public let NanoCpus: Int64
         public let AutoRemove: Bool
+        public let Privileged: Bool
+        public let ReadonlyRootfs: Bool
+        public let PublishAllPorts: Bool
+        public let Dns: [String]
+        public let DnsSearch: [String]
+        public let DnsOptions: [String]
+        public let ExtraHosts: [String]
+        public let GroupAdd: [String]
+        public let RestartPolicy: RestartPolicy
+        public let StopSignal: String
+        public let StopTimeout: Int
         public let PortBindings: [String: [DockerPortBinding]]
+
+        public struct RestartPolicy: Encodable, Sendable {
+            public let Name: String
+            public let MaximumRetryCount: Int
+        }
     }
 
     public struct Config: Encodable, Sendable {
         public let Hostname: String
+        public let Domainname: String
         public let User: String
         public let Env: [String]
         public let Cmd: [String]
@@ -262,8 +310,18 @@ public struct DockerContainerInspect: Encodable, Sendable {
         public let Tty: Bool
         public let OpenStdin: Bool
         public let ExposedPorts: [String: EmptyObject]
+        public let Healthcheck: Healthcheck?
 
         public struct EmptyObject: Encodable, Sendable {}
+
+        public struct Healthcheck: Encodable, Sendable {
+            public let Test: [String]
+            public let Interval: Int64
+            public let Timeout: Int64
+            public let StartPeriod: Int64
+            public let StartInterval: Int64
+            public let Retries: Int
+        }
     }
 
     public struct NetworkSettings: Encodable, Sendable {
@@ -306,10 +364,25 @@ public struct DockerContainerInspect: Encodable, Sendable {
             Memory: container.memory,
             NanoCpus: container.nanoCpus,
             AutoRemove: container.autoRemove,
+            Privileged: container.run.privileged,
+            ReadonlyRootfs: container.run.readonlyRootfs,
+            PublishAllPorts: container.run.publishAllPorts,
+            Dns: container.run.dns,
+            DnsSearch: container.run.dnsSearch,
+            DnsOptions: container.run.dnsOptions,
+            ExtraHosts: container.run.extraHosts,
+            GroupAdd: container.run.groupAdd,
+            RestartPolicy: .init(
+                Name: container.run.restartPolicy.name,
+                MaximumRetryCount: container.run.restartPolicy.maximumRetryCount
+            ),
+            StopSignal: container.run.stopSignal,
+            StopTimeout: container.run.stopTimeout,
             PortBindings: Self.portBindings(container.portBindings)
         )
         self.Config = .init(
             Hostname: container.hostname,
+            Domainname: container.run.domainname,
             User: container.user,
             Env: container.env,
             Cmd: container.command,
@@ -318,7 +391,17 @@ public struct DockerContainerInspect: Encodable, Sendable {
             Labels: container.labels,
             Tty: container.tty,
             OpenStdin: container.openStdin,
-            ExposedPorts: Dictionary(uniqueKeysWithValues: container.exposedPorts.map { ($0.dockerKey, .init()) })
+            ExposedPorts: Dictionary(uniqueKeysWithValues: container.exposedPorts.map { ($0.dockerKey, .init()) }),
+            Healthcheck: container.run.healthcheck.map {
+                .init(
+                    Test: $0.test,
+                    Interval: $0.intervalNanos,
+                    Timeout: $0.timeoutNanos,
+                    StartPeriod: $0.startPeriodNanos,
+                    StartInterval: $0.startIntervalNanos,
+                    Retries: $0.retries
+                )
+            }
         )
         let primary = container.endpoints.first
         self.NetworkSettings = .init(
