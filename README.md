@@ -112,7 +112,7 @@ EOF
 
 `-t` (repeatable), `-f`, `--build-arg`, `--label`, `--target`, `--no-cache`, `--pull`, and `-q` behave as usual, as do multi-stage builds, `COPY --from`, and `ADD` with a remote URL or an auto-extracted tar. Intermediate images are stored untagged, so `images -a` shows them and `builder prune` (or `image prune`) reclaims them. Because every `RUN` boots a VM, the layer cache matters: a cache key is the parent digest plus the normalized instruction, plus a content hash for `COPY` and the resolved value for `ARG`.
 
-`macker setup` aliases `docker` to `macker`, so `docker build` lands here. The official `docker` binary talking straight to `macker.sock` defaults to BuildKit on 23+ and will fail — use `macker build` or `DOCKER_BUILDKIT=0 docker build`. BuildKit-only syntax (`# syntax=`, heredocs, `RUN --mount`, `--secret`, `--ssh`, cache mounts, bake, multi-platform) is out of scope for this release; the follow-up is to reuse BuildKit plus [container-builder-shim](https://github.com/apple/container-builder-shim) and wire the host side to macker's store — see [docs/buildkit.md](docs/buildkit.md). Gaps in the classic builder are in [docs/cli-status.md](docs/cli-status.md).
+`macker setup` aliases `docker` to `macker`, so `docker build` lands here. The official `docker` binary talking straight to `macker.sock` defaults to BuildKit on 23+ and will fail — use `macker build` or `DOCKER_BUILDKIT=0 docker build`. BuildKit-only syntax (`# syntax=`, heredocs, `RUN --mount`, `--secret`, `--ssh`, cache mounts, bake, multi-platform) is out of scope for this release; the follow-up is to reuse BuildKit plus [container-builder-shim](https://github.com/apple/container-builder-shim) and wire the host side to macker's store — see [docs/buildkit.md](docs/buildkit.md). Command support and option gaps are in [docs/cli.md](docs/cli.md).
 
 ## Socket
 
@@ -165,7 +165,7 @@ vmnet NAT uses the same `com.apple.security.virtualization` entitlement as Apple
 
 ## Roadmap
 
-Daily `bridge` / `host` / `none`, plus `run -it` / `exec`, is in place. Command completeness is in [docs/cli-status.md](docs/cli-status.md). How bridge, vmnet, utun, and lwIP fit together is in [docs/networking.md](docs/networking.md).
+Daily `bridge` / `host` / `none`, plus `run -it` / `exec`, is in place. Supported commands and option completeness are in [docs/cli.md](docs/cli.md). How bridge, vmnet, utun, and lwIP fit together is in [docs/networking.md](docs/networking.md).
 
 ## Make targets
 
