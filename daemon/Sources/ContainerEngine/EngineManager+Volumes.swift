@@ -12,6 +12,9 @@ extension EngineManager {
         if let labels = filters["label"], !labels.isEmpty {
             items = items.filter { FilterMatch.labels($0.volume.labels, specs: labels) }
         }
+        if let excluded = filters["label!"], !excluded.isEmpty {
+            items = items.filter { !FilterMatch.labels($0.volume.labels, specs: excluded) }
+        }
         if let dangling = filters["dangling"], !dangling.isEmpty {
             let wantUnused = FilterMatch.isTrue(dangling)
             items = items.filter { wantUnused ? $0.refCount == 0 : $0.refCount > 0 }
@@ -85,7 +88,12 @@ extension EngineManager {
     }
 
     public func pruneVolumes(filters: [String: [String]] = [:]) async throws -> (deleted: [String], spaceReclaimed: Int64) {
-        let unused = listVolumes(filters: filters).filter { $0.refCount == 0 }
+        var filters = filters
+        let all = FilterMatch.isTrue(filters.removeValue(forKey: "all"))
+        var unused = listVolumes(filters: filters).filter { $0.refCount == 0 }
+        if !all {
+            unused = unused.filter(\.volume.anonymous)
+        }
         var deleted: [String] = []
         var reclaimed: Int64 = 0
         for item in unused {

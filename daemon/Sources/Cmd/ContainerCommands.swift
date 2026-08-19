@@ -572,8 +572,12 @@ struct Stats: ParsableCommand {
 
 struct Inspect: ParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Return low-level information on Docker objects.")
+
+    @Option(name: [.customShort("f"), .long], help: "Format output using a custom template (table, {{.Field}}, json).")
+    var format: String?
+
     @Argument var names: [String]
-    func run() throws { try Self.inspect(names, prefer: .auto) }
+    func run() throws { try Self.inspect(names, prefer: .auto, format: format) }
 
     enum Kind {
         case auto, image, container, volume, network
@@ -599,8 +603,12 @@ struct Inspect: ParsableCommand {
         }
     }
 
-    static func inspect(_ names: [String], prefer: Kind) throws {
+    static func inspect(_ names: [String], prefer: Kind, format: String? = nil) throws {
         let objects = try names.map { try fetch($0, prefer: prefer) }
+        if let format, !FormatTemplate.isBareTable(format) {
+            try FormatTemplate.print(format: format, objects: objects)
+            return
+        }
         let data = try JSONSerialization.data(withJSONObject: objects, options: [.prettyPrinted, .sortedKeys])
         if let text = String(data: data, encoding: .utf8) {
             print(text)
