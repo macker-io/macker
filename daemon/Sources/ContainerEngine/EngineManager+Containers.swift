@@ -432,27 +432,36 @@ extension EngineManager {
 
     func finish(container: inout EngineContainer, exitCode: Int, action: String) async {
         cancelHealthMonitor(container.id)
+        let id = container.id
+        await publish(EngineEvent(type: "container", action: action, actorID: id, attributes: ["name": container.name]))
+
+        // Graceful daemon exit: keep always/unless-stopped as running on disk so the next
+        // boot treats them as interrupted, not as a manual `stop`.
+        if action == "shutdown", container.run.restartPolicy.resumesAfterDaemonExit {
+            container.state = "running"
+            container.finishedAt = nil
+            saveContainer(container)
+            await teardownSession(id, extra: action, code: exitCode)
+            return
+        }
+
         container.state = "exited"
         container.exitCode = exitCode
         container.finishedAt = Date()
-        let id = container.id
         let restart = container.run.restartPolicy.shouldRestart(
             exitCode: exitCode,
             action: action,
             restartCount: container.run.restartCount
         )
-        await publish(EngineEvent(type: "container", action: action, actorID: id, attributes: ["name": container.name]))
         if restart {
             container.run.restartCount += 1
             saveContainer(container)
-            finishAttachSubscribers(id, extra: "container \(String(id.prefix(12))) \(action)\n")
-            await finishExecs(forContainer: id, code: exitCode)
+            await teardownSession(id, extra: action, code: exitCode)
             do {
                 _ = try await startContainer(id)
             } catch {
                 container.state = "exited"
                 saveContainer(container)
-                finishWaiters(id: id, code: exitCode)
             }
             return
         }
@@ -461,9 +470,13 @@ extension EngineManager {
         } else {
             saveContainer(container)
         }
-        finishWaiters(id: id, code: exitCode)
+        await teardownSession(id, extra: action, code: exitCode)
+    }
+
+    private func teardownSession(_ id: String, extra action: String, code: Int) async {
         finishAttachSubscribers(id, extra: "container \(String(id.prefix(12))) \(action)\n")
-        await finishExecs(forContainer: id, code: exitCode)
+        await finishExecs(forContainer: id, code: code)
+        finishWaiters(id: id, code: code)
     }
 
     private func finishWaiters(id: String, code: Int) {
@@ -540,25 +553,43 @@ extension EngineManager {
         return loaded
     }
 
-    static func restoreContainers(_ containers: inout [String: EngineContainer], root: URL) {
+    /// Marks leftover running containers as exited (daemon process is gone) and returns the
+    /// IDs that `--restart always` / `unless-stopped` should start after boot.
+    @discardableResult
+    static func restoreContainers(_ containers: inout [String: EngineContainer], root: URL) -> [String] {
         let now = Date()
         var removed: [String] = []
+        var restart: [String] = []
         for (id, var container) in containers {
-            guard container.isActive else { continue }
-            if container.autoRemove {
-                removed.append(id)
-                continue
+            let wasActive = container.isActive
+            if wasActive {
+                if container.autoRemove {
+                    removed.append(id)
+                    continue
+                }
+                container.state = "exited"
+                container.exitCode = 255
+                container.finishedAt = now
+                containers[id] = container
+                try? persistContainer(container, root: root)
+                removeRuntimeDirectory(id, root: root)
             }
-            container.state = "exited"
-            container.exitCode = 255
-            container.finishedAt = now
-            containers[id] = container
-            try? persistContainer(container, root: root)
-            removeRuntimeDirectory(id, root: root)
+            let hasStarted = wasActive || container.startedAt != nil
+            if container.run.restartPolicy.shouldStartAfterDaemonRestart(wasActive: wasActive, hasStarted: hasStarted) {
+                restart.append(id)
+            }
         }
         for id in removed {
             containers[id] = nil
             removeContainerFiles(id, root: root)
+        }
+        return restart.sorted()
+    }
+
+    /// Starts containers selected by ``restoreContainers(_:root:)``. Failures leave them exited.
+    public func startRestartPolicies() async {
+        for id in restartAfterDaemon {
+            _ = try? await startContainer(id)
         }
     }
 

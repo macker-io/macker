@@ -63,6 +63,8 @@ struct DaemonApp {
             }
         }
 
+        await engine.startRestartPolicies()
+
         await signals.wait()
         logger.info("shutdown signal received, stopping")
         await engine.shutdown()

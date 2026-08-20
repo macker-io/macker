@@ -34,7 +34,7 @@ CLI options are wired. `--hostname` has no short `-h` (reserved for `--help`). `
 | `--link-local-ip`                                                                           | Stored on the endpoint; unused by the dataplane                                                            |
 | `--privileged`, `--read-only`, `--init`, `--group-add`                                      | Visible on inspect (`--init` is not); guest config is unchanged                                            |
 | healthcheck                                                                                 | Probed while running; `ps` shows `(healthy)` / `(unhealthy)` / `(health: starting)`                        |
-| `--restart`                                                                                 | Crash / `always` after `stop` will start again; daemon restart does not                                    |
+| `--restart`                                                                                 | `always` / `unless-stopped` also start after daemon restart (`unless-stopped` skips a prior `stop`)        |
 | `--cpus`                                                                                    | Rounded from NanoCpus to a vCPU count                                                                      |
 | Resource / cap / device / log / ulimit / sysctl / cgroup / namespaces other than `--memory` | Accepted on the CLI; most never reach the API                                                              |
 | `--tmpfs`                                                                                   | Host directory + virtiofs, not a kernel tmpfs                                                              |

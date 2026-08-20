@@ -33,23 +33,42 @@ public struct EngineRestartPolicy: Sendable, Codable, Equatable {
         throw EngineError.invalidArgument("invalid restart policy: \(raw)")
     }
 
+    /// `always` / `unless-stopped` come back after the daemon process exits.
+    public var resumesAfterDaemonExit: Bool {
+        name == "always" || name == "unless-stopped"
+    }
+
     public func shouldRestart(exitCode: Int, action: String, restartCount: Int) -> Bool {
-        if action == "shutdown" {
+        if action == "shutdown" || Self.isUserStop(action) {
             return false
         }
         switch name {
-        case "always":
+        case "always", "unless-stopped":
             return true
-        case "unless-stopped":
-            return action != "stop" && action != "kill"
         case "on-failure":
-            if action == "stop" || action == "kill" { return false }
             guard exitCode != 0 else { return false }
             if maximumRetryCount <= 0 { return true }
             return restartCount < maximumRetryCount
         default:
             return false
         }
+    }
+
+    /// Docker daemon restart: `always` starts any container that has run; `unless-stopped`
+    /// starts only those that were still running (or paused) when the daemon died.
+    public func shouldStartAfterDaemonRestart(wasActive: Bool, hasStarted: Bool) -> Bool {
+        switch name {
+        case "always":
+            return hasStarted
+        case "unless-stopped":
+            return wasActive
+        default:
+            return false
+        }
+    }
+
+    private static func isUserStop(_ action: String) -> Bool {
+        action == "stop" || action == "kill"
     }
 }
 

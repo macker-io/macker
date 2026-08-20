@@ -40,6 +40,7 @@ public actor EngineManager {
     var waitTasks: [String: Task<Void, Never>] = [:]
     var healthTasks: [String: Task<Void, Never>] = [:]
     var guestNics: [String: [GuestNic]] = [:]
+    let restartAfterDaemon: [String]
 
     public init(storePath: URL? = nil) throws {
         let store = try ImageStore(path: storePath ?? Self.defaultStorePath)
@@ -50,7 +51,7 @@ public actor EngineManager {
         try FileManager.default.createDirectory(at: containerRoot, withIntermediateDirectories: true)
         self.containerRoot = containerRoot
         var loadedContainers = Self.loadContainers(from: containerRoot)
-        Self.restoreContainers(&loadedContainers, root: containerRoot)
+        self.restartAfterDaemon = Self.restoreContainers(&loadedContainers, root: containerRoot)
         self.containers = loadedContainers
         let volumeRoot = store.path.appendingPathComponent("volumes", isDirectory: true)
         try FileManager.default.createDirectory(at: volumeRoot, withIntermediateDirectories: true)

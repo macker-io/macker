@@ -134,7 +134,9 @@ struct ContainerOptionsTests {
         #expect(!limited.shouldRestart(exitCode: 1, action: "die", restartCount: 2))
         #expect(!limited.shouldRestart(exitCode: 0, action: "die", restartCount: 0))
         let always = try EngineRestartPolicy.parse("always")
-        #expect(always.shouldRestart(exitCode: 0, action: "stop", restartCount: 0))
+        #expect(!always.shouldRestart(exitCode: 0, action: "stop", restartCount: 0))
+        #expect(!always.shouldRestart(exitCode: 137, action: "kill", restartCount: 0))
+        #expect(always.shouldRestart(exitCode: 0, action: "die", restartCount: 0))
         #expect(!always.shouldRestart(exitCode: 0, action: "shutdown", restartCount: 0))
         let unlessStopped = try EngineRestartPolicy.parse("unless-stopped")
         #expect(!unlessStopped.shouldRestart(exitCode: 0, action: "stop", restartCount: 0))
@@ -143,8 +145,36 @@ struct ContainerOptionsTests {
         #expect(!onFailure.shouldRestart(exitCode: 137, action: "stop", restartCount: 0))
         #expect(!onFailure.shouldRestart(exitCode: 137, action: "kill", restartCount: 0))
         #expect(onFailure.shouldRestart(exitCode: 1, action: "die", restartCount: 0))
+        #expect(always.shouldStartAfterDaemonRestart(wasActive: false, hasStarted: true))
+        #expect(!always.shouldStartAfterDaemonRestart(wasActive: false, hasStarted: false))
+        #expect(unlessStopped.shouldStartAfterDaemonRestart(wasActive: true, hasStarted: true))
+        #expect(!unlessStopped.shouldStartAfterDaemonRestart(wasActive: false, hasStarted: true))
+        #expect(!onFailure.shouldStartAfterDaemonRestart(wasActive: true, hasStarted: true))
+        #expect(always.resumesAfterDaemonExit)
+        #expect(unlessStopped.resumesAfterDaemonExit)
+        #expect(!onFailure.resumesAfterDaemonExit)
         #expect(throws: EngineError.self) {
             _ = try EngineRestartPolicy.parse("maybe")
+        }
+    }
+
+    @Test func restoreSelectsAlwaysAndUnlessStopped() throws {
+        try TemporaryDirectory.with("macker-restart-restore") { dir in
+            let alwaysRun = stubRestartContainer(id: String(repeating: "1", count: 64), name: "always-run", policy: "always", state: "running", startedAt: Date())
+            let alwaysStopped = stubRestartContainer(id: String(repeating: "2", count: 64), name: "always-stop", policy: "always", state: "exited", startedAt: Date())
+            let alwaysCreated = stubRestartContainer(id: String(repeating: "3", count: 64), name: "always-new", policy: "always", state: "created", startedAt: nil)
+            let unlessRun = stubRestartContainer(id: String(repeating: "4", count: 64), name: "unless-run", policy: "unless-stopped", state: "running", startedAt: Date())
+            let unlessStopped = stubRestartContainer(id: String(repeating: "5", count: 64), name: "unless-stop", policy: "unless-stopped", state: "exited", startedAt: Date())
+            let onFailure = stubRestartContainer(id: String(repeating: "6", count: 64), name: "fail", policy: "on-failure", state: "running", startedAt: Date())
+            var containers = Dictionary(
+                uniqueKeysWithValues: [alwaysRun, alwaysStopped, alwaysCreated, unlessRun, unlessStopped, onFailure].map { ($0.id, $0) }
+            )
+            let restart = EngineManager.restoreContainers(&containers, root: dir)
+            #expect(Set(restart) == Set([alwaysRun.id, alwaysStopped.id, unlessRun.id]))
+            #expect(containers[alwaysRun.id]?.state == "exited")
+            #expect(containers[unlessRun.id]?.exitCode == 255)
+            #expect(containers[alwaysStopped.id]?.state == "exited")
+            #expect(containers[alwaysCreated.id]?.state == "created")
         }
     }
 
@@ -270,4 +300,18 @@ private func stubContainer(
         openStdin: false,
         mounts: mounts
     )
+}
+
+private func stubRestartContainer(
+    id: String,
+    name: String,
+    policy: String,
+    state: String,
+    startedAt: Date?
+) -> EngineContainer {
+    var container = stubContainer(id: id, name: name, state: state, created: Date(timeIntervalSince1970: 1))
+    container.startedAt = startedAt
+    container.finishedAt = state == "exited" ? Date(timeIntervalSince1970: 2) : nil
+    container.run.restartPolicy = EngineRestartPolicy(name: policy, maximumRetryCount: 0)
+    return container
 }
