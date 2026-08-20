@@ -29,7 +29,7 @@ CLI options are wired. `--hostname` has no short `-h` (reserved for `--help`). `
 
 | Accepted but no-op / different                                                              | Notes                                                                                                      |
 | ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `--dns`                                                                                     | Stored on inspect. Bridge still uses the gateway resolver (container-name DNS) instead of the user servers |
+| `--dns`                                                                                     | Guest still queries the gateway so container names resolve; recursion uses these servers                   |
 | `--mac-address`                                                                             | Stored on the endpoint; virtio-net overwrites it at start                                                  |
 | `--link-local-ip`                                                                           | Stored on the endpoint; unused by the dataplane                                                            |
 | `--privileged`, `--read-only`, `--init`, `--group-add`                                      | Visible on inspect (`--init` is not); guest config is unchanged                                            |

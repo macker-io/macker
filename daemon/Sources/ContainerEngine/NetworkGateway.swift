@@ -27,6 +27,9 @@ actor NetworkGateway {
         var internalNetwork: Bool
     }
 
+    /// Per-container recursive resolvers from `--dns`. Empty means ``GatewayDNS.upstream``.
+    private var dnsUpstreams: [String: [String]] = [:]
+
     private var ipam: [String: NetworkIPAM] = [:]
     private var nets: [String: EngineNetwork] = [:]
     private(set) var records: [Record] = []
@@ -114,8 +117,17 @@ actor NetworkGateway {
     }
 
     /// Drops the link but keeps IPAM leases, so a restart reuses the same addresses.
+    func setDNS(containerID: String, nameservers: [String]) {
+        dnsUpstreams[containerID] = nameservers
+    }
+
+    func dnsUpstreams(for containerID: String) -> [String] {
+        GatewayDNS.upstreams(for: dnsUpstreams[containerID] ?? [])
+    }
+
     func detach(containerID: String) {
         records.removeAll { $0.containerID == containerID }
+        dnsUpstreams[containerID] = nil
         links.removeValue(forKey: containerID)?.stop()
     }
 

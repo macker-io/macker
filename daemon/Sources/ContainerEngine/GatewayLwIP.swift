@@ -162,9 +162,10 @@ final class GatewayLwIP: GatewayForwarder, @unchecked Sendable {
         }
     }
 
-    func forwardDNS(query: Data, guestIP: GuestIPv4Address, guestPort: UInt16) {
+    func forwardDNS(query: Data, guestIP: GuestIPv4Address, guestPort: UInt16, upstreams: [String]) {
         // DNS recursion remains in NetworkGateway's existing small UDP path.
-        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(GatewayDNS.primaryUpstream), port: 53)
+        let server = upstreams.first ?? GatewayDNS.primaryUpstream
+        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(server), port: 53)
         let connection = NWConnection(to: endpoint, using: .udp)
         connection.stateUpdateHandler = { state in
             if case .ready = state { connection.send(content: query, completion: .idempotent) }

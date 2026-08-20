@@ -15,7 +15,8 @@ protocol GatewayForwarder: Sendable {
     func handleTCP(packet: IPv4Packet, segment: TCPSegment)
 
     /// Recurse a guest DNS query upstream and answer from the gateway address.
-    func forwardDNS(query: Data, guestIP: IPv4Address, guestPort: UInt16)
+    /// `upstreams` is already resolved (`GatewayDNS.upstreams(for:)`); the first reachable server is used.
+    func forwardDNS(query: Data, guestIP: IPv4Address, guestPort: UInt16, upstreams: [String])
 
     /// Guest reply that belongs to an inbound (published-port) flow.
     /// Returns false when the packet is not ours, so the caller can route it elsewhere.

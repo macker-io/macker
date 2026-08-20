@@ -45,6 +45,7 @@ extension EngineManager {
         do {
             interfaces = try await allocateInterfaces(for: &prepared)
             saveContainer(prepared)
+            await networkGateway.setDNS(containerID: prepared.id, nameservers: prepared.run.dns)
         } catch {
             await releaseInterfaces(record.id)
             throw error

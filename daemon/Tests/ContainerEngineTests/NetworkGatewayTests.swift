@@ -83,6 +83,20 @@ struct NetworkGatewayTests {
         #expect(Array(aaaaNodata.suffix(4)) == [0, 28, 0, 1])
     }
 
+    @Test func dnsUpstreamsHonorContainerServers() async {
+        #expect(GatewayDNS.upstreams(for: []) == GatewayDNS.upstream)
+        #expect(GatewayDNS.upstreams(for: ["", "  "]) == GatewayDNS.upstream)
+        #expect(GatewayDNS.upstreams(for: [" 8.8.4.4 ", "1.0.0.1"]) == ["8.8.4.4", "1.0.0.1"])
+
+        let gw = NetworkGateway()
+        await gw.setDNS(containerID: "c1", nameservers: ["8.8.4.4"])
+        #expect(await gw.dnsUpstreams(for: "c1") == ["8.8.4.4"])
+        await gw.setDNS(containerID: "c2", nameservers: [])
+        #expect(await gw.dnsUpstreams(for: "c2") == GatewayDNS.upstream)
+        await gw.detach(containerID: "c1")
+        #expect(await gw.dnsUpstreams(for: "c1") == GatewayDNS.upstream)
+    }
+
     @Test func ipv4EncodePacksLargePayloadLength() {
         let src = IPv4Address(0xAC11_0002)
         let dst = IPv4Address(0xC0A8_FF01)

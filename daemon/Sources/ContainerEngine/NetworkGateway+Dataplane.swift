@@ -117,7 +117,12 @@ extension NetworkGateway {
         }
         // `--internal` containers get no upstream recursion, only NXDOMAIN.
         if allowsOutbound(src: packet.src), question.name.contains(".") {
-            forwarder?.forwardDNS(query: datagram.payload, guestIP: packet.src, guestPort: datagram.srcPort)
+            forwarder?.forwardDNS(
+                query: datagram.payload,
+                guestIP: packet.src,
+                guestPort: datagram.srcPort,
+                upstreams: dnsUpstreams(for: containerID)
+            )
             return
         }
         replyDNS(

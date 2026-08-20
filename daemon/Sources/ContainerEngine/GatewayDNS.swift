@@ -5,10 +5,16 @@ import Foundation
 enum GatewayDNS {
     static let typeA: UInt16 = 1
     static let typeAAAA: UInt16 = 28
-    /// Resolvers for names the gateway does not own. Only the first is queried today; the guest's
-    /// `resolv.conf` points at the gateway, never at these.
+    /// Resolvers for names the gateway does not own. The guest's `resolv.conf` still points at
+    /// the gateway; these are used only when recursing. `--dns` replaces this list.
     static let upstream: [String] = ["1.1.1.1", "8.8.8.8"]
     static var primaryUpstream: String { upstream[0] }
+
+    /// Empty / invalid `--dns` falls back to ``upstream``.
+    static func upstreams(for nameservers: [String]) -> [String] {
+        let trimmed = nameservers.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        return trimmed.isEmpty ? upstream : trimmed
+    }
     struct Question: Equatable {
         var name: String
         var type: UInt16
