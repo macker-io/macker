@@ -36,6 +36,7 @@ public struct EngineImageInspect: Sendable {
     public let labels: [String: String]
     public let layers: [String]
     public let exposedPorts: [EnginePortBinding]
+    public let healthcheck: EngineHealthcheck?
 }
 
 /// One item in Docker `DELETE /images/{name}` response.

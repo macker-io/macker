@@ -19,6 +19,12 @@ extension EngineManager {
         if let statuses = filters["status"], !statuses.isEmpty {
             records = records.filter { statuses.contains($0.state) }
         }
+        if let health = filters["health"], !health.isEmpty {
+            records = records.filter { item in
+                let status = item.health?.status ?? "none"
+                return health.contains { $0 == status || ($0 == "none" && item.health == nil) }
+            }
+        }
         if let ancestors = filters["ancestor"], !ancestors.isEmpty {
             records = records.filter { item in
                 ancestors.contains { item.image.contains($0) || item.imageID.contains($0) }
@@ -149,7 +155,7 @@ extension EngineManager {
                 domainname: spec.domainname,
                 groupAdd: spec.groupAdd,
                 publishAllPorts: spec.publishAllPorts,
-                healthcheck: spec.healthcheck
+                healthcheck: EngineHealthcheck.inherit(spec.healthcheck, image: image.healthcheck)
             )
         )
         try persistContainer(record)
@@ -187,6 +193,7 @@ extension EngineManager {
         container.exitCode = 0
         saveContainer(container)
         watchVM(container.id)
+        startHealthMonitor(container.id)
         await publish(EngineEvent(type: "container", action: "start", actorID: container.id, attributes: ["name": container.name, "image": container.image]))
         return true
     }
@@ -205,6 +212,7 @@ extension EngineManager {
         let rawSignal = signal ?? (container.run.stopSignal.isEmpty ? nil : container.run.stopSignal)
         let parsed = rawSignal.map { Self.parsedKillSignal($0) } ?? .term
         let code = parsed.rawValue == 9 ? 137 : 128 + Int(parsed.rawValue)
+        cancelHealthMonitor(container.id)
         await stopVM(container.id, timeoutSeconds: timeout, signal: parsed)
         await handleVMExit(id: container.id, code: code, action: action)
         return true
@@ -423,6 +431,7 @@ extension EngineManager {
     }
 
     func finish(container: inout EngineContainer, exitCode: Int, action: String) async {
+        cancelHealthMonitor(container.id)
         container.state = "exited"
         container.exitCode = exitCode
         container.finishedAt = Date()
@@ -492,6 +501,7 @@ extension EngineManager {
     }
 
     func forgetContainer(_ id: String) async {
+        cancelHealthMonitor(id)
         await stopPortPublishers(id)
         await releaseInterfaces(id, keepAddresses: false)
         containers[id] = nil

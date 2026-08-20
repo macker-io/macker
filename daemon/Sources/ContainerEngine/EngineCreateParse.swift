@@ -86,6 +86,164 @@ public struct EngineHealthcheck: Sendable, Codable, Equatable {
         startIntervalNanos = try container.decodeIfPresent(Int64.self, forKey: .startIntervalNanos) ?? 0
         retries = try container.decodeIfPresent(Int.self, forKey: .retries) ?? 0
     }
+
+    public static let defaultIntervalNanos: Int64 = 30_000_000_000
+    public static let defaultTimeoutNanos: Int64 = 30_000_000_000
+    public static let defaultStartIntervalNanos: Int64 = 5_000_000_000
+    public static let defaultRetries = 3
+    public static let maxLogEntries = 5
+    public static let maxOutputBytes = 4096
+
+    public var isDisabled: Bool {
+        test.isEmpty || test.first?.uppercased() == "NONE"
+    }
+
+    public var command: [String]? {
+        guard !isDisabled else { return nil }
+        if test.first == "CMD-SHELL" {
+            return ["/bin/sh", "-c", test.dropFirst().joined(separator: " ")]
+        }
+        if test.first == "CMD" {
+            let args = Array(test.dropFirst())
+            return args.isEmpty ? nil : args
+        }
+        return test
+    }
+
+    public var interval: TimeInterval {
+        Double(intervalNanos > 0 ? intervalNanos : Self.defaultIntervalNanos) / 1_000_000_000
+    }
+
+    public var timeout: TimeInterval {
+        Double(timeoutNanos > 0 ? timeoutNanos : Self.defaultTimeoutNanos) / 1_000_000_000
+    }
+
+    public var startPeriod: TimeInterval {
+        Double(max(startPeriodNanos, 0)) / 1_000_000_000
+    }
+
+    public var startInterval: TimeInterval {
+        Double(startIntervalNanos > 0 ? startIntervalNanos : Self.defaultStartIntervalNanos) / 1_000_000_000
+    }
+
+    public var retryLimit: Int {
+        retries > 0 ? retries : Self.defaultRetries
+    }
+
+    var commitConfig: CommitHealthcheck {
+        CommitHealthcheck(
+            Test: test,
+            Interval: intervalNanos == 0 ? nil : intervalNanos,
+            Timeout: timeoutNanos == 0 ? nil : timeoutNanos,
+            StartPeriod: startPeriodNanos == 0 ? nil : startPeriodNanos,
+            StartInterval: startIntervalNanos == 0 ? nil : startIntervalNanos,
+            Retries: retries == 0 ? nil : retries
+        )
+    }
+
+    /// `HEALTHCHECK [OPTIONS] CMD ...` / `HEALTHCHECK NONE`.
+    public static func parseDockerfile(arguments: String, flags: DockerfileFlags = DockerfileFlags()) throws -> EngineHealthcheck {
+        let rest = arguments.trimmingCharacters(in: .whitespaces)
+        if rest.uppercased() == "NONE" {
+            return EngineHealthcheck(test: ["NONE"])
+        }
+        guard rest.uppercased().hasPrefix("CMD") else {
+            throw EngineError.invalidArgument("HEALTHCHECK requires CMD or NONE")
+        }
+        let body = String(rest.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+        let test: [String]
+        if body.hasPrefix("[") {
+            test = ["CMD"] + (try parseJSONArray(body))
+        } else {
+            guard !body.isEmpty else {
+                throw EngineError.invalidArgument("HEALTHCHECK CMD requires a command")
+            }
+            test = ["CMD-SHELL", body]
+        }
+        return EngineHealthcheck(
+            test: test,
+            intervalNanos: try nanos(flags["interval"]),
+            timeoutNanos: try nanos(flags["timeout"]),
+            startPeriodNanos: try nanos(flags["start-period"]),
+            startIntervalNanos: try nanos(flags["start-interval"]),
+            retries: flags["retries"].flatMap(Int.init) ?? 0
+        )
+    }
+
+    public static func inherit(_ specified: EngineHealthcheck?, image: EngineHealthcheck?) -> EngineHealthcheck? {
+        if let specified {
+            return specified.isDisabled ? nil : specified
+        }
+        guard let image, !image.isDisabled else { return nil }
+        return image
+    }
+
+    private static func nanos(_ raw: String?) throws -> Int64 {
+        guard let raw, !raw.isEmpty else { return 0 }
+        guard let duration = ISO8601.parseGoDuration(raw) else {
+            throw EngineError.invalidArgument("invalid duration: \(raw)")
+        }
+        return Int64(duration * 1_000_000_000)
+    }
+
+    private static func parseJSONArray(_ raw: String) throws -> [String] {
+        guard let data = raw.data(using: .utf8),
+            let values = try? JSONDecoder().decode([String].self, from: data)
+        else {
+            throw EngineError.invalidArgument("HEALTHCHECK CMD JSON array is invalid")
+        }
+        return values
+    }
+}
+
+public struct EngineHealthLog: Sendable, Codable, Equatable {
+    public var start: Date
+    public var end: Date
+    public var exitCode: Int
+    public var output: String
+
+    public init(start: Date, end: Date, exitCode: Int, output: String) {
+        self.start = start
+        self.end = end
+        self.exitCode = exitCode
+        self.output = output
+    }
+}
+
+public struct EngineHealthState: Sendable, Codable, Equatable {
+    public var status: String
+    public var failingStreak: Int
+    public var log: [EngineHealthLog]
+
+    public init(status: String = "starting", failingStreak: Int = 0, log: [EngineHealthLog] = []) {
+        self.status = status
+        self.failingStreak = failingStreak
+        self.log = log
+    }
+
+    /// Applies one probe. Failures during `startPeriod` do not count toward `unhealthy`.
+    public mutating func apply(exitCode: Int, startedAt: Date, spec: EngineHealthcheck, now: Date = Date()) {
+        let succeeded = exitCode == 0
+        let inStart = now.timeIntervalSince(startedAt) < spec.startPeriod
+        if succeeded {
+            failingStreak = 0
+            status = "healthy"
+            return
+        }
+        if inStart {
+            status = "starting"
+            return
+        }
+        failingStreak += 1
+        status = failingStreak >= spec.retryLimit ? "unhealthy" : "starting"
+    }
+
+    public mutating func append(_ entry: EngineHealthLog) {
+        log.append(entry)
+        if log.count > EngineHealthcheck.maxLogEntries {
+            log.removeFirst(log.count - EngineHealthcheck.maxLogEntries)
+        }
+    }
 }
 
 public struct EngineContainerRunConfig: Sendable, Codable, Equatable {

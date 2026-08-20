@@ -224,7 +224,8 @@ extension EngineManager {
             workingDir: config?.config?.workingDir ?? "",
             labels: config?.config?.labels ?? [:],
             layers: config?.rootfs.diffIDs ?? [],
-            exposedPorts: await Self.exposedPorts(of: image, platform: platform)
+            exposedPorts: await Self.exposedPorts(of: image, platform: platform),
+            healthcheck: await Self.healthcheck(of: image, platform: platform)
         )
     }
 
@@ -433,6 +434,26 @@ extension EngineManager {
             }
         }
         return ports
+    }
+
+    /// Docker stores `Healthcheck` on the image config; OCI ImageConfig drops that field.
+    static func healthcheck(of image: Containerization.Image, platform: Platform) async -> EngineHealthcheck? {
+        guard let manifest = try? await image.manifest(for: platform),
+            let content = try? await image.getContent(digest: manifest.config.digest),
+            let blob: ImageExposedPortsBlob = try? content.decode(),
+            let raw = blob.config?.Healthcheck
+        else {
+            return nil
+        }
+        let parsed = EngineHealthcheck(
+            test: raw.Test ?? [],
+            intervalNanos: raw.Interval ?? 0,
+            timeoutNanos: raw.Timeout ?? 0,
+            startPeriodNanos: raw.StartPeriod ?? 0,
+            startIntervalNanos: raw.StartInterval ?? 0,
+            retries: raw.Retries ?? 0
+        )
+        return parsed.isDisabled ? nil : parsed
     }
 
     public func imageHistory(name: String, platform rawPlatform: String? = nil) async throws -> [EngineImageHistoryItem] {
@@ -869,8 +890,17 @@ private struct ImageExposedPortsBlob: Decodable {
 
     struct Config: Decodable {
         var ExposedPorts: [String: Empty]?
+        var Healthcheck: Healthcheck?
 
         struct Empty: Decodable {}
+        struct Healthcheck: Decodable {
+            var Test: [String]?
+            var Interval: Int64?
+            var Timeout: Int64?
+            var StartPeriod: Int64?
+            var StartInterval: Int64?
+            var Retries: Int?
+        }
     }
 }
 

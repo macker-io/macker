@@ -190,11 +190,12 @@ public struct EngineContainer: Sendable, Codable {
     public var portBindings: [EnginePortBinding] = []
     public var exposedPorts: [EnginePortBinding] = []
     public var run: EngineContainerRunConfig = EngineContainerRunConfig()
+    public var health: EngineHealthState?
 
     enum CodingKeys: String, CodingKey {
         case id, name, image, imageID, command, env, workingDir, user, hostname, labels
         case state, created, startedAt, finishedAt, exitCode, autoRemove, memory, nanoCpus
-        case networkMode, tty, openStdin, mounts, endpoints, portBindings, exposedPorts, run
+        case networkMode, tty, openStdin, mounts, endpoints, portBindings, exposedPorts, run, health
     }
 
     public init(
@@ -224,7 +225,8 @@ public struct EngineContainer: Sendable, Codable {
         endpoints: [EngineEndpoint] = [],
         portBindings: [EnginePortBinding] = [],
         exposedPorts: [EnginePortBinding] = [],
-        run: EngineContainerRunConfig = EngineContainerRunConfig()
+        run: EngineContainerRunConfig = EngineContainerRunConfig(),
+        health: EngineHealthState? = nil
     ) {
         self.id = id
         self.name = name
@@ -253,6 +255,7 @@ public struct EngineContainer: Sendable, Codable {
         self.portBindings = portBindings
         self.exposedPorts = exposedPorts
         self.run = run
+        self.health = health
     }
 
     public init(from decoder: Decoder) throws {
@@ -283,6 +286,7 @@ public struct EngineContainer: Sendable, Codable {
         portBindings = try c.decodeIfPresent([EnginePortBinding].self, forKey: .portBindings) ?? []
         exposedPorts = try c.decodeIfPresent([EnginePortBinding].self, forKey: .exposedPorts) ?? []
         run = try c.decodeIfPresent(EngineContainerRunConfig.self, forKey: .run) ?? EngineContainerRunConfig()
+        health = try c.decodeIfPresent(EngineHealthState.self, forKey: .health)
     }
 
     public var isActive: Bool { state == "running" || state == "paused" }
@@ -295,7 +299,7 @@ public struct EngineContainer: Sendable, Codable {
         case "created":
             return "Created"
         case "running":
-            return "Up \(Self.humanDuration(since: startedAt ?? created))"
+            return "Up \(Self.humanDuration(since: startedAt ?? created))\(Self.healthSuffix(health?.status))"
         case "paused":
             return "Up \(Self.humanDuration(since: startedAt ?? created)) (Paused)"
         case "dead":
@@ -324,6 +328,15 @@ public struct EngineContainer: Sendable, Codable {
             exitCode: exitCode,
             mounts: mounts
         )
+    }
+
+    static func healthSuffix(_ status: String?) -> String {
+        switch status {
+        case "healthy": return " (healthy)"
+        case "unhealthy": return " (unhealthy)"
+        case "starting": return " (health: starting)"
+        default: return ""
+        }
     }
 
     static func humanDuration(since date: Date) -> String {

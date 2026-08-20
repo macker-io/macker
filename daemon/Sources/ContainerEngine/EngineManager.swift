@@ -38,6 +38,7 @@ public actor EngineManager {
     var containerManager: ContainerManager?
     var vms: [String: LinuxContainer] = [:]
     var waitTasks: [String: Task<Void, Never>] = [:]
+    var healthTasks: [String: Task<Void, Never>] = [:]
     var guestNics: [String: [GuestNic]] = [:]
 
     public init(storePath: URL? = nil) throws {

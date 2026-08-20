@@ -272,6 +272,20 @@ public struct DockerContainerInspect: Encodable, Sendable {
         public let Error: String
         public let StartedAt: String
         public let FinishedAt: String
+        public let Health: Health?
+
+        public struct Health: Encodable, Sendable {
+            public let Status: String
+            public let FailingStreak: Int
+            public let Log: [Log]
+
+            public struct Log: Encodable, Sendable {
+                public let Start: String
+                public let End: String
+                public let ExitCode: Int
+                public let Output: String
+            }
+        }
     }
 
     public struct HostConfig: Encodable, Sendable {
@@ -353,7 +367,21 @@ public struct DockerContainerInspect: Encodable, Sendable {
             ExitCode: container.exitCode,
             Error: "",
             StartedAt: container.startedAt.map { iso.string(from: $0) } ?? "0001-01-01T00:00:00Z",
-            FinishedAt: container.finishedAt.map { iso.string(from: $0) } ?? "0001-01-01T00:00:00Z"
+            FinishedAt: container.finishedAt.map { iso.string(from: $0) } ?? "0001-01-01T00:00:00Z",
+            Health: container.health.map { health in
+                .init(
+                    Status: health.status,
+                    FailingStreak: health.failingStreak,
+                    Log: health.log.map {
+                        .init(
+                            Start: iso.string(from: $0.start),
+                            End: iso.string(from: $0.end),
+                            ExitCode: $0.exitCode,
+                            Output: $0.output
+                        )
+                    }
+                )
+            }
         )
         self.Image = container.imageID
         self.Name = "/\(container.name)"

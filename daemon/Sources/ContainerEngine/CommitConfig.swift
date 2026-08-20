@@ -80,6 +80,16 @@ struct CommitRuntimeConfig: Codable, Sendable {
     var Shell: [String]?
     var ExposedPorts: [String: CommitEmpty]?
     var Volumes: [String: CommitEmpty]?
+    var Healthcheck: CommitHealthcheck?
+}
+
+struct CommitHealthcheck: Codable, Sendable {
+    var Test: [String]?
+    var Interval: Int64?
+    var Timeout: Int64?
+    var StartPeriod: Int64?
+    var StartInterval: Int64?
+    var Retries: Int?
 }
 
 struct CommitRootFS: Codable, Sendable {
@@ -213,9 +223,27 @@ enum CommitConfig {
             config.WorkingDir = rest
         case "VOLUME":
             config.Volumes = merge(config.Volumes ?? [:], try parseVolume(rest))
+        case "HEALTHCHECK":
+            config.Healthcheck = try parseHealthcheck(rest)
         default:
             throw EngineError.invalidArgument("unsupported Dockerfile instruction: \(name)")
         }
+    }
+
+    private static func parseHealthcheck(_ rest: String) throws -> CommitHealthcheck {
+        var flags = DockerfileFlags()
+        var body = rest.trimmingCharacters(in: .whitespaces)
+        while body.hasPrefix("--") {
+            guard let token = body.split(whereSeparator: \.isWhitespace).first.map(String.init) else { break }
+            let raw = String(token.dropFirst(2))
+            if let equals = raw.firstIndex(of: "=") {
+                flags.values[String(raw[..<equals])] = String(raw[raw.index(after: equals)...])
+            } else {
+                flags.values[raw] = ""
+            }
+            body = String(body.dropFirst(token.count)).trimmingCharacters(in: .whitespaces)
+        }
+        return try EngineHealthcheck.parseDockerfile(arguments: body, flags: flags).commitConfig
     }
 
     private static func envKey(_ item: String) -> String {

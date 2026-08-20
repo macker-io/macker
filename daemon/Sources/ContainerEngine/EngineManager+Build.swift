@@ -388,6 +388,15 @@ extension EngineManager {
     }
 
     private func applyMetadata(_ instruction: DockerfileInstruction, state: inout BuildStageState) throws {
+        if instruction.name == "HEALTHCHECK" {
+            var runtime = state.runtime
+            runtime.Healthcheck = try EngineHealthcheck.parseDockerfile(
+                arguments: instruction.arguments,
+                flags: instruction.flags
+            ).commitConfig
+            state.config.config = runtime
+            return
+        }
         guard instruction.flags.isEmpty else {
             throw EngineError.invalidArgument(
                 "\(instruction.name) does not support --\(instruction.flags.names.joined(separator: " --"))"

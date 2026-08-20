@@ -85,7 +85,7 @@ public struct Dockerfile: Sendable, Equatable {
     /// Instructions that change the image config only, never the filesystem.
     static let metadataInstructions: Set<String> = [
         "ENV", "LABEL", "CMD", "ENTRYPOINT", "EXPOSE", "USER", "WORKDIR", "VOLUME",
-        "STOPSIGNAL", "SHELL", "ARG", "MAINTAINER",
+        "STOPSIGNAL", "SHELL", "ARG", "MAINTAINER", "HEALTHCHECK",
     ]
 
     static let supportedInstructions: Set<String> = metadataInstructions.union(["FROM", "RUN", "COPY", "ADD"])
@@ -93,11 +93,11 @@ public struct Dockerfile: Sendable, Equatable {
     /// Instructions whose arguments are expanded with build args / ENV at build time.
     /// `RUN`, `CMD` and `ENTRYPOINT` are left to the guest shell, matching Docker.
     static let expandedInstructions: Set<String> = [
-        "ADD", "COPY", "ENV", "EXPOSE", "FROM", "LABEL", "STOPSIGNAL", "USER", "VOLUME", "WORKDIR", "ARG",
+        "ADD", "COPY", "ENV", "EXPOSE", "FROM", "LABEL", "STOPSIGNAL", "USER", "VOLUME", "WORKDIR", "ARG", "HEALTHCHECK",
     ]
 
     /// Only these read leading `--flag` tokens; elsewhere `--` is part of the command.
-    static let flaggedInstructions: Set<String> = ["FROM", "COPY", "ADD", "RUN"]
+    static let flaggedInstructions: Set<String> = ["FROM", "COPY", "ADD", "RUN", "HEALTHCHECK"]
 
     public init(globalArgs: [DockerfileArg] = [], stages: [DockerfileStage] = []) {
         self.globalArgs = globalArgs
