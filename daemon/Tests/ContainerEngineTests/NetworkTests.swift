@@ -109,8 +109,3 @@ struct NetworkTests {
     }
 }
 
-private func withEngine(_ body: (EngineManager) async throws -> Void) async throws {
-    try await TemporaryDirectory.with("macker-network") { dir in
-        try await body(try EngineManager(storePath: dir))
-    }
-}

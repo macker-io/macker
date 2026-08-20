@@ -387,11 +387,122 @@ struct SystemDf: ParsableCommand {
     }
 }
 
+struct SystemPrune: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "prune",
+        abstract: "Remove unused data."
+    )
+
+    @Flag(name: [.customShort("a"), .long], help: "Remove all unused images, not just dangling ones.")
+    var all = false
+
+    @Flag(name: [.customShort("f"), .long], help: "Do not prompt for confirmation.")
+    var force = false
+
+    @Option(help: "Provide filter values (e.g. 'until=24h').")
+    var filter: [String] = []
+
+    @Flag(help: "Prune anonymous unused volumes.")
+    var volumes = false
+
+    func run() throws {
+        var warning = "This will remove:\n"
+        warning += "  - all stopped containers\n"
+        warning += "  - all networks not used by at least one container\n"
+        warning += all
+            ? "  - all images without at least one container associated to them\n"
+            : "  - all dangling images\n"
+        if volumes {
+            warning += "  - all anonymous volumes not used by at least one container\n"
+        }
+        warning += "  - all unused build cache"
+        guard Prompt.confirm(warning, force: force) else { return }
+
+        var reclaimed: Int64 = 0
+        reclaimed += try pruneContainers()
+        try pruneNetworks()
+        reclaimed += try pruneImages()
+        if volumes {
+            reclaimed += try pruneVolumes()
+        }
+        reclaimed += try pruneBuildCache()
+        print("Total reclaimed space: \(Format.size(reclaimed))")
+    }
+
+    private func pruneContainers() throws -> Int64 {
+        let result = try DaemonAPI.decode(
+            ContainerPruneResponse.self,
+            from: DaemonAPI.post(try DaemonAPI.filteredPath("/containers/prune", filters: filter))
+        )
+        if let ids = result.containersDeleted, !ids.isEmpty {
+            print("Deleted Containers:")
+            for id in ids { print(id) }
+        }
+        return result.spaceReclaimed ?? 0
+    }
+
+    private func pruneNetworks() throws {
+        let result = try DaemonAPI.decode(
+            NetworkPruneResponse.self,
+            from: DaemonAPI.post(try DaemonAPI.filteredPath("/networks/prune", filters: filter))
+        )
+        if let names = result.networksDeleted, !names.isEmpty {
+            print("Deleted Networks:")
+            for name in names { print(name) }
+        }
+    }
+
+    private func pruneImages() throws -> Int64 {
+        let filters = all ? filter + ["dangling=false"] : filter
+        let result = try DaemonAPI.decode(
+            ImagePruneResponse.self,
+            from: DaemonAPI.post(try DaemonAPI.filteredPath("/images/prune", filters: filters), timeoutSeconds: 120)
+        )
+        if let items = result.imagesDeleted, !items.isEmpty {
+            print("Deleted Images:")
+            for item in items {
+                if let untagged = item.untagged { print("untagged: \(untagged)") }
+                if let deleted = item.deleted { print("deleted: \(deleted)") }
+            }
+        }
+        return result.spaceReclaimed ?? 0
+    }
+
+    private func pruneVolumes() throws -> Int64 {
+        let result = try DaemonAPI.decode(
+            VolumePruneResponse.self,
+            from: DaemonAPI.post(try DaemonAPI.filteredPath("/volumes/prune", filters: filter), timeoutSeconds: 120)
+        )
+        if let names = result.volumesDeleted, !names.isEmpty {
+            print("Deleted Volumes:")
+            for name in names { print(name) }
+        }
+        return result.spaceReclaimed ?? 0
+    }
+
+    private func pruneBuildCache() throws -> Int64 {
+        var extra: [String] = []
+        if all { extra.append("all=1") }
+        let result = try DaemonAPI.decode(
+            BuildPruneResponse.self,
+            from: DaemonAPI.post(
+                try DaemonAPI.filteredPath("/build/prune", filters: filter, extra: extra),
+                timeoutSeconds: 300
+            )
+        )
+        if let ids = result.cachesDeleted, !ids.isEmpty {
+            print("Deleted build cache objects:")
+            for id in ids { print(id) }
+        }
+        return result.spaceReclaimed ?? 0
+    }
+}
+
 struct SystemGroup: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "system",
         abstract: "Manage Macker.",
-        subcommands: [SystemDf.self, Info.self, Events.self]
+        subcommands: [SystemDf.self, Info.self, Events.self, SystemPrune.self]
     )
 }
 

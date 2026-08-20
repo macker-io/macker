@@ -127,8 +127,3 @@ private func collect(_ stream: AsyncStream<EngineEvent>) async -> [EngineEvent] 
     return events
 }
 
-private func withEngine(_ body: (EngineManager) async throws -> Void) async throws {
-    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("macker-events-\(UUID().uuidString)")
-    defer { try? FileManager.default.removeItem(at: dir) }
-    try await body(try EngineManager(storePath: dir))
-}

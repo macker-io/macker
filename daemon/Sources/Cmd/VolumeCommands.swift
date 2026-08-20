@@ -144,18 +144,17 @@ struct VolumePrune: ParsableCommand {
             : "This will remove all unused anonymous local volumes."
         guard Prompt.confirm(warning, force: force) else { return }
         let filters = all ? filter + ["all=true"] : filter
-        var path = "/volumes/prune"
-        if !filters.isEmpty {
-            path += "?filters=\(DaemonAPI.query(try DaemonAPI.filtersJSON(filters)))"
-        }
-        let result = try DaemonAPI.decode(VolumePruneResponse.self, from: DaemonAPI.post(path, timeoutSeconds: 120))
-        if let names = result.VolumesDeleted, !names.isEmpty {
+        let result = try DaemonAPI.decode(
+            VolumePruneResponse.self,
+            from: DaemonAPI.post(try DaemonAPI.filteredPath("/volumes/prune", filters: filters), timeoutSeconds: 120)
+        )
+        if let names = result.volumesDeleted, !names.isEmpty {
             print("Deleted Volumes:")
             for name in names {
                 print(name)
             }
         }
-        print("Total reclaimed space: \(Format.size(result.SpaceReclaimed ?? 0))")
+        print("Total reclaimed space: \(Format.size(result.spaceReclaimed ?? 0))")
     }
 }
 
@@ -185,7 +184,3 @@ private struct VolumeCreateBody: Encodable {
     var DriverOpts: [String: String]?
 }
 
-private struct VolumePruneResponse: Decodable {
-    var VolumesDeleted: [String]?
-    var SpaceReclaimed: Int64?
-}

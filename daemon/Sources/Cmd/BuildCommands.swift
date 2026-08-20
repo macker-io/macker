@@ -263,20 +263,19 @@ struct BuilderPrune: ParsableCommand {
             ? "This will remove all unused build cache."
             : "This will remove all dangling build cache."
         guard Prompt.confirm(warning, force: force) else { return }
-        var query: [String] = []
-        if all { query.append("all=1") }
-        if !filter.isEmpty {
-            query.append("filters=\(DaemonAPI.query(try DaemonAPI.filtersJSON(filter)))")
-        }
-        let path = query.isEmpty ? "/build/prune" : "/build/prune?\(query.joined(separator: "&"))"
+        var extra: [String] = []
+        if all { extra.append("all=1") }
         let result = try DaemonAPI.decode(
             BuildPruneResponse.self,
-            from: DaemonAPI.post(path, timeoutSeconds: 300)
+            from: DaemonAPI.post(
+                try DaemonAPI.filteredPath("/build/prune", filters: filter, extra: extra),
+                timeoutSeconds: 300
+            )
         )
-        for id in result.CachesDeleted ?? [] {
+        for id in result.cachesDeleted ?? [] {
             print(id)
         }
-        print("Total reclaimed space: \(Format.size(result.SpaceReclaimed ?? 0))")
+        print("Total reclaimed space: \(Format.size(result.spaceReclaimed ?? 0))")
     }
 }
 
@@ -290,7 +289,3 @@ private struct BuildLine: Decodable {
     }
 }
 
-private struct BuildPruneResponse: Decodable {
-    var CachesDeleted: [String]?
-    var SpaceReclaimed: Int64?
-}

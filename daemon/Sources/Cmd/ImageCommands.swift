@@ -205,8 +205,8 @@ struct Rmi: ParsableCommand {
             let response = try DaemonAPI.requireOK(DaemonAPI.delete("/images/\(DaemonAPI.path(image))\(suffix)"))
             guard let items = try? JSONDecoder().decode([ImageDeleteItem].self, from: response.body) else { continue }
             for item in items {
-                if let untagged = item.Untagged { print("Untagged: \(untagged)") }
-                if let deleted = item.Deleted { print("Deleted: \(deleted)") }
+                if let untagged = item.untagged { print("Untagged: \(untagged)") }
+                if let deleted = item.deleted { print("Deleted: \(deleted)") }
             }
         }
     }
@@ -231,9 +231,12 @@ struct History: ParsableCommand {
     @Flag(help: "Don't truncate output.")
     var noTrunc = false
 
-    // Human-readable sizes/dates are always on; accepted for Docker compatibility.
-    @Flag(name: [.customShort("H"), .long], help: "Print sizes and dates in human readable format (default true).")
-    var human = false
+    @Flag(
+        name: [.customShort("H"), .long],
+        inversion: .prefixedNo,
+        help: "Print sizes and dates in human readable format (default true)."
+    )
+    var human = true
 
     @Flag(name: [.customShort("q"), .long], help: "Only show image IDs.")
     var quiet = false
@@ -263,10 +266,10 @@ struct History: ParsableCommand {
         let rows: [[(String, String)]] = items.map { item in
             [
                 ("ID", noTrunc ? item.Id : Format.shortID(item.Id)),
-                ("CreatedSince", Format.timeAgo(item.Created)),
+                ("CreatedSince", human ? Format.timeAgo(item.Created) : String(item.Created)),
                 ("CreatedAt", Format.createdAt(item.Created)),
                 ("CreatedBy", Format.createdBy(item.CreatedBy ?? "", truncating: !noTrunc)),
-                ("Size", Format.size(item.Size)),
+                ("Size", human ? Format.size(item.Size) : String(item.Size)),
                 ("Comment", item.Comment ?? ""),
             ]
         }
@@ -342,19 +345,18 @@ struct ImagePrune: ParsableCommand {
             : "This will remove all dangling images."
         guard Prompt.confirm(warning, force: force) else { return }
         let filters = all ? filter + ["dangling=false"] : filter
-        var path = "/images/prune"
-        if !filters.isEmpty {
-            path += "?filters=\(DaemonAPI.query(try DaemonAPI.filtersJSON(filters)))"
-        }
-        let result = try DaemonAPI.decode(ImagePruneResponse.self, from: DaemonAPI.post(path, timeoutSeconds: 120))
-        if let items = result.ImagesDeleted, !items.isEmpty {
+        let result = try DaemonAPI.decode(
+            ImagePruneResponse.self,
+            from: DaemonAPI.post(try DaemonAPI.filteredPath("/images/prune", filters: filters), timeoutSeconds: 120)
+        )
+        if let items = result.imagesDeleted, !items.isEmpty {
             print("Deleted Images:")
             for item in items {
-                if let untagged = item.Untagged { print("untagged: \(untagged)") }
-                if let deleted = item.Deleted { print("deleted: \(deleted)") }
+                if let untagged = item.untagged { print("untagged: \(untagged)") }
+                if let deleted = item.deleted { print("deleted: \(deleted)") }
             }
         }
-        print("Total reclaimed space: \(Format.size(result.SpaceReclaimed ?? 0))")
+        print("Total reclaimed space: \(Format.size(result.spaceReclaimed ?? 0))")
     }
 }
 
@@ -542,16 +544,6 @@ private struct ImageSummary: Decodable {
     var RepoDigests: [String]?
     var Created: Int64?
     var Size: Int64
-}
-
-private struct ImageDeleteItem: Decodable {
-    var Untagged: String?
-    var Deleted: String?
-}
-
-private struct ImagePruneResponse: Decodable {
-    var ImagesDeleted: [ImageDeleteItem]?
-    var SpaceReclaimed: Int64?
 }
 
 private struct HistoryItem: Decodable {

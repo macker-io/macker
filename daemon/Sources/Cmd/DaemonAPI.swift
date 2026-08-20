@@ -251,6 +251,15 @@ enum DaemonAPI {
         return String(data: data, encoding: .utf8) ?? "{}"
     }
 
+    /// `base` plus optional `filters=` and extra query items.
+    static func filteredPath(_ base: String, filters: [String] = [], extra: [String] = []) throws -> String {
+        var items = extra
+        if !filters.isEmpty {
+            items.append("filters=\(query(try filtersJSON(filters)))")
+        }
+        return items.isEmpty ? base : "\(base)?\(items.joined(separator: "&"))"
+    }
+
     /// Docker `--label-file`: `KEY=value` lines and `#` comments.
     static func labelFile(_ paths: [String]) throws -> [String: String] {
         var labels: [String: String] = [:]

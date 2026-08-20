@@ -10,7 +10,6 @@ Networking model: [networking.md](networking.md). BuildKit follow-up: [buildkit.
 
 ## Commands
 
-
 | Area      | Commands                                                                                                                                                                                                                                 |
 | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Container | `run`, `create`, `start`, `stop`, `restart`, `kill`, `rm`, `pause`, `unpause`, `rename`, `logs`, `wait`, `top`, `stats`, `attach`, `exec`, `cp`, `export`, `diff`, `commit`, `port`, `ps` / `container ls`, `inspect`, `container prune` |
@@ -18,19 +17,15 @@ Networking model: [networking.md](networking.md). BuildKit follow-up: [buildkit.
 | Builder   | `build`, `builder prune`                                                                                                                                                                                                                 |
 | Volume    | `volume ls`, `create`, `inspect`, `rm`, `prune`                                                                                                                                                                                          |
 | Network   | `network ls`, `create`, `inspect`, `rm`, `connect`, `disconnect`, `prune`                                                                                                                                                                |
-| System    | `version`, `info`, `events`, `system df`, `login`, `logout`                                                                                                                                                                              |
+| System    | `version`, `info`, `events`, `system df`, `system prune`, `login`, `logout`                                                                                                                                                              |
 
-
-Options are complete (no extra notes below) for: `pause`, `unpause`, `rename`, `wait`, `diff`, `port`, `attach`, `login`, `logout`, `kill`, `export`, `cp`, `rmi`, `search`, `save`, `image prune`, `version`, `info`, `events`, `system df`, `volume ls`, `volume create`, `volume inspect`, `volume rm`, `volume prune`, `network ls`, `network inspect`, `network rm`, `network disconnect`, `network prune`, `start`, `stop`, `restart`, `exec`, `inspect`, `top`, `container prune`.
+Options are complete (no extra notes below) for: `pause`, `unpause`, `rename`, `wait`, `diff`, `port`, `attach`, `login`, `logout`, `kill`, `export`, `cp`, `rmi`, `search`, `save`, `image prune`, `version`, `info`, `events`, `system df`, `system prune`, `volume ls`, `volume create`, `volume inspect`, `volume rm`, `volume prune`, `network ls`, `network inspect`, `network rm`, `network disconnect`, `network prune`, `start`, `stop`, `restart`, `exec`, `inspect`, `top`, `container prune`, `history`.
 
 ## Container
-
-
 
 ### `run` / `create`
 
 CLI options are wired. `--hostname` has no short `-h` (reserved for `--help`). `--ip6` is rejected. `--network container:` / `macvlan` / `ipvlan` are not implemented. `--volume-driver` must be `local`. `--rm` and `--restart` conflict. Foreground `--rm` is removed by the CLI after wait; `-d --rm` uses engine AutoRemove.
-
 
 | Accepted but no-op / different                                                              | Notes                                                                                                      |
 | ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
@@ -44,9 +39,6 @@ CLI options are wired. `--hostname` has no short `-h` (reserved for `--help`). `
 | Resource / cap / device / log / ulimit / sysctl / cgroup / namespaces other than `--memory` | Accepted on the CLI; most never reach the API                                                              |
 | `--tmpfs`                                                                                   | Host directory + virtiofs, not a kernel tmpfs                                                              |
 | Windows: `--cpu-count`, `--cpu-percent`, `--io-maxbandwidth`, `--io-maxiops`                | Not implemented                                                                                            |
-
-
-
 
 ### `ps` / `container ls`
 
@@ -70,8 +62,6 @@ No BLOCK I/O column (guest `/proc` has none). `--format` `.BlockIO` is always `0
 
 ## Image
 
-
-
 ### `pull`
 
 `--disable-content-trust` is accepted and unused (no content trust).
@@ -83,10 +73,6 @@ No BLOCK I/O column (guest `/proc` has none). `--format` `.BlockIO` is always `0
 ### `images` / `image ls`
 
 Missing: `--tree`.
-
-### `history`
-
-`-H` / `--human` is accepted and unused (output is always human-readable; no raw mode).
 
 ### `load`
 
@@ -100,7 +86,6 @@ Missing: `--tree`.
 
 Classic builder only (`DOCKER_BUILDKIT=0`), not buildx. CLI options are wired. `--iidfile`, `--network` (`container:` / `macvlan` / `ipvlan` rejected), `--add-host`, and `-m` / `--memory` apply to each `RUN` MicroVM.
 
-
 | Accepted but no-op / different                                                                                                   | Notes                                                          |
 | -------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
 | `--cache-from`                                                                                                                   | Classic builder does not use external cache sources            |
@@ -111,7 +96,6 @@ Classic builder only (`DOCKER_BUILDKIT=0`), not buildx. CLI options are wired. `
 | `--platform`                                                                                                                     | Accepted; builds host only, with a warning                     |
 | Context as a URL or `-` (stdin)                                                                                                  | Local directory only                                           |
 
-
 BuildKit syntax (`# syntax=`, heredocs, `RUN --mount`, `--secret`, `--ssh`, bake, multi-platform) is out of scope; see [buildkit.md](buildkit.md).
 
 ### `builder prune`
@@ -119,8 +103,6 @@ BuildKit syntax (`# syntax=`, heredocs, `RUN --mount`, `--secret`, `--ssh`, bake
 Shipped: `-f`, `-a` / `--all`, `--filter` (`until`, `id`). `--all` also drops dangling digest images that are not in the cache index. Accepted but unused: `--keep-storage`, `--reserved-space`, `--max-used-space`, `--min-free-space`.
 
 ## Network
-
-
 
 ### `network create`
 

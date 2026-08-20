@@ -282,12 +282,11 @@ struct NetworkPrune: ParsableCommand {
         else {
             return
         }
-        var path = "/networks/prune"
-        if !filter.isEmpty {
-            path += "?filters=\(DaemonAPI.query(try DaemonAPI.filtersJSON(filter)))"
-        }
-        let result = try DaemonAPI.decode(NetworkPruneResponse.self, from: DaemonAPI.post(path))
-        if let names = result.NetworksDeleted, !names.isEmpty {
+        let result = try DaemonAPI.decode(
+            NetworkPruneResponse.self,
+            from: DaemonAPI.post(try DaemonAPI.filteredPath("/networks/prune", filters: filter))
+        )
+        if let names = result.networksDeleted, !names.isEmpty {
             print("Deleted Networks:")
             for name in names {
                 print(name)
@@ -374,6 +373,3 @@ private struct NetworkDisconnectBody: Encodable {
     var Force: Bool
 }
 
-private struct NetworkPruneResponse: Decodable {
-    var NetworksDeleted: [String]?
-}
