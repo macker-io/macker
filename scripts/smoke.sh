@@ -1,6 +1,6 @@
 #!/bin/sh
 # Isolated daemon smoke: UNIX socket, CLI control plane, then alpine pull + MicroVM
-# `run --rm` and `exec`. Set SMOKE_SKIP_VM=1 to stop after the control plane.
+# `run --rm`, `exec`, and `-p`. Set SMOKE_SKIP_VM=1 to stop after the control plane.
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 cd "$ROOT"
@@ -15,7 +15,8 @@ fi
 
 STORE="$(mktemp -d "${TMPDIR:-/tmp}/macker-smoke.XXXXXX")"
 SOCK="${STORE}/macker.sock"
-NAME="smokevm"
+NAME="smokewww"
+HOST_PORT=18080
 cleanup() {
   if [ -n "${MACKER:-}" ] && [ -n "${MACKER_HOST:-}" ]; then
     "$MACKER" rm -f "$NAME" >/dev/null 2>&1 || true
@@ -27,6 +28,25 @@ cleanup() {
   rm -rf "$STORE"
 }
 trap cleanup EXIT INT TERM
+
+wait_running() {
+  container="$1"
+  i=0
+  while :; do
+    st="$("$MACKER" inspect -f '{{.State.Status}}' --type container "$container" 2>/dev/null || true)"
+    st=$(printf '%s' "$st" | tr -d '\r\n')
+    if [ "$st" = "running" ]; then
+      return 0
+    fi
+    i=$((i + 1))
+    if [ "$i" -ge 150 ]; then
+      echo "container $container did not reach running (last status: ${st:-empty})" >&2
+      "$MACKER" inspect --type container "$container" >&2 || true
+      return 1
+    fi
+    sleep 2
+  done
+}
 
 "$MACKERD" --store "$STORE" &
 PID=$!
@@ -66,27 +86,30 @@ echo "run --rm alpine:latest echo smoke-ok…"
 run_out="$("$MACKER" run --rm alpine:latest echo smoke-ok)"
 printf '%s\n' "$run_out" | grep -q smoke-ok
 
-echo "run -d + exec…"
-"$MACKER" run -d --name "$NAME" alpine:latest sleep 300 >/dev/null
+echo "pulling nginx:alpine…"
+"$MACKER" pull nginx:alpine
 
-i=0
-while :; do
-  st="$("$MACKER" inspect -f '{{.State.Status}}' --type container "$NAME" 2>/dev/null || true)"
-  st=$(printf '%s' "$st" | tr -d '\r\n')
-  if [ "$st" = "running" ]; then
-    break
-  fi
-  i=$((i + 1))
-  if [ "$i" -ge 150 ]; then
-    echo "container $NAME did not reach running (last status: ${st:-empty})" >&2
-    "$MACKER" inspect --type container "$NAME" >&2 || true
-    exit 1
-  fi
-  sleep 2
-done
+echo "run -d -p + exec + curl…"
+"$MACKER" run -d --name "$NAME" -p "127.0.0.1:${HOST_PORT}:80" nginx:alpine >/dev/null
+wait_running "$NAME"
 
 exec_out="$("$MACKER" exec "$NAME" echo exec-ok)"
 printf '%s\n' "$exec_out" | grep -q exec-ok
+
+i=0
+while :; do
+  if body=$(curl -fsS --max-time 2 "http://127.0.0.1:${HOST_PORT}/" 2>/dev/null); then
+    printf '%s\n' "$body" | grep -qi nginx && break
+  fi
+  i=$((i + 1))
+  if [ "$i" -ge 30 ]; then
+    echo "curl http://127.0.0.1:${HOST_PORT}/ did not return nginx" >&2
+    "$MACKER" port "$NAME" >&2 || true
+    exit 1
+  fi
+  sleep 1
+done
+
 "$MACKER" rm -f "$NAME" >/dev/null
 
 echo "smoke ok store=$STORE"

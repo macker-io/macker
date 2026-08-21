@@ -22,7 +22,7 @@ help:
 	@echo "sync-runtime          show or apply pins (ARGS='containerization 0.42.0')"
 	@echo "sync-runtime-latest   bump pins to GitHub latest stable"
 	@echo "test                  run unit tests (no MicroVM)"
-	@echo "smoke                 signed daemon + alpine MicroVM (SMOKE_SKIP_VM=1 skips run/exec)"
+	@echo "smoke                 signed daemon + alpine run/exec/-p (SMOKE_SKIP_VM=1 skips VMs)"
 
 app:
 	swift build --product mackerd
