@@ -1,6 +1,6 @@
 #!/bin/sh
-# Isolated daemon smoke: UNIX socket + CLI control plane. Does not use the
-# default store. Optional `MACKER_SMOKE_PULL=1` pulls alpine and `run --rm`.
+# Isolated daemon smoke: UNIX socket, CLI control plane, then alpine pull + MicroVM
+# `run --rm` and `exec`. Set SMOKE_SKIP_VM=1 to stop after the control plane.
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 cd "$ROOT"
@@ -15,7 +15,11 @@ fi
 
 STORE="$(mktemp -d "${TMPDIR:-/tmp}/macker-smoke.XXXXXX")"
 SOCK="${STORE}/macker.sock"
+NAME="smokevm"
 cleanup() {
+  if [ -n "${MACKER:-}" ] && [ -n "${MACKER_HOST:-}" ]; then
+    "$MACKER" rm -f "$NAME" >/dev/null 2>&1 || true
+  fi
   if [ -n "${PID:-}" ]; then
     kill "$PID" 2>/dev/null || true
     wait "$PID" 2>/dev/null || true
@@ -50,9 +54,39 @@ export MACKER_HOST="unix://${SOCK}"
 "$MACKER" network ls | grep -q bridge
 "$MACKER" images >/dev/null
 
-if [ "${MACKER_SMOKE_PULL:-}" = "1" ]; then
-  "$MACKER" pull alpine:latest
-  "$MACKER" run --rm alpine:latest echo smoke-ok
+if [ "${SMOKE_SKIP_VM:-}" = "1" ]; then
+  echo "smoke ok (no MicroVM) store=$STORE"
+  exit 0
 fi
+
+echo "pulling alpine:latest…"
+"$MACKER" pull alpine:latest
+
+echo "run --rm alpine:latest echo smoke-ok…"
+run_out="$("$MACKER" run --rm alpine:latest echo smoke-ok)"
+printf '%s\n' "$run_out" | grep -q smoke-ok
+
+echo "run -d + exec…"
+"$MACKER" run -d --name "$NAME" alpine:latest sleep 300 >/dev/null
+
+i=0
+while :; do
+  st="$("$MACKER" inspect -f '{{.State.Status}}' --type container "$NAME" 2>/dev/null || true)"
+  st=$(printf '%s' "$st" | tr -d '\r\n')
+  if [ "$st" = "running" ]; then
+    break
+  fi
+  i=$((i + 1))
+  if [ "$i" -ge 150 ]; then
+    echo "container $NAME did not reach running (last status: ${st:-empty})" >&2
+    "$MACKER" inspect --type container "$NAME" >&2 || true
+    exit 1
+  fi
+  sleep 2
+done
+
+exec_out="$("$MACKER" exec "$NAME" echo exec-ok)"
+printf '%s\n' "$exec_out" | grep -q exec-ok
+"$MACKER" rm -f "$NAME" >/dev/null
 
 echo "smoke ok store=$STORE"

@@ -188,7 +188,7 @@ Run these from the repo root. Prefer Make over calling `scripts/` directly.
 | `sync-runtime` | Show or set pins (`ARGS='containerization 0.42.0'`) |
 | `sync-runtime-latest` | Bump pins to GitHub latest stable |
 | `test` | Run unit tests (CLI + REST + engine; no MicroVM) |
-| `smoke` | Signed daemon + CLI against an isolated `--store` (optional `MACKER_SMOKE_PULL=1`) |
+| `smoke` | Signed daemon + alpine `run --rm` / `exec` on an isolated `--store` (`SMOKE_SKIP_VM=1` skips the MicroVM) |
 
 ```bash
 VERSION=1.2.3 make dist
