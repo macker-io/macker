@@ -1,4 +1,4 @@
-.PHONY: help app macker helper sign run fetch-runtime reset cli dist install bundle pkg check sync-runtime sync-runtime-latest
+.PHONY: help app macker helper sign run fetch-runtime reset cli dist install bundle pkg check sync-runtime sync-runtime-latest test smoke
 
 # VERSION=1.2.3 make dist
 # VERSION=1.2.3 make pkg
@@ -21,6 +21,8 @@ help:
 	@echo "check                 fail if RuntimePin and the submodule tag differ"
 	@echo "sync-runtime          show or apply pins (ARGS='containerization 0.42.0')"
 	@echo "sync-runtime-latest   bump pins to GitHub latest stable"
+	@echo "test                  run unit tests (no MicroVM)"
+	@echo "smoke                 signed daemon + CLI over an isolated store"
 
 app:
 	swift build --product mackerd
@@ -67,3 +69,9 @@ sync-runtime:
 
 sync-runtime-latest:
 	./scripts/sync-runtime.sh --latest
+
+test:
+	swift test
+
+smoke: app macker
+	./scripts/smoke.sh

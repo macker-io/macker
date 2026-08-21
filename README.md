@@ -119,7 +119,7 @@ The daemon listens on:
 
 `~/Library/Application Support/io.macker.daemon/macker.sock`
 
-Override with `--socket`, `MACKER_HOST`, or `DOCKER_HOST` (`unix://…` or an absolute path). Only one daemon may own the store (`daemon.lock` under Application Support); a second daemon exits with an explicit already-running error.
+Override with `--socket`, `--store` (isolated data dir; socket defaults to `<store>/macker.sock`), `MACKER_HOST`, or `DOCKER_HOST` (`unix://…` or an absolute path). Only one daemon may own a given store (`daemon.lock` in that directory); a second daemon exits with an explicit already-running error.
 
 `/var/run/docker.sock` is Docker’s name. Only `macker setup` (optionally `--force`) creates a symlink to `macker.sock`. Leave it alone if it already points at Podman or Docker Desktop.
 
@@ -187,6 +187,8 @@ Run these from the repo root. Prefer Make over calling `scripts/` directly.
 | `check` | Fail if `RuntimePin.json` ≠ containerization submodule tag |
 | `sync-runtime` | Show or set pins (`ARGS='containerization 0.42.0'`) |
 | `sync-runtime-latest` | Bump pins to GitHub latest stable |
+| `test` | Run unit tests (CLI + REST + engine; no MicroVM) |
+| `smoke` | Signed daemon + CLI against an isolated `--store` (optional `MACKER_SMOKE_PULL=1`) |
 
 ```bash
 VERSION=1.2.3 make dist

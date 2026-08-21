@@ -108,6 +108,14 @@ struct NetworkCreate: ParsableCommand {
     @Argument var name: String?
 
     func run() throws {
+        let created = try DaemonAPI.decode(
+            NetworkCreateResponse.self,
+            from: DaemonAPI.post("/networks/create", body: try encodedBody())
+        )
+        print(created.Id)
+    }
+
+    func encodedBody() throws -> Data {
         let subnet = try Self.ipv4Value(subnet, what: "subnet")
         let gateway = try Self.ipv4Value(gateway, what: "gateway")
         let ipRange = try Self.ipv4Value(ipRange, what: "ip-range")
@@ -138,14 +146,10 @@ struct NetworkCreate: ParsableCommand {
             Options: NetworkKeyValues.map(opt),
             IPAM: ipam
         )
-        let created = try DaemonAPI.decode(
-            NetworkCreateResponse.self,
-            from: DaemonAPI.post("/networks/create", body: JSONEncoder().encode(body))
-        )
-        print(created.Id)
+        return try JSONEncoder().encode(body)
     }
 
-    private static func ipv4Value(_ values: [String], what: String) throws -> String? {
+    static func ipv4Value(_ values: [String], what: String) throws -> String? {
         if values.contains(where: { $0.contains(":") }) {
             throw CLIError.io("IPv6 \(what) is not supported")
         }

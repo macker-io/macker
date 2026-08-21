@@ -200,7 +200,7 @@ enum FormatTemplate {
         return text
     }
 
-    private static func render(_ template: Template, row: [(String, String)]) throws -> String {
+    static func render(_ template: Template, row: [(String, String)]) throws -> String {
         try template.parts.map { part in
             switch part {
             case .literal(let text):

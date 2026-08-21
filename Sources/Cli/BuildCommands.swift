@@ -108,6 +108,27 @@ struct Build: ParsableCommand {
     func run() throws {
         let context = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
         let dockerfile = try Self.contextRelativeDockerfile(file, context: context)
+        let query = try encodedQuery(dockerfile: dockerfile)
+
+        let imageID: String?
+        do {
+            imageID = try TemporaryDirectory.with("macker-build-context") { work in
+                let archive = work.appendingPathComponent("context.tar")
+                try BuildContext.pack(root: context, dockerfile: dockerfile, into: archive)
+                return try Self.stream(path: "/build?\(query)", context: archive)
+            }
+        } catch {
+            try DaemonAPI.exitWithDaemonError(error)
+        }
+        if let iidfile, !iidfile.isEmpty {
+            guard let imageID, !imageID.isEmpty else {
+                throw CLIError.io("build did not produce an image ID")
+            }
+            try imageID.write(toFile: iidfile, atomically: true, encoding: .utf8)
+        }
+    }
+
+    func encodedQuery(dockerfile: String) throws -> String {
         if let network, let mode = EngineManager.unsupportedBuildNetwork(network) {
             throw CLIError.io("network mode \(mode) is not implemented")
         }
@@ -143,23 +164,7 @@ struct Build: ParsableCommand {
         if let encoded = Self.encodeMap(label) {
             query.append("labels=\(DaemonAPI.query(encoded))")
         }
-
-        let imageID: String?
-        do {
-            imageID = try TemporaryDirectory.with("macker-build-context") { work in
-                let archive = work.appendingPathComponent("context.tar")
-                try BuildContext.pack(root: context, dockerfile: dockerfile, into: archive)
-                return try Self.stream(path: "/build?\(query.joined(separator: "&"))", context: archive)
-            }
-        } catch {
-            try DaemonAPI.exitWithDaemonError(error)
-        }
-        if let iidfile, !iidfile.isEmpty {
-            guard let imageID, !imageID.isEmpty else {
-                throw CLIError.io("build did not produce an image ID")
-            }
-            try imageID.write(toFile: iidfile, atomically: true, encoding: .utf8)
-        }
+        return query.joined(separator: "&")
     }
 
     /// `RUN` boots a MicroVM per step, so the client must not time out like a pull does.

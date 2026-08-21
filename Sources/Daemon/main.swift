@@ -11,10 +11,11 @@ struct DaemonApp {
         var logger = Logger(label: "io.macker.daemon")
         logger.logLevel = .info
 
-        let socketPath = parseSocketPath(from: CommandLine.arguments)
+        let storeDirectory = parseStoreDirectory(from: CommandLine.arguments)
+        let socketPath = parseSocketPath(from: CommandLine.arguments, store: storeDirectory)
         let instanceLock: DaemonInstanceLock
         do {
-            instanceLock = try DaemonInstanceLock.acquire()
+            instanceLock = try DaemonInstanceLock.acquire(storeDirectory: storeDirectory)
         } catch {
             logger.error("\(error.localizedDescription)")
             exit(1)
@@ -22,7 +23,7 @@ struct DaemonApp {
 
         let engine: EngineManager
         do {
-            engine = try EngineManager()
+            engine = try EngineManager(storePath: storeDirectory)
         } catch {
             logger.error("failed to initialize image store: \(error.localizedDescription)")
             instanceLock.release()
@@ -73,15 +74,36 @@ struct DaemonApp {
         instanceLock.release()
     }
 
-    /// `--socket <path>` or `--socket=<path>`; else `MACKER_HOST` / `DOCKER_HOST`; else the store socket.
-    static func parseSocketPath(from arguments: [String]) -> String {
-        if let index = arguments.firstIndex(of: "--socket"), arguments.indices.contains(index + 1) {
+    /// `--store <dir>` or `--store=<dir>`; else the default Application Support store.
+    static func parseStoreDirectory(from arguments: [String]) -> URL {
+        if let raw = option("store", from: arguments) {
+            return URL(fileURLWithPath: raw, isDirectory: true)
+        }
+        return DaemonPaths.storeDirectory
+    }
+
+    /// `--socket <path>` or `--socket=<path>`; else `MACKER_HOST` / `DOCKER_HOST` when using the
+    /// default store; else `macker.sock` under `--store`.
+    static func parseSocketPath(from arguments: [String], store: URL) -> String {
+        if let socket = option("socket", from: arguments) {
+            return socket
+        }
+        if store.standardizedFileURL.path == DaemonPaths.storeDirectory.standardizedFileURL.path {
+            return DaemonPaths.socketPath()
+        }
+        return DaemonPaths.socketFile(in: store)
+    }
+
+    static func option(_ name: String, from arguments: [String]) -> String? {
+        let flag = "--\(name)"
+        if let index = arguments.firstIndex(of: flag), arguments.indices.contains(index + 1) {
             return arguments[index + 1]
         }
-        if let combined = arguments.first(where: { $0.hasPrefix("--socket=") }) {
-            return String(combined.dropFirst("--socket=".count))
+        let prefix = "\(flag)="
+        if let combined = arguments.first(where: { $0.hasPrefix(prefix) }) {
+            return String(combined.dropFirst(prefix.count))
         }
-        return DaemonPaths.socketPath()
+        return nil
     }
 }
 

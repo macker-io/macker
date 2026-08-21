@@ -1,8 +1,10 @@
 import ArgumentParser
 import ContainerEngine
 
-struct Macker: ParsableCommand {
-    static let configuration = CommandConfiguration(
+public struct Macker: ParsableCommand {
+    public init() {}
+
+    public static let configuration = CommandConfiguration(
         commandName: Invocation.commandName,
         abstract: "CLI for the Macker daemon (Docker-compatible client).",
         discussion: """

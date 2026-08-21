@@ -373,11 +373,41 @@ struct Create: ParsableCommand {
         }
     }
 
+    struct EncodedRequest {
+        var path: String
+        var body: Data
+    }
+
     static func submit(_ options: ContainerCreateOptions, autoRemove: Bool) throws -> String {
+        let encoded = try encodeRequest(options, autoRemove: autoRemove)
+        try Self.pullIfNeeded(options)
+        let created: CreateResponse
+        if let existing = try Self.create(path: encoded.path, payload: encoded.body) {
+            created = existing
+        } else {
+            if (options.pull ?? "missing") == "never" {
+                throw CLIError.http("No such image: \(options.image)")
+            }
+            let (name, tag) = DaemonAPI.splitReference(options.image)
+            print("Unable to find image '\(name):\(tag)' locally")
+            try Pull.submit(options.image, platform: options.platform, quiet: options.quiet)
+            guard let retry = try Self.create(path: encoded.path, payload: encoded.body) else {
+                throw CLIError.http("No such image: \(options.image)")
+            }
+            created = retry
+        }
+        for warning in created.Warnings ?? [] {
+            fputs("WARNING: \(warning)\n", stderr)
+        }
+        return created.Id
+    }
+
+    static func encodeRequest(_ options: ContainerCreateOptions, autoRemove: Bool) throws -> EncodedRequest {
         try rejectRestartWithAutoRemove(restart: options.restart, autoRemove: autoRemove)
         if let ip6 = options.ip6, !ip6.isEmpty {
             throw CLIError.io("IPv6 is not implemented")
         }
+        try validatePull(options.pull)
         let env = try DaemonAPI.envFile(options.envFile) + options.env
         var labels = try DaemonAPI.labelFile(options.labelFile)
         for item in options.label {
@@ -435,41 +465,25 @@ struct Create: ParsableCommand {
             HostConfig: host,
             NetworkingConfig: networks.endpoints.isEmpty ? nil : .init(EndpointsConfig: networks.endpoints)
         )
-        try Self.pullIfNeeded(options)
         var path = "/containers/create"
         if let name = options.name, !name.isEmpty {
             path += "?name=\(DaemonAPI.query(name))"
         }
-        let payload = try JSONEncoder().encode(body)
-        let created: CreateResponse
-        if let existing = try Self.create(path: path, payload: payload) {
-            created = existing
-        } else {
-            if (options.pull ?? "missing") == "never" {
-                throw CLIError.http("No such image: \(options.image)")
-            }
-            let (name, tag) = DaemonAPI.splitReference(options.image)
-            print("Unable to find image '\(name):\(tag)' locally")
-            try Pull.submit(options.image, platform: options.platform, quiet: options.quiet)
-            guard let retry = try Self.create(path: path, payload: payload) else {
-                throw CLIError.http("No such image: \(options.image)")
-            }
-            created = retry
+        return EncodedRequest(path: path, body: try JSONEncoder().encode(body))
+    }
+
+    private static func validatePull(_ pull: String?) throws {
+        switch pull ?? "missing" {
+        case "always", "missing", "never":
+            return
+        default:
+            throw CLIError.io("invalid --pull value \(pull ?? "")")
         }
-        for warning in created.Warnings ?? [] {
-            fputs("WARNING: \(warning)\n", stderr)
-        }
-        return created.Id
     }
 
     private static func pullIfNeeded(_ options: ContainerCreateOptions) throws {
-        switch options.pull ?? "missing" {
-        case "always":
+        if (options.pull ?? "missing") == "always" {
             try Pull.submit(options.image, platform: options.platform, quiet: options.quiet)
-        case "missing", "never":
-            return
-        default:
-            throw CLIError.io("invalid --pull value \(options.pull ?? "")")
         }
     }
 

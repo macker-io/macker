@@ -10,6 +10,11 @@ public enum DaemonPaths: Sendable {
 
     /// UNIX socket the daemon listens on. Always `macker.sock`, not Docker's name.
     public static var defaultSocketPath: String {
+        socketFile(in: storeDirectory)
+    }
+
+    /// `macker.sock` under a store directory (including an isolated `--store`).
+    public static func socketFile(in storeDirectory: URL) -> String {
         storeDirectory.appendingPathComponent("macker.sock").path
     }
 

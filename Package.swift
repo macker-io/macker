@@ -33,13 +33,19 @@ let package = Package(
             ],
             exclude: ["Daemon.entitlements"]
         ),
-        .executableTarget(
-            name: "Cli",
+        .target(
+            name: "CliCore",
             dependencies: [
                 "ContainerEngine",
                 "HelperSupport",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
-            ]
+            ],
+            path: "Sources/Cli"
+        ),
+        .executableTarget(
+            name: "Cli",
+            dependencies: ["CliCore"],
+            path: "Sources/CliMain"
         ),
         .target(name: "HelperSupport"),
         .executableTarget(
@@ -119,6 +125,15 @@ let package = Package(
                 "HelperSupport",
                 .product(name: "ContainerizationOCI", package: "containerization"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
+            ]
+        ),
+        .testTarget(
+            name: "CliTests",
+            dependencies: [
+                "CliCore",
+                "ContainerEngine",
+                "DockerAPIAdapter",
+                .product(name: "Logging", package: "swift-log"),
             ]
         ),
         .target(

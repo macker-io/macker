@@ -1,1 +1,0 @@
-Macker.main()
