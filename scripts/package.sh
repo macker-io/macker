@@ -8,26 +8,26 @@ cd "$DAEMON_ROOT"
 
 MODE="${1:-app}"
 case "$MODE" in
-  app|pkg) ;;
-  *)
-    echo "usage: $0 [app|pkg]" >&2
-    exit 1
-    ;;
+app | pkg) ;;
+*)
+	echo "usage: $0 [app|pkg]" >&2
+	exit 1
+	;;
 esac
 
 VERSION="$(product_version)"
 CONTAINERIZATION="$(pin_field containerization)"
 
-swift build --product App -c release
+swift build --product mackerd -c release
 swift build --product macker -c release
 swift build --product macker-helper -c release
 BIN_DIR="$(swift_bin_dir release)"
-APP_BIN="$BIN_DIR/App"
+APP_BIN="$BIN_DIR/mackerd"
 CLI_BIN="$BIN_DIR/macker"
 HELPER_BIN="$BIN_DIR/macker-helper"
 
 if ! is_regular_file .runtime/vmlinux || ! is_regular_file .runtime/initfs.ext4; then
-  ./scripts/fetch-runtime.sh .runtime
+	./scripts/fetch-runtime.sh .runtime
 fi
 
 APP="dist/MackerDaemon.app"
@@ -40,13 +40,14 @@ cp "$HELPER_BIN" "$APP/Contents/MacOS/macker-helper"
 cp .runtime/vmlinux .runtime/initfs.ext4 "$APP/Contents/Resources/runtime/"
 cp "$PIN" "$APP/Contents/Resources/runtime/RuntimePin.json"
 
-# SPM resource bundles (RuntimePin.json via Bundle.module) live next to the binary.
+# SPM Bundle.module looks at Foo.app/<name>.bundle; resourceURL is Contents/Resources.
 for bundle in "$BIN_DIR"/*.bundle; do
-  [ -e "$bundle" ] || continue
-  cp -R "$bundle" "$APP/Contents/Resources/"
+	[ -e "$bundle" ] || continue
+	cp -R "$bundle" "$APP/"
+	cp -R "$bundle" "$APP/Contents/Resources/"
 done
 
-cat > "$APP/Contents/Info.plist" <<EOF
+cat >"$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -82,12 +83,12 @@ codesign --force --sign - --timestamp=none --entitlements="$ENTITLEMENTS" "$APP"
 echo "app $APP ($VERSION, containerization $CONTAINERIZATION)"
 
 if [ "$MODE" = "pkg" ]; then
-  mkdir -p dist
-  pkgbuild \
-    --component "$APP" \
-    --install-location /Applications \
-    --identifier io.macker.daemon \
-    --version "$VERSION" \
-    dist/MackerDaemon.pkg
-  echo "pkg dist/MackerDaemon.pkg ($VERSION)"
+	mkdir -p dist
+	pkgbuild \
+		--component "$APP" \
+		--install-location /Applications \
+		--identifier io.macker.daemon \
+		--version "$VERSION" \
+		dist/MackerDaemon.pkg
+	echo "pkg dist/MackerDaemon.pkg ($VERSION)"
 fi

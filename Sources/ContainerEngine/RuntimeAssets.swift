@@ -17,7 +17,7 @@ public struct RuntimeStatus: Sendable {
 /// Resolves (and optionally downloads) the Linux kernel and vminit initfs.
 ///
 /// The daemon store (`~/Library/Application Support/io.macker.daemon`) is the
-/// runtime location. `daemon/.runtime` is only a packaging cache.
+/// runtime location. `.runtime` is only a packaging cache.
 enum RuntimeAssets {
     static var vminitReference: String {
         let env = ProcessInfo.processInfo.environment["MACKER_VMINIT"]?

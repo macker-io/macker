@@ -1,7 +1,7 @@
 import ArgumentParser
 import Darwin
 import Foundation
-import MackerHelperSupport
+import HelperSupport
 
 struct HelperGroup: ParsableCommand {
     static let configuration = CommandConfiguration(

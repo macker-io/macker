@@ -9,9 +9,9 @@
 #   ./scripts/sync-runtime.sh --latest containerization
 #   ./scripts/sync-runtime.sh --latest kata
 set -euo pipefail
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-PIN="$ROOT/daemon/Sources/ContainerEngine/RuntimePin.json"
-SUB="$ROOT/daemon/Vendor/containerization"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+PIN="$ROOT/Sources/ContainerEngine/RuntimePin.json"
+SUB="$ROOT/Vendor/containerization"
 MODULES="$ROOT/.gitmodules"
 CONTAINERIZATION_REPO="https://github.com/apple/containerization.git"
 KATA_REPO="https://github.com/kata-containers/kata-containers.git"
@@ -25,9 +25,9 @@ pin_field() {
 }
 
 submodule_tag() {
-  git -C "$SUB" describe --tags --exact-match HEAD 2>/dev/null \
-    || git -C "$SUB" describe --tags --always HEAD 2>/dev/null \
-    || echo "missing"
+  git -C "$SUB" describe --tags --exact-match HEAD 2>/dev/null ||
+    git -C "$SUB" describe --tags --always HEAD 2>/dev/null ||
+    echo "missing"
 }
 
 write_pin_field() {
@@ -97,27 +97,27 @@ PY
 
 latest_from_git() {
   repo="$1"
-  git ls-remote --tags --refs "$repo" \
-    | awk '{print $2}' \
-    | sed 's|refs/tags/||; s|^v||' \
-    | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
-    | sort -V \
-    | tail -1
+  git ls-remote --tags --refs "$repo" |
+    awk '{print $2}' |
+    sed 's|refs/tags/||; s|^v||' |
+    grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' |
+    sort -V |
+    tail -1
 }
 
 latest_tag() {
   component="$1"
   case "$component" in
-    containerization)
-      latest_from_api apple/containerization || latest_from_git "$CONTAINERIZATION_REPO"
-      ;;
-    kata)
-      latest_from_api kata-containers/kata-containers || latest_from_git "$KATA_REPO"
-      ;;
-    *)
-      echo "unknown component: $component" >&2
-      exit 1
-      ;;
+  containerization)
+    latest_from_api apple/containerization || latest_from_git "$CONTAINERIZATION_REPO"
+    ;;
+  kata)
+    latest_from_api kata-containers/kata-containers || latest_from_git "$KATA_REPO"
+    ;;
+  *)
+    echo "unknown component: $component" >&2
+    exit 1
+    ;;
   esac
 }
 
@@ -202,38 +202,38 @@ VERSION="${2:-}"
 
 if [ "$LATEST" -eq 1 ]; then
   case "$COMPONENT" in
-    "")
-      apply_containerization "$(latest_tag containerization)"
-      apply_kata "$(latest_tag kata)"
-      ;;
-    containerization|kata)
-      if [ -n "$VERSION" ]; then
-        usage
-        exit 1
-      fi
-      "apply_$COMPONENT" "$(latest_tag "$COMPONENT")"
-      ;;
-    *)
+  "")
+    apply_containerization "$(latest_tag containerization)"
+    apply_kata "$(latest_tag kata)"
+    ;;
+  containerization | kata)
+    if [ -n "$VERSION" ]; then
       usage
       exit 1
-      ;;
+    fi
+    "apply_$COMPONENT" "$(latest_tag "$COMPONENT")"
+    ;;
+  *)
+    usage
+    exit 1
+    ;;
   esac
   echo "commit RuntimePin.json, .gitmodules, and the submodule gitlink when ready"
   exit 0
 fi
 
 case "$COMPONENT" in
-  containerization|kata)
-    if [ -z "$VERSION" ]; then
-      echo "missing version (or use --latest $COMPONENT)" >&2
-      usage
-      exit 1
-    fi
-    "apply_$COMPONENT" "$VERSION"
-    echo "commit RuntimePin.json, .gitmodules, and the submodule gitlink when ready"
-    ;;
-  *)
+containerization | kata)
+  if [ -z "$VERSION" ]; then
+    echo "missing version (or use --latest $COMPONENT)" >&2
     usage
     exit 1
-    ;;
+  fi
+  "apply_$COMPONENT" "$VERSION"
+  echo "commit RuntimePin.json, .gitmodules, and the submodule gitlink when ready"
+  ;;
+*)
+  usage
+  exit 1
+  ;;
 esac

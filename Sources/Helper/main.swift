@@ -1,6 +1,6 @@
 import Darwin
 import Foundation
-import MackerHelperSupport
+import HelperSupport
 
 signal(SIGPIPE, SIG_IGN)
 let args = Array(CommandLine.arguments.dropFirst())

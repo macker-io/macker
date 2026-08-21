@@ -1,6 +1,6 @@
 import Darwin
 import Foundation
-import MackerHelperSupport
+import HelperSupport
 
 enum HelperServer {
     static func run() throws -> Never {

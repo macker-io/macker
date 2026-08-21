@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import MackerHelperSupport
+@testable import HelperSupport
 
 struct HelperProtocolTests {
     @Test func utunNames() {

@@ -1,11 +1,10 @@
 # Classic-builder smoke: common instructions + multi-stage.
 # Each RUN boots a MicroVM — keep this file small on purpose.
 #
-#   cd daemon
-#   ./.build/debug/macker build -t smoke:latest --build-arg GREETING=world ../examples/build-smoke
+#   ./.build/debug/macker build -t smoke:latest --build-arg GREETING=world examples/build-smoke
 #   ./.build/debug/macker run --rm smoke:latest
 #   ./.build/debug/macker inspect smoke:latest   # WorkingDir, Env, ExposedPorts, Volumes, StopSignal
-#   ./.build/debug/macker build -t smoke:builder --target builder ../examples/build-smoke
+#   ./.build/debug/macker build -t smoke:builder --target builder examples/build-smoke
 
 ARG BASE=alpine:latest
 

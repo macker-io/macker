@@ -4,8 +4,8 @@ macOS-native Linux containers. The daemon speaks the Docker Engine API over a UN
 
 | Path | What it is |
 | --- | --- |
-| `app/` | SwiftUI GUI (`io.macker.app`) |
-| `daemon/` | SPM package: `App` (daemon) and `macker` (CLI) |
+| `App/` | SwiftUI GUI (`io.macker.app`) |
+| `Sources/` | SPM: products `mackerd` / `macker` / `macker-helper` (targets `Daemon` / `Cli` / `Helper`) |
 
 Requirements: Apple Silicon, macOS 15+ (MicroVMs). Container networking (`bridge` / `host`) requires macOS 26+.
 
@@ -16,14 +16,13 @@ Do not run `macker setup` unless you intend to rewrite your `docker` alias and `
 ```bash
 git submodule update --init --recursive
 
-make -C daemon fetch-runtime   # guest kernel + vminit → daemon store
-make -C daemon run             # build, ad-hoc sign, start the daemon
+make fetch-runtime   # guest kernel + vminit → daemon store
+make run             # build, ad-hoc sign, start the daemon
 ```
 
 In another terminal:
 
 ```bash
-cd daemon
 ./.build/debug/macker doctor
 ./.build/debug/macker pull hello-world
 ./.build/debug/macker run --rm hello-world
@@ -36,7 +35,7 @@ Container records survive daemon restart (`ps -a`). MicroVMs do not: a graceful 
 Stop the daemon with Ctrl+C, then wipe images / containers / volumes / networks (keeps kernel and initfs):
 
 ```bash
-make -C daemon reset
+make reset
 ```
 
 ## Run, attach, and exec
@@ -169,7 +168,7 @@ Daily `bridge` / `host` / `none`, plus `run -it` / `exec`, is in place. Supporte
 
 ## Make targets
 
-Run these from the repo root (`make -C daemon …`) or from `daemon/`. Prefer Make over calling `scripts/` directly.
+Run these from the repo root. Prefer Make over calling `scripts/` directly.
 
 | Target | Purpose |
 | --- | --- |
@@ -177,23 +176,35 @@ Run these from the repo root (`make -C daemon …`) or from `daemon/`. Prefer Ma
 | `macker` | Debug-build the CLI and `macker-helper` |
 | `helper` | Debug-build `macker-helper` |
 | `run` | `app`, then start the daemon |
-| `sign` | Re-sign an already-built debug `App` |
+| `sign` | Re-sign an already-built debug `mackerd` |
 | `fetch-runtime` | Download the pinned kernel + vminit into the store |
 | `reset` | Delete store `content/`, `containers/`, `volumes/`, `networks/` |
-| `bundle` | Release `dist/MackerDaemon.app` |
+| `cli` | Release CLI prefix in `dist/cli` |
+| `dist` | CLI prefix + `macker-VERSION-darwin-arm64.tar.gz` + Homebrew formula |
+| `install` | Copy `dist/cli` to `PREFIX` (default `/usr/local`) |
+| `bundle` | Release `dist/MackerDaemon.app` (signing shell, not the GUI) |
 | `pkg` | Release `.app` + `dist/MackerDaemon.pkg` |
 | `check` | Fail if `RuntimePin.json` ≠ containerization submodule tag |
 | `sync-runtime` | Show or set pins (`ARGS='containerization 0.42.0'`) |
 | `sync-runtime-latest` | Bump pins to GitHub latest stable |
 
 ```bash
-VERSION=1.2.3 make -C daemon pkg
-make -C daemon sync-runtime ARGS='kata 3.28.0'
+VERSION=1.2.3 make dist
+VERSION=1.2.3 make pkg
+make sync-runtime ARGS='kata 3.28.0'
 ```
 
 Debug builds report version `0.0.0`. Pass `VERSION=` (or `MACKER_VERSION=`) when packaging.
 
-## Scripts (`daemon/scripts/`)
+CLI layout (`docs/packaging.md`): `bin/macker` + `bin/mackerd` are exec wrappers around `libexec/macker/` (binaries + SwiftPM `*.bundle`). Guest kernel/initfs live in `share/macker/runtime/`.
+
+```bash
+VERSION=0.1.0 make dist
+brew install --formula dist/homebrew/Formula/macker.rb
+brew services start macker
+```
+
+## Scripts (`scripts/`)
 
 Make targets call these. They are not only for local debug.
 
@@ -202,6 +213,7 @@ Make targets call these. They are not only for local debug.
 | `sign-app.sh` | `make app` / `sign` | Ad-hoc sign the debug daemon (`com.apple.security.virtualization`) |
 | `fetch-runtime.sh` | `make fetch-runtime`; packaging if `.runtime` is missing | Install kernel/initfs into the store; optional staging dir |
 | `reset-store.sh` | `make reset` | Wipe engine state; keep `runtime/`, `initfs.ext4`, `daemon-id` |
+| `package-cli.sh` | `make cli` / `dist` / `install` | CLI prefix, tarball, Homebrew formula |
 | `package.sh` | `make bundle` / `pkg` | Release `.app` (`package.sh`) or `.app`+`.pkg` (`package.sh pkg`) |
 | `sync-runtime.sh` | `make check` / `sync-runtime*` | Edit pins and the submodule; does not download artifacts |
 | `lib.sh` | sourced by the others | Shared paths and helpers |
@@ -216,13 +228,13 @@ Daemon data lives in `~/Library/Application Support/io.macker.daemon/`:
 - `runtime/vmlinux`, `initfs.ext4` — guest kernel and initfs
 - `content/`, `volumes/`, `containers/`, `networks/`, `auth.json` — engine state (`make reset` keeps `auth.json`). Container metadata is `containers/<id>.json`; MicroVM disks under `containers/<id>/` are recreated on each start.
 
-Guest versions are pinned in `daemon/Sources/ContainerEngine/RuntimePin.json` (`containerization`, `kata`). `daemon/.runtime/` is a packaging cache only (gitignored), not the runtime store.
+Guest versions are pinned in `Sources/ContainerEngine/RuntimePin.json` (`containerization`, `kata`). `.runtime/` is a packaging cache only (gitignored), not the runtime store.
 
 ## GUI
 
-Open `app/Macker.xcodeproj`. Debug uses Xcode’s default `MARKETING_VERSION` (`1.0`). Archive with:
+Open `App/Macker.xcodeproj`. Debug uses Xcode’s default `MARKETING_VERSION` (`1.0`). Archive with:
 
 ```bash
-xcodebuild -project app/Macker.xcodeproj \
+xcodebuild -project App/Macker.xcodeproj \
   MARKETING_VERSION=1.2.3 CURRENT_PROJECT_VERSION=42
 ```

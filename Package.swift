@@ -1,4 +1,4 @@
-// swift-tools-version: 6.2
+    // swift-tools-version: 6.2
 
 import PackageDescription
 
@@ -9,12 +9,12 @@ let package = Package(
         .macOS(.v15),
     ],
     products: [
-        .executable(name: "App", targets: ["App"]),
-        .executable(name: "macker", targets: ["cli"]),
+        .executable(name: "mackerd", targets: ["Daemon"]),
+        .executable(name: "macker", targets: ["Cli"]),
         .executable(name: "macker-helper", targets: ["Helper"]),
         .library(name: "ContainerEngine", targets: ["ContainerEngine"]),
         .library(name: "DockerAPIAdapter", targets: ["DockerAPIAdapter"]),
-        .library(name: "MackerHelperSupport", targets: ["MackerHelperSupport"]),
+        .library(name: "HelperSupport", targets: ["HelperSupport"]),
     ],
     dependencies: [
         .package(path: "./Vendor/containerization"),
@@ -25,27 +25,26 @@ let package = Package(
     ],
     targets: [
         .executableTarget(
-            name: "App",
+            name: "Daemon",
             dependencies: [
                 "ContainerEngine",
                 "DockerAPIAdapter",
                 .product(name: "Logging", package: "swift-log"),
             ],
-            exclude: ["App.entitlements"]
+            exclude: ["Daemon.entitlements"]
         ),
         .executableTarget(
-            name: "cli",
+            name: "Cli",
             dependencies: [
                 "ContainerEngine",
-                "MackerHelperSupport",
+                "HelperSupport",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
-            ],
-            path: "Sources/Cmd"
+            ]
         ),
-        .target(name: "MackerHelperSupport"),
+        .target(name: "HelperSupport"),
         .executableTarget(
             name: "Helper",
-            dependencies: ["MackerHelperSupport"],
+            dependencies: ["HelperSupport"],
             path: "Sources/Helper"
         ),
         .target(
@@ -97,7 +96,7 @@ let package = Package(
             dependencies: [
                 // Link both C targets here. LwIPPort cannot depend on LwIPCore: SPM would
                 // import lwIP's headers as a Clang module, and memp_std.h's X-macros fail.
-                "MackerHelperSupport",
+                "HelperSupport",
                 "LwIPCore",
                 "LwIPPort",
                 .product(name: "Containerization", package: "containerization"),
@@ -117,7 +116,7 @@ let package = Package(
             dependencies: [
                 "ContainerEngine",
                 "DockerAPIAdapter",
-                "MackerHelperSupport",
+                "HelperSupport",
                 .product(name: "ContainerizationOCI", package: "containerization"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
             ]

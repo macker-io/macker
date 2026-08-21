@@ -1,12 +1,14 @@
-# Shared helpers for daemon/scripts/*.sh. Source from those scripts only:
+# Shared helpers for scripts/*.sh. Source from those scripts only:
 #   . "$(dirname "$0")/lib.sh"
 # shellcheck shell=sh
 
 _this="${BASH_SOURCE[0]:-$0}"
 _scripts_dir="$(CDPATH= cd "$(dirname -- "$_this")" && pwd)"
-DAEMON_ROOT="$(CDPATH= cd "$_scripts_dir/.." && pwd)"
-PIN="$DAEMON_ROOT/Sources/ContainerEngine/RuntimePin.json"
-ENTITLEMENTS="$DAEMON_ROOT/Sources/App/App.entitlements"
+ROOT="$(CDPATH= cd "$_scripts_dir/.." && pwd)"
+DAEMON_ROOT="$ROOT"
+REPO_ROOT="$ROOT"
+PIN="$ROOT/Sources/ContainerEngine/RuntimePin.json"
+ENTITLEMENTS="$ROOT/Sources/Daemon/Daemon.entitlements"
 STORE="${HOME}/Library/Application Support/io.macker.daemon"
 SOCKET="$STORE/macker.sock"
 

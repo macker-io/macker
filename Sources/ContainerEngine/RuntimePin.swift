@@ -41,26 +41,12 @@ public struct RuntimePin: Sendable, Codable, Equatable {
         try JSONDecoder().decode(RuntimePin.self, from: Data(contentsOf: url))
     }
 
-    /// Runtime folders inside a packaged `.app` or next to the executable.
+    /// Runtime folders inside a packaged `.app`, CLI prefix, or next to the executable.
     public static func bundledRuntimeDirectories() -> [URL] {
-        var dirs: [URL] = []
-        if let resources = Bundle.main.resourceURL {
-            dirs.append(resources.appendingPathComponent("runtime", isDirectory: true))
-        }
-        let exe = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
-        let exeDir = exe.deletingLastPathComponent()
-        dirs.append(exeDir.appendingPathComponent("runtime", isDirectory: true))
-        if exeDir.lastPathComponent == "MacOS" {
-            dirs.append(
-                exeDir.deletingLastPathComponent()
-                    .appendingPathComponent("Resources", isDirectory: true)
-                    .appendingPathComponent("runtime", isDirectory: true)
-            )
-        }
-        return dirs
+        InstallLayout.runtimeDirectories()
     }
 
-    /// Checkout-only packaging cache (`daemon/.runtime`). Not the runtime store.
+    /// Checkout-only packaging cache (`.runtime`). Not the runtime store.
     public static var checkoutRuntimeDirectory: URL {
         daemonRoot.appendingPathComponent(".runtime", isDirectory: true)
     }

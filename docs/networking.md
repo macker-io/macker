@@ -8,7 +8,7 @@ Container networking (`bridge` / `host`) requires macOS 26+.
 
 | `--network` | Dataplane | How the Mac reaches the container | Outbound |
 | --- | --- | --- | --- |
-| `bridge` (default) | virtio-net ↔ userspace [`NetworkGateway`](../daemon/Sources/ContainerEngine/NetworkGateway.swift) | `-p` → localhost; with the helper, also `curl <containerIP>` | in-process lwIP → Mac socket |
+| `bridge` (default) | virtio-net ↔ userspace [`NetworkGateway`](../Sources/ContainerEngine/NetworkGateway.swift) | `-p` → localhost; with the helper, also `curl <containerIP>` | in-process lwIP → Mac socket |
 | `host` | Apple **vmnet NAT** | image `EXPOSE` mapped 1:1 on the Mac (`-p` ignored) | vmnet NAT |
 | `none` | no NIC | unreachable | none |
 
