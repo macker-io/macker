@@ -130,22 +130,23 @@ Each container is a MicroVM with its own kernel, so this is not Linux `bridge` +
 ```mermaid
 flowchart LR
   B["bridge"] --> GW["NetworkGateway"]
-  GW --> L3["same-net L3 / DNS"]
-  GW --> LW["lwIP outbound and -p"]
-  GW --> UT["utun + helper → 172.17.x"]
+  GW --> DP["BridgeDataplane"]
+  DP --> L3["same-net L3 / DNS"]
+  DP --> LW["lwIP outbound"]
+  DP --> UT["utun + helper → 172.17.x"]
   H["host"] --> VM["vmnet NAT"]
   N["none"] --> X["no NIC"]
 ```
 
 | `--network` | What Macker does |
 | --- | --- |
-| `bridge` (default) | One virtio-net to a userspace L3 gateway (`eth0` is `/32`, DNS/next-hop `192.168.255.1`). Same-network containers reach each other by IP and name. Extra bridges add another `/32` on the same `eth0`. `-p` publishes on the Mac via lwIP. `sudo macker helper install` adds a utun route so the Mac can also `curl <containerIP>`. `--internal` is same-network only. |
+| `bridge` (default) | One virtio-net (VZ socketpair) to a userspace L3 dataplane (`eth0` is `/32`, DNS/next-hop `192.168.255.1`). Same-network containers reach each other by IP and name. Extra bridges add another `/32` on the same `eth0`. `-p` publishes on the Mac: with `sudo macker helper install` it `connect`s the container IP over utun; without the helper it uses an lwIP localhost relay. The helper also adds a utun route so the Mac can `curl <containerIP>`. `--internal` is same-network only. |
 | `host` | Per-network vmnet NAT. `-p` is ignored. Image `EXPOSE` is published 1:1 on the Mac (`80` → `localhost:80`). Guest `127.0.0.1` is **not** the Mac loopback. |
 | `none` | No NIC. |
 
 `macker network ls|create|rm|inspect|connect|disconnect|prune` works. Builtin `bridge` / `host` / `none` cannot be removed. Running `connect` / `disconnect` on an extra bridge adds or removes an address on `eth0`. Connecting a running container that has no bridge NIC yet still needs a stop/start (MicroVMs cannot hot-plug virtio-net). Names resolve through the gateway; `/etc/hosts` is localhost only.
 
-lwIP is the outbound NAT and `-p` engine. utun is only the optional Mac → container-IP route. Neither path installs `pf`.
+lwIP is outbound NAT (and `-p` only when utun is down). utun is the Mac → container-IP route, and the `-p` path when the helper is installed. Neither path installs `pf`.
 
 ```bash
 ./.build/debug/macker network ls

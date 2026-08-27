@@ -21,7 +21,14 @@ final class PortPublisher: @unchecked Sendable {
         }
 
         var parameters: NWParameters {
-            let parameters: NWParameters = self == .udp ? .udp : .tcp
+            let parameters: NWParameters
+            if self == .udp {
+                parameters = .udp
+            } else {
+                let tcp = NWProtocolTCP.Options()
+                tcp.noDelay = true
+                parameters = NWParameters(tls: nil, tcp: tcp)
+            }
             parameters.allowLocalEndpointReuse = true
             return parameters
         }
@@ -158,7 +165,7 @@ final class PortPublisher: @unchecked Sendable {
     }
 
     private func pipeStream(_ from: NWConnection, to: NWConnection) {
-        from.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] data, _, isComplete, error in
+        from.receive(minimumIncompleteLength: 1, maximumLength: 256 * 1024) { [weak self] data, _, isComplete, error in
             guard let publisher = self else { return }
             if let data, !data.isEmpty {
                 to.send(content: data, completion: .contentProcessed { sendError in

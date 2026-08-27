@@ -10,16 +10,20 @@ import HelperSupport
 final class UtunDevice: @unchecked Sendable {
     /// utun prepends a 4-byte address family to every packet.
     private static let protocolHeader = 4
+    private static let rxCapacity = 65535 + protocolHeader
+    private static let afInetPrefix: [UInt8] = [0, 0, 0, UInt8(AF_INET)]
 
     private(set) var fd: Int32 = -1
     private(set) var name = ""
     private var source: DispatchSourceRead?
     private let queue = DispatchQueue(label: "io.macker.net.utun")
+    private var rx = [UInt8](repeating: 0, count: rxCapacity)
 
     func adopt(fd: Int32, name: String) {
         closeDevice()
         self.fd = fd
         self.name = name
+        Self.setNonblocking(fd)
     }
 
     func open() throws {
@@ -47,26 +51,54 @@ final class UtunDevice: @unchecked Sendable {
         try? HostNetCommands.addRoute(interface: name, subnet: subnet)
     }
 
-    func start(_ onPacket: @escaping @Sendable (Data) -> Void) {
+    func start(_ onPacket: @escaping (UnsafeRawBufferPointer) -> Void) {
         let fd = self.fd
         guard fd >= 0 else { return }
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
-        source.setEventHandler {
-            var buffer = [UInt8](repeating: 0, count: 2048)
-            let n = read(fd, &buffer, buffer.count)
-            guard n > Self.protocolHeader else { return }
-            onPacket(Data(buffer[Self.protocolHeader..<n]))
+        source.setEventHandler { [weak self] in
+            guard let self else { return }
+            while true {
+                let n = self.rx.withUnsafeMutableBytes { raw -> Int in
+                    guard let base = raw.baseAddress else { return -1 }
+                    return Darwin.read(fd, base, raw.count)
+                }
+                if n < 0 {
+                    let err = errno
+                    if err == EINTR { continue }
+                    return
+                }
+                if n == 0 { return }
+                if n <= Self.protocolHeader { continue }
+                self.rx.withUnsafeBytes { raw in
+                    onPacket(
+                        UnsafeRawBufferPointer(
+                            start: raw.baseAddress.map { $0 + Self.protocolHeader },
+                            count: n - Self.protocolHeader
+                        )
+                    )
+                }
+            }
         }
         self.source = source
         source.resume()
     }
 
     func writeIP(_ packet: Data) {
-        guard fd >= 0 else { return }
-        var framed = Data([0, 0, 0, UInt8(AF_INET)])
-        framed.append(packet)
-        framed.withUnsafeBytes { raw in
-            _ = Darwin.write(fd, raw.baseAddress, framed.count)
+        packet.withUnsafeBytes { writeIP($0) }
+    }
+
+    func writeIP(_ packet: UnsafeRawBufferPointer) {
+        guard fd >= 0, let payload = packet.baseAddress, packet.count > 0 else { return }
+        var header = Self.afInetPrefix
+        header.withUnsafeMutableBytes { af in
+            guard let afBase = af.baseAddress else { return }
+            let iovs = [
+                iovec(iov_base: afBase, iov_len: Self.protocolHeader),
+                iovec(iov_base: UnsafeMutableRawPointer(mutating: payload), iov_len: packet.count),
+            ]
+            iovs.withUnsafeBufferPointer { buf in
+                _ = writev(fd, buf.baseAddress, 2)
+            }
         }
     }
 
@@ -78,5 +110,12 @@ final class UtunDevice: @unchecked Sendable {
             fd = -1
         }
         name = ""
+    }
+
+    private static func setNonblocking(_ fd: Int32) {
+        let flags = fcntl(fd, F_GETFL, 0)
+        if flags >= 0 {
+            _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+        }
     }
 }

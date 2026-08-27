@@ -11,11 +11,24 @@ typealias GuestIPv4Address = ContainerizationExtras.IPv4Address
 /// lwIP only sees a translated, point-to-point IPv4 interface. Its link output is rewritten
 /// back to the original remote endpoint before it is delivered to the guest. Host sockets carry
 /// application payloads; they are deliberately not used as a second TCP implementation.
+///
+/// I/O stays on a dedicated queue (gvisor-tap-vsock / netstack style): large socket reads,
+/// coalesced guest→host DATA, TCP_NODELAY, and backpressure instead of dropping when the
+/// stack's send buffer is full.
 final class GatewayLwIP: GatewayForwarder, @unchecked Sendable {
-    private static let maxPending = 256 * 1024
+    private static let maxPending = 1024 * 1024
+    private static let receiveChunk = 256 * 1024
+
+    private struct FlowKey: Hashable {
+        let guestIP: UInt32
+        let remoteIP: UInt32
+        let guestPort: UInt16
+        let remotePort: UInt16
+    }
 
     private struct TCPFlow {
         let id: UInt32
+        let key: FlowKey
         let guestIP: GuestIPv4Address
         let guestPort: UInt16
         let remoteIP: GuestIPv4Address
@@ -25,10 +38,12 @@ final class GatewayLwIP: GatewayForwarder, @unchecked Sendable {
         var connected = false
         var inbound: Bool
         var hostFinished = false
+        var receivePaused = false
     }
 
     private struct UDPFlow {
         let id: UInt32
+        let key: FlowKey
         let guestIP: GuestIPv4Address
         let guestPort: UInt16
         let flowPort: UInt16
@@ -48,12 +63,13 @@ final class GatewayLwIP: GatewayForwarder, @unchecked Sendable {
     private let queue = DispatchQueue(label: "io.macker.net.lwip")
     private var core: OpaquePointer?
     private var tcp: [UInt32: TCPFlow] = [:]
-    private var tcpByEndpoint: [String: UInt32] = [:]
+    private var tcpByEndpoint: [FlowKey: UInt32] = [:]
     private var udp: [UInt32: UDPFlow] = [:]
-    private var udpByEndpoint: [String: UInt32] = [:]
+    private var udpByEndpoint: [FlowKey: UInt32] = [:]
     private var relays: [LocalRelay] = []
     private var nextID: UInt32 = 1
     private var nextRelayPort: UInt16 = 50_000
+    private var tcpInputBatch: [(id: UInt32, packet: Data)] = []
     private let onGuest: @Sendable (GuestIPv4Address, Data) -> Void
     private let udpIdleTimeout: TimeInterval
     private var sweep: DispatchSourceTimer?
@@ -94,72 +110,23 @@ final class GatewayLwIP: GatewayForwarder, @unchecked Sendable {
     }
 
     func handleUDP(packet: IPv4Packet, datagram: UDPDatagram) {
-        enqueue { [self] in
-            let key = Self.endpointKey(guestIP: packet.src, guestPort: datagram.srcPort,
-                                       remoteIP: packet.dst, remotePort: datagram.dstPort)
-            if let id = udpByEndpoint[key] {
-                touchUDP(id: id)
-                sendUDPToCore(id: id, packet: packet.encode())
-                return
-            }
-            let id = allocateID()
-            let connection = NWConnection(
-                to: NWEndpoint.hostPort(
-                    host: NWEndpoint.Host(packet.dst.description),
-                    port: NWEndpoint.Port(rawValue: datagram.dstPort) ?? .any
-                ),
-                using: .udp
-            )
-            udp[id] = UDPFlow(id: id, guestIP: packet.src, guestPort: datagram.srcPort,
-                              flowPort: datagram.dstPort, connection: connection,
-                              inbound: false)
-            udpByEndpoint[key] = id
-            configureOutboundUDP(connection, id: id)
-            connection.start(queue: queue)
-            sendUDPToCore(id: id, packet: packet.encode(), first: true,
-                          remoteIP: packet.dst, remotePort: datagram.dstPort)
-        }
+        ingestIPv4(packet.encode())
     }
 
     func handleTCP(packet: IPv4Packet, segment: TCPSegment) {
-        enqueue { [self] in
-            let key = Self.endpointKey(guestIP: packet.src, guestPort: segment.srcPort,
-                                       remoteIP: packet.dst, remotePort: segment.dstPort)
-            guard !segment.flags.contains(.rst) else {
-                if let id = tcpByEndpoint[key] {
-                    closeTCP(id: id)
-                }
-                return
-            }
-            if let id = tcpByEndpoint[key] {
-                sendTCPToCore(id: id, packet: packet.encode())
-                return
-            }
-            guard segment.flags.contains(.syn) else { return }
-            let id = allocateID()
-            let connection = NWConnection(
-                to: NWEndpoint.hostPort(
-                    host: NWEndpoint.Host(packet.dst.description),
-                    port: NWEndpoint.Port(rawValue: segment.dstPort) ?? .any
-                ),
-                using: .tcp
-            )
-            tcp[id] = TCPFlow(id: id, guestIP: packet.src, guestPort: segment.srcPort,
-                              remoteIP: packet.dst, remotePort: segment.dstPort,
-                              connection: connection, inbound: false)
-            tcpByEndpoint[key] = id
-            configureTCP(connection, id: id)
-            connection.start(queue: queue)
-            guard let core else { return }
-            let result = packet.encode().withUnsafeBytes { bytes in
-                macker_lwip_tcp_outbound_start(
-                    core, id, Self.address(packet.dst), segment.dstPort,
-                    Self.address(packet.src), segment.srcPort,
-                    bytes.bindMemory(to: UInt8.self).baseAddress, bytes.count
-                )
-            }
-            if result != 0 { closeTCP(id: id) }
-        }
+        ingestIPv4(packet.encode())
+    }
+
+    func ingestIPv4(_ packet: Data) {
+        enqueue { [self] in ingestIPv4Locked(packet) }
+    }
+
+    func acceptIPv4(_ packet: Data) -> Bool {
+        onQueue { acceptIPv4Locked(packet) }
+    }
+
+    func acceptFromGuest(_ packet: IPv4Packet) -> Bool {
+        acceptIPv4(packet.encode())
     }
 
     func forwardDNS(query: Data, guestIP: GuestIPv4Address, guestPort: UInt16, upstreams: [String]) {
@@ -192,7 +159,7 @@ final class GatewayLwIP: GatewayForwarder, @unchecked Sendable {
         try await withCheckedThrowingContinuation { continuation in
             onQueue {
                 do {
-                    let parameters: NWParameters = udp ? .udp : .tcp
+                    let parameters = udp ? NWParameters.udp : Self.tcpParameters()
                     parameters.allowLocalEndpointReuse = true
                     let listener = try NWListener(using: parameters, on: .any)
                     listener.newConnectionHandler = { [weak self] incoming in
@@ -237,24 +204,110 @@ final class GatewayLwIP: GatewayForwarder, @unchecked Sendable {
         }
     }
 
-    func acceptFromGuest(_ packet: IPv4Packet) -> Bool {
-        onQueue {
-            if packet.proto == Ethernet.protoTCP, let segment = TCPSegment.parse(packet.payload),
-               let id = tcpByEndpoint[Self.endpointKey(guestIP: packet.src, guestPort: segment.srcPort,
-                                                       remoteIP: NetworkGateway.gatewayAddress,
-                                                       remotePort: segment.dstPort)] {
-                sendTCPToCore(id: id, packet: packet.encode())
-                return true
-            }
-            if packet.proto == Ethernet.protoUDP, let datagram = UDPDatagram.parse(packet.payload),
-               let id = udpByEndpoint[Self.endpointKey(guestIP: packet.src, guestPort: datagram.srcPort,
-                                                       remoteIP: NetworkGateway.gatewayAddress,
-                                                       remotePort: datagram.dstPort)] {
-                sendUDPToCore(id: id, packet: packet.encode())
-                return true
-            }
-            return false
+    private func ingestIPv4Locked(_ packet: Data) {
+        guard let header = IPv4Peek.tuple(packet) else { return }
+        switch header.proto {
+        case Ethernet.protoTCP:
+            ingestTCP(packet, header)
+        case Ethernet.protoUDP:
+            ingestUDP(packet, header)
+        default:
+            break
         }
+    }
+
+    private func ingestTCP(_ packet: Data, _ header: IPv4Peek.Tuple) {
+        let key = FlowKey(
+            guestIP: header.src, remoteIP: header.dst,
+            guestPort: header.srcPort, remotePort: header.dstPort
+        )
+        if header.tcpFlags & TCPSegment.Flags.rst.rawValue != 0 {
+            if let id = tcpByEndpoint[key] { closeTCP(id: id) }
+            return
+        }
+        if let id = tcpByEndpoint[key] {
+            enqueueTCPInput(id: id, packet: packet)
+            flushTCPInput()
+            return
+        }
+        guard header.tcpFlags & TCPSegment.Flags.syn.rawValue != 0 else { return }
+        let src = GuestIPv4Address(header.src)
+        let dst = GuestIPv4Address(header.dst)
+        let id = allocateID()
+        let connection = NWConnection(
+            to: NWEndpoint.hostPort(
+                host: NWEndpoint.Host(dst.description),
+                port: NWEndpoint.Port(rawValue: header.dstPort) ?? .any
+            ),
+            using: Self.tcpParameters()
+        )
+        tcp[id] = TCPFlow(
+            id: id, key: key, guestIP: src, guestPort: header.srcPort,
+            remoteIP: dst, remotePort: header.dstPort,
+            connection: connection, inbound: false
+        )
+        tcpByEndpoint[key] = id
+        configureTCP(connection, id: id)
+        connection.start(queue: queue)
+        guard let core else { return }
+        let result = packet.withUnsafeBytes { bytes in
+            macker_lwip_tcp_outbound_start(
+                core, id, header.dst, header.dstPort,
+                header.src, header.srcPort,
+                bytes.bindMemory(to: UInt8.self).baseAddress, bytes.count
+            )
+        }
+        if result != 0 { closeTCP(id: id) }
+    }
+
+    private func ingestUDP(_ packet: Data, _ header: IPv4Peek.Tuple) {
+        let key = FlowKey(
+            guestIP: header.src, remoteIP: header.dst,
+            guestPort: header.srcPort, remotePort: header.dstPort
+        )
+        if let id = udpByEndpoint[key] {
+            touchUDP(id: id)
+            sendUDPToCore(id: id, packet: packet)
+            return
+        }
+        let src = GuestIPv4Address(header.src)
+        let dst = GuestIPv4Address(header.dst)
+        let id = allocateID()
+        let connection = NWConnection(
+            to: NWEndpoint.hostPort(
+                host: NWEndpoint.Host(dst.description),
+                port: NWEndpoint.Port(rawValue: header.dstPort) ?? .any
+            ),
+            using: .udp
+        )
+        udp[id] = UDPFlow(
+            id: id, key: key, guestIP: src, guestPort: header.srcPort,
+            flowPort: header.dstPort, connection: connection, inbound: false
+        )
+        udpByEndpoint[key] = id
+        configureOutboundUDP(connection, id: id)
+        connection.start(queue: queue)
+        sendUDPToCore(id: id, packet: packet, first: true, remoteIP: dst, remotePort: header.dstPort)
+    }
+
+    private func acceptIPv4Locked(_ packet: Data) -> Bool {
+        guard let header = IPv4Peek.tuple(packet) else { return false }
+        let key = FlowKey(
+            guestIP: header.src,
+            remoteIP: Self.address(NetworkGateway.gatewayAddress),
+            guestPort: header.srcPort,
+            remotePort: header.dstPort
+        )
+        if header.proto == Ethernet.protoTCP, let id = tcpByEndpoint[key] {
+            enqueueTCPInput(id: id, packet: packet)
+            flushTCPInput()
+            return true
+        }
+        if header.proto == Ethernet.protoUDP, let id = udpByEndpoint[key] {
+            sendUDPToCore(id: id, packet: packet)
+            return true
+        }
+        return false
     }
 
     func stopListenLocal(guestIP: GuestIPv4Address, guestPort: UInt16, udp: Bool) {
@@ -281,6 +334,7 @@ final class GatewayLwIP: GatewayForwarder, @unchecked Sendable {
             relays.forEach { $0.listener.cancel() }
             tcp.removeAll()
             tcpByEndpoint.removeAll()
+            tcpInputBatch.removeAll()
             udp.removeAll()
             udpByEndpoint.removeAll()
             relays.removeAll()
@@ -310,15 +364,30 @@ final class GatewayLwIP: GatewayForwarder, @unchecked Sendable {
         receiveTCP(connection, id: id)
     }
 
+    private func writeHostToCore(id: UInt32, data: Data) -> Int32 {
+        guard let core else { return -1 }
+        return data.withUnsafeBytes {
+            macker_lwip_tcp_write(core, id, $0.bindMemory(to: UInt8.self).baseAddress, $0.count)
+        }
+    }
+
     private func receiveTCP(_ connection: NWConnection, id: UInt32) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, complete, error in
+        connection.receive(minimumIncompleteLength: 1, maximumLength: Self.receiveChunk) { [weak self] data, _, complete, error in
             guard let self else { return }
             self.onQueue {
                 guard var flow = self.tcp[id] else { return }
                 if let data, !data.isEmpty {
-                    if let core = self.core, flow.connected {
-                        _ = data.withUnsafeBytes {
-                            macker_lwip_tcp_write(core, id, $0.bindMemory(to: UInt8.self).baseAddress, $0.count)
+                    if flow.connected {
+                        let result = self.writeHostToCore(id: id, data: data)
+                        if result > 0 {
+                            if flow.pendingToHost.count + data.count <= Self.maxPending {
+                                flow.pendingToHost.append(data)
+                            }
+                            flow.receivePaused = true
+                            self.tcp[id] = flow
+                        } else if result < 0 {
+                            self.closeTCP(id: id)
+                            return
                         }
                     } else if flow.pendingToHost.count + data.count <= Self.maxPending {
                         flow.pendingToHost.append(data)
@@ -331,7 +400,9 @@ final class GatewayLwIP: GatewayForwarder, @unchecked Sendable {
                     if let core = self.core { _ = macker_lwip_tcp_fin(core, id) }
                     return
                 }
-                self.receiveTCP(connection, id: id)
+                if self.tcp[id]?.receivePaused != true {
+                    self.receiveTCP(connection, id: id)
+                }
             }
         }
     }
@@ -371,7 +442,9 @@ final class GatewayLwIP: GatewayForwarder, @unchecked Sendable {
         if udp {
             let flowPort = allocateRelayPort()
             guard flowPort != 0 else { incoming.cancel(); return }
-            self.udp[id] = UDPFlow(id: id, guestIP: guestIP, guestPort: guestPort,
+            self.udp[id] = UDPFlow(id: id, key: Self.endpointKey(guestIP: guestIP, guestPort: guestPort,
+                                                                remoteIP: NetworkGateway.gatewayAddress, remotePort: flowPort),
+                                   guestIP: guestIP, guestPort: guestPort,
                                    flowPort: flowPort, connection: incoming, inbound: true)
             udpByEndpoint[Self.endpointKey(guestIP: guestIP, guestPort: guestPort,
                                            remoteIP: NetworkGateway.gatewayAddress, remotePort: flowPort)] = id
@@ -382,7 +455,9 @@ final class GatewayLwIP: GatewayForwarder, @unchecked Sendable {
         } else {
             let flowPort = allocateRelayPort()
             guard flowPort != 0 else { incoming.cancel(); return }
-            self.tcp[id] = TCPFlow(id: id, guestIP: guestIP, guestPort: guestPort,
+            self.tcp[id] = TCPFlow(id: id, key: Self.endpointKey(guestIP: guestIP, guestPort: guestPort,
+                                                                remoteIP: NetworkGateway.gatewayAddress, remotePort: flowPort),
+                                   guestIP: guestIP, guestPort: guestPort,
                                    remoteIP: NetworkGateway.gatewayAddress, remotePort: flowPort,
                                    connection: incoming, inbound: true)
             tcpByEndpoint[Self.endpointKey(guestIP: guestIP, guestPort: guestPort,
@@ -395,16 +470,20 @@ final class GatewayLwIP: GatewayForwarder, @unchecked Sendable {
     }
 
     private func receivedOutput(id: UInt32, packet: Data) {
-        queue.async { [weak self] in
+        let deliver: @Sendable () -> Void = { [weak self] in
             guard let self else { return }
             if let flow = self.tcp[id] { self.onGuest(flow.guestIP, packet) }
             else if let flow = self.udp[id] { self.onGuest(flow.guestIP, packet) }
         }
+        if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
+            deliver()
+        } else {
+            queue.async(execute: deliver)
+        }
     }
 
     private func receivedEvent(id: UInt32, event: Int32, data: Data) {
-        // C invokes this callback on lwIP's tcpip thread. Never synchronously wait for the
-        // Swift queue here: the caller may be waiting in tcpip_callback_wait for this event.
+        // Callbacks run while the core lock may be held. Never wait on the Swift queue here.
         queue.async { [weak self] in
             guard let self else { return }
             switch event {
@@ -426,6 +505,13 @@ final class GatewayLwIP: GatewayForwarder, @unchecked Sendable {
                     self.tcp[id] = flow
                 }
                 self.flushTCP(id: id)
+            case Int32(MACKER_LWIP_EVENT_WRITABLE):
+                self.flushTCP(id: id)
+                if var flow = self.tcp[id], flow.receivePaused, let connection = flow.connection {
+                    flow.receivePaused = false
+                    self.tcp[id] = flow
+                    self.receiveTCP(connection, id: id)
+                }
             case Int32(MACKER_LWIP_EVENT_CLOSED), Int32(MACKER_LWIP_EVENT_ERROR):
                 if self.tcp[id] != nil { self.closeTCP(id: id, closeCore: false) }
                 else if self.udp[id] != nil { self.closeUDP(id: id, closeCore: false) }
@@ -439,17 +525,61 @@ final class GatewayLwIP: GatewayForwarder, @unchecked Sendable {
         guard var flow = tcp[id], !flow.pendingToHost.isEmpty else { return }
         guard let core else { return }
         let pending = flow.pendingToHost
-        flow.pendingToHost.removeAll()
+        flow.pendingToHost.removeAll(keepingCapacity: true)
         tcp[id] = flow
-        _ = pending.withUnsafeBytes {
+        let result = pending.withUnsafeBytes {
             macker_lwip_tcp_write(core, id, $0.bindMemory(to: UInt8.self).baseAddress, $0.count)
+        }
+        if result != 0, var flow = tcp[id] {
+            if result > 0 {
+                flow.pendingToHost = pending + flow.pendingToHost
+                flow.receivePaused = true
+                tcp[id] = flow
+            }
         }
     }
 
     private func sendTCPToCore(id: UInt32, packet: Data) {
-        guard let core else { return }
-        _ = packet.withUnsafeBytes {
-            macker_lwip_tcp_input(core, id, $0.bindMemory(to: UInt8.self).baseAddress, $0.count)
+        enqueueTCPInput(id: id, packet: packet)
+        flushTCPInput()
+    }
+
+    private func enqueueTCPInput(id: UInt32, packet: Data) {
+        tcpInputBatch.append((id, packet))
+    }
+
+    private func flushTCPInput() {
+        guard let core, !tcpInputBatch.isEmpty else { return }
+        let batch = tcpInputBatch
+        tcpInputBatch.removeAll(keepingCapacity: true)
+
+        let ids = batch.map(\.id)
+        let lengths = batch.map(\.packet.count)
+        var storage = [UInt8]()
+        storage.reserveCapacity(lengths.reduce(0, +))
+        var offsets = [Int]()
+        offsets.reserveCapacity(batch.count)
+        for item in batch {
+            offsets.append(storage.count)
+            storage.append(contentsOf: item.packet)
+        }
+
+        ids.withUnsafeBufferPointer { idBuffer in
+            lengths.withUnsafeBufferPointer { lengthBuffer in
+                storage.withUnsafeBufferPointer { bytes in
+                    guard let base = bytes.baseAddress else { return }
+                    let pointers: [UnsafePointer<UInt8>?] = offsets.map { base + $0 }
+                    pointers.withUnsafeBufferPointer { pointerBuffer in
+                        _ = macker_lwip_tcp_input_many(
+                            core,
+                            idBuffer.baseAddress,
+                            pointerBuffer.baseAddress,
+                            lengthBuffer.baseAddress,
+                            batch.count
+                        )
+                    }
+                }
+            }
         }
     }
 
@@ -475,14 +605,14 @@ final class GatewayLwIP: GatewayForwarder, @unchecked Sendable {
 
     private func closeTCP(id: UInt32, closeCore: Bool = true) {
         guard let flow = tcp.removeValue(forKey: id) else { return }
-        tcpByEndpoint = tcpByEndpoint.filter { $0.value != id }
+        tcpByEndpoint.removeValue(forKey: flow.key)
         flow.connection?.cancel()
         if closeCore, let core { macker_lwip_tcp_close(core, id) }
     }
 
     private func closeUDP(id: UInt32, closeCore: Bool = true) {
         guard let flow = udp.removeValue(forKey: id) else { return }
-        udpByEndpoint = udpByEndpoint.filter { $0.value != id }
+        udpByEndpoint.removeValue(forKey: flow.key)
         flow.connection?.cancel()
         if closeCore, let core { macker_lwip_udp_close(core, id) }
     }
@@ -533,8 +663,15 @@ final class GatewayLwIP: GatewayForwarder, @unchecked Sendable {
     }
 
     private static func endpointKey(guestIP: GuestIPv4Address, guestPort: UInt16,
-                                   remoteIP: GuestIPv4Address, remotePort: UInt16) -> String {
-        "\(guestIP):\(guestPort)-\(remoteIP):\(remotePort)"
+                                   remoteIP: GuestIPv4Address, remotePort: UInt16) -> FlowKey {
+        FlowKey(guestIP: address(guestIP), remoteIP: address(remoteIP),
+                guestPort: guestPort, remotePort: remotePort)
+    }
+
+    private static func tcpParameters() -> NWParameters {
+        let tcp = NWProtocolTCP.Options()
+        tcp.noDelay = true
+        return NWParameters(tls: nil, tcp: tcp)
     }
 
     private static func address(_ ip: GuestIPv4Address) -> UInt32 {
@@ -550,7 +687,10 @@ final class GatewayLwIP: GatewayForwarder, @unchecked Sendable {
     private static let eventCallback: macker_lwip_event_fn = { context, id, event, data, length in
         guard let context else { return }
         let owner = Unmanaged<GatewayLwIP>.fromOpaque(context).takeUnretainedValue()
-        let payload = data.map { Data(bytes: $0, count: length) } ?? Data()
-        owner.receivedEvent(id: id, event: event, data: payload)
+        if event == Int32(MACKER_LWIP_EVENT_DATA), let data, length > 0 {
+            owner.receivedEvent(id: id, event: event, data: Data(bytes: data, count: length))
+        } else {
+            owner.receivedEvent(id: id, event: event, data: Data())
+        }
     }
 }

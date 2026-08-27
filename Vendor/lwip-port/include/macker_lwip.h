@@ -19,7 +19,9 @@ enum {
   MACKER_LWIP_EVENT_CONNECTED = 1,
   MACKER_LWIP_EVENT_DATA = 2,
   MACKER_LWIP_EVENT_CLOSED = 3,
-  MACKER_LWIP_EVENT_ERROR = 4
+  MACKER_LWIP_EVENT_ERROR = 4,
+  /* Host→guest sndbuf/pending has drained; Swift may resume socket reads. */
+  MACKER_LWIP_EVENT_WRITABLE = 5
 };
 
 macker_lwip_t *macker_lwip_create(macker_lwip_output_fn output,
@@ -36,6 +38,9 @@ int macker_lwip_tcp_inbound_start(macker_lwip_t *stack, uint32_t flow_id,
                                   uint16_t host_port);
 int macker_lwip_tcp_input(macker_lwip_t *stack, uint32_t flow_id,
                           const uint8_t *packet, size_t length);
+int macker_lwip_tcp_input_many(macker_lwip_t *stack, const uint32_t *flow_ids,
+                               const uint8_t *const *packets, const size_t *lengths,
+                               size_t count);
 int macker_lwip_tcp_write(macker_lwip_t *stack, uint32_t flow_id,
                           const uint8_t *data, size_t length);
 int macker_lwip_tcp_fin(macker_lwip_t *stack, uint32_t flow_id);

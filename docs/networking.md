@@ -8,7 +8,7 @@ Container networking (`bridge` / `host`) requires macOS 26+.
 
 | `--network` | Dataplane | How the Mac reaches the container | Outbound |
 | --- | --- | --- | --- |
-| `bridge` (default) | virtio-net ↔ userspace [`NetworkGateway`](../Sources/ContainerEngine/NetworkGateway.swift) | `-p` → localhost; with the helper, also `curl <containerIP>` | in-process lwIP → Mac socket |
+| `bridge` (default) | virtio-net (VZ socketpair) ↔ [`BridgeDataplane`](../Sources/ContainerEngine/BridgeDataplane.swift) | `-p` → localhost; with the helper, also `curl <containerIP>` | in-process lwIP → Mac socket |
 | `host` | Apple **vmnet NAT** | image `EXPOSE` mapped 1:1 on the Mac (`-p` ignored) | vmnet NAT |
 | `none` | no NIC | unreachable | none |
 
@@ -22,10 +22,12 @@ flowchart TB
     N["none"]
   end
 
-  B --> GW["NetworkGateway<br/>userspace L3"]
-  GW --> SAME["same-net forward / ARP / DNS"]
-  GW --> LW["lwIP<br/>outbound NAT and -p"]
-  GW --> UT["utun + helper<br/>Mac → 172.17.x.x"]
+  B --> GW["NetworkGateway<br/>IPAM · ACL · DNS"]
+  GW --> DP["BridgeDataplane"]
+  DP --> SAME["same-net L3 / ARP"]
+  DP --> LW["lwIP<br/>outbound NAT"]
+  DP --> UT["utun + helper<br/>Mac → 172.17.x.x"]
+  LW --> DP
 
   H --> VM["vmnet NAT"]
   VM --> PP["PortPublisher<br/>EXPOSE 1:1"]
@@ -37,7 +39,9 @@ flowchart TB
 
 ## `bridge`: userspace gateway
 
-Default subnet `172.17.0.0/16`. Each MicroVM has one virtio-net whose peer is the in-process gateway, not a Linux bridge. The guest has `lo` plus a single `eth0`: the address is a **`/32`**, and the default route and DNS are **`192.168.255.1`** (not the `172.17.0.1` shown in inspect). `172.17.0.1` is a Docker-shaped gateway field that IPAM skips; container addresses start at `172.17.0.2`.
+Default subnet `172.17.0.0/16`. Each MicroVM has one virtio-net whose peer is the in-process gateway, not a Linux bridge. Apple only exposes that NIC to userspace as a **datagram `socketpair`** (`VZFileHandleNetworkDeviceAttachment`): one fd goes to Virtualization.framework, the other is read by [`BridgeDataplane`](../Sources/ContainerEngine/BridgeDataplane.swift). [`NetworkGateway`](../Sources/ContainerEngine/NetworkGateway.swift) is the control plane (IPAM, records, ACL); it does not sit on the packet hot path.
+
+The guest has `lo` plus a single `eth0`: the address is a **`/32`**, and the default route and DNS are **`192.168.255.1`** (not the `172.17.0.1` shown in inspect). `172.17.0.1` is a Docker-shaped gateway field that IPAM skips; container addresses start at `172.17.0.2`.
 
 `network connect` to another bridge adds a `/32` on the same `eth0`; it does not hot-plug a second NIC. A running container with no bridge NIC yet (`none` or host-only) cannot hot-plug virtio-net.
 
@@ -51,7 +55,8 @@ flowchart LR
   end
 
   subgraph daemon["mackerd userspace"]
-    GW["NetworkGateway<br/>IPAM · same-net L3 · DNS · ACL"]
+    GW["NetworkGateway<br/>IPAM · DNS · ACL"]
+    DP["BridgeDataplane"]
     LW["GatewayLwIP"]
     Pub["PortPublisher<br/>localhost:-p"]
   end
@@ -61,37 +66,43 @@ flowchart LR
     B["container B<br/>eth0 172.17.0.3/32"]
   end
 
-  A <-->|"virtio-net"| GW
-  B <-->|"virtio-net"| GW
-  A <-.->|"same-net L3 via gateway"| B
-  GW -->|"off-link TCP/UDP"| LW
+  A <-->|"virtio-net socketpair"| DP
+  B <-->|"virtio-net socketpair"| DP
+  A <-.->|"same-net L3"| B
+  GW -.->|"records / ACL"| DP
+  DP -->|"off-link TCP/UDP"| LW
   LW <--> Sock
-  Pub -->|"127.0.0.1:relay"| LW
+  LW --> DP
+  Pub -->|"no helper: 127.0.0.1 + lwIP"| LW
+  Pub -->|"helper: connect 172.17.x"| Utun
   App -->|"curl :18080"| Pub
   Helper -->|"open utun · ifconfig · route"| Utun
   App -->|"curl 172.17.0.2"| Utun
-  Utun <--> GW
+  Utun <--> DP
 ```
 
 ### Where each flow goes
 
 **Same network (container → container)**  
-The gateway checks whether both ends share a Docker network. If they do, it L3-forwards. ARP, ping to the gateway, and embedded DNS stay in `NetworkGateway`. Traffic does not go through lwIP or utun. `--internal` allows only this path.
+`BridgeDataplane` checks whether both ends share a Docker network. If they do, it L3-forwards onto the peer's virtio socketpair. ARP, ping to the gateway, and embedded DNS stay in the dataplane (records published by `NetworkGateway`). Traffic does not go through lwIP or utun. `--internal` allows only this path.
 
 **Outbound (container → example.com)**  
 Destination is off-link and not `192.168.255.1`: the TCP/UDP session is handed to **lwIP**. lwIP terminates the guest side, then sends payload out a Mac socket. Outbound ICMP (`ping 8.8.8.8`) is unimplemented; pinging the gateway works.
 
 **`-p` (Mac → localhost:published port)**  
-`PortPublisher` listens on the Mac, relays to lwIP `listenLocal`, and lwIP opens toward the guest. No host route is required; this works without the helper.
+`PortPublisher` always listens on the Mac.
+
+- **Helper / utun ready:** it `connect`s `containerIP:containerPort`. The kernel sends those packets into utun; the dataplane forwards them to the guest. No lwIP on this path.
+- **No helper:** it relays to lwIP `listenLocal`, and lwIP opens toward the guest. This still works without a host route.
 
 **Mac → container IP (`curl 172.17.0.2`)**  
 Needs a host route, the `docker0` equivalent. A signed `mackerd` cannot `connect(utun)` on macOS 26 (`EPERM`), so:
 
 1. Once: `sudo macker helper install` (root LaunchDaemon; later boots do not prompt)
 2. The daemon sends `attach`; the helper opens utun, runs `ifconfig` / `route`, and passes the fd back with `SCM_RIGHTS`
-3. The Mac routes `172.17.0.0/16` → `utunN`; packets enter the gateway and are delivered to the container
+3. The Mac routes `172.17.0.0/16` → `utunN`; packets enter the dataplane and are delivered to the container
 
-Without the helper, utun is disabled quietly; `-p` and outbound are unaffected. `macker doctor` checks the helper.
+Without the helper, utun is disabled quietly; `-p` falls back to lwIP and outbound is unaffected. `macker doctor` checks the helper.
 
 ```mermaid
 sequenceDiagram
@@ -169,15 +180,16 @@ These are not interchangeable “NIC drivers”. They sit on different layers:
 | Name | What it is | When it appears |
 | --- | --- | --- |
 | **bridge** | Docker network mode | default; `network create` currently only supports this driver |
-| **NetworkGateway** | in-daemon L3 control plane + same-net forward | any container attached to a bridge |
-| **virtio-net** | the MicroVM NIC | bridge (point-to-point to the gateway) |
-| **lwIP** | in-process TCP/UDP stack | bridge outbound NAT and the guest side of `-p` |
+| **NetworkGateway** | IPAM, endpoint records, DNS policy, ACL snapshots | any container attached to a bridge |
+| **BridgeDataplane** | packet path: same-net L3, ARP, DNS, utun, hand-off to lwIP | same |
+| **virtio-net** | MicroVM NIC, VZ datagram socketpair to the dataplane | bridge |
+| **lwIP** | in-process TCP/UDP stack | bridge outbound NAT; `-p` only when utun is down |
 | **PortPublisher** | listen on the Mac and relay | bridge `-p`; host `EXPOSE` 1:1 |
 | **utun** | kernel tunnel, host-route entry | helper installed, and a bridge needs a host route |
 | **macker-helper** | root LaunchDaemon | opens utun and runs `ifconfig` / `route`; `mackerd` stays unprivileged |
 | **vmnet** | Apple NAT | `--network host` only |
 
-lwIP is **not** the path for Mac → container IP. utun is **not** outbound NAT and does not install `pf`. The helper does **not** create a permanent interface at install time — the utun fd is owned by the daemon process, and routes are torn down when the daemon exits.
+lwIP is **not** the path for Mac → container IP, and not the path for `-p` when the helper is installed. utun is **not** outbound NAT and does not install `pf`. The helper does **not** create a permanent interface at install time — the utun fd is owned by the daemon process, and routes are torn down when the daemon exits.
 
 ---
 
@@ -187,7 +199,7 @@ lwIP is **not** the path for Mac → container IP. utun is **not** outbound NAT 
 # bridge: outbound
 macker run --rm alpine wget -qO- https://example.com
 
-# bridge: -p (helper not required)
+# bridge: -p (helper not required; with helper this also uses utun)
 macker run -d --name web -p 18080:80 nginx
 curl http://127.0.0.1:18080
 

@@ -605,12 +605,13 @@ extension EngineManager {
             let destIP: String
             let destPort: Int
             if let bridgeTarget, let guestIP = try? IPv4Address(bridgeTarget.ipv4Address) {
-                destIP = "127.0.0.1"
-                destPort = try await networkGateway.startPortRelay(
+                let target = try await networkGateway.portPublishTarget(
                     guestIP: guestIP,
                     guestPort: UInt16(binding.containerPort),
                     udp: binding.protocolName.lowercased() == "udp"
                 )
+                destIP = target.ip
+                destPort = target.port
             } else {
                 destIP = ip
                 destPort = binding.containerPort

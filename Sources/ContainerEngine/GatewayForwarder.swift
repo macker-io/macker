@@ -14,6 +14,12 @@ protocol GatewayForwarder: Sendable {
     /// Guest → outside, per segment. Implementations own the flow state.
     func handleTCP(packet: IPv4Packet, segment: TCPSegment)
 
+    /// IPv4 datagram from virtio (no Ethernet). Established flows skip Swift TCP/UDP parse.
+    func ingestIPv4(_ packet: Data)
+
+    /// Published-port reply aimed at the gateway. `true` if the packet was consumed.
+    func acceptIPv4(_ packet: Data) -> Bool
+
     /// Recurse a guest DNS query upstream and answer from the gateway address.
     /// `upstreams` is already resolved (`GatewayDNS.upstreams(for:)`); the first reachable server is used.
     func forwardDNS(query: Data, guestIP: IPv4Address, guestPort: UInt16, upstreams: [String])

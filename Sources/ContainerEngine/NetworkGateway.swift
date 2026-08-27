@@ -9,7 +9,8 @@ import os
 ///
 /// A Docker bridge is a Linux `bridge` + `veth`; here every container is a MicroVM whose
 /// virtio-net is point-to-point with this gateway, so "same network" is a record set, not a
-/// broadcast domain. Packet handling lives in `NetworkGateway+Dataplane.swift`.
+/// broadcast domain. Packet handling lives in ``BridgeDataplane`` so virtio RX/TX
+/// does not hop onto this actor.
 actor NetworkGateway {
     /// The address the guest sees as gateway *and* resolver.
     static let gatewayAddress = IPv4Address(0xC0A8_FF01) // 192.168.255.1
@@ -35,9 +36,9 @@ actor NetworkGateway {
     private(set) var records: [Record] = []
     private(set) var links: [String: FileHandleLink] = [:]
     private(set) var forwarder: (any GatewayForwarder)?
+    private let dataplane = BridgeDataplane()
     private var utun = UtunDevice()
     private(set) var utunReady = false
-    private var ipID: UInt16 = 1
 
     /// IPAM handle for one container on one network.
     static func endpointKey(containerID: String, networkID: String) -> String {
@@ -109,16 +110,19 @@ actor NetworkGateway {
             )
         )
         registerNetwork(network)
+        publishDataplane()
     }
 
     func unbind(containerID: String, networkID: String) {
         records.removeAll { $0.containerID == containerID && $0.networkID == networkID }
         release(networkID: networkID, key: Self.endpointKey(containerID: containerID, networkID: networkID))
+        publishDataplane()
     }
 
     /// Drops the link but keeps IPAM leases, so a restart reuses the same addresses.
     func setDNS(containerID: String, nameservers: [String]) {
         dnsUpstreams[containerID] = nameservers
+        publishDataplane()
     }
 
     func dnsUpstreams(for containerID: String) -> [String] {
@@ -129,6 +133,7 @@ actor NetworkGateway {
         records.removeAll { $0.containerID == containerID }
         dnsUpstreams[containerID] = nil
         links.removeValue(forKey: containerID)?.stop()
+        publishDataplane()
     }
 
     /// Drops the link and returns the addresses to IPAM.
@@ -154,10 +159,11 @@ actor NetworkGateway {
             mac: try MACAddress(Self.macBytes(for: primary.address))
         )
         links[containerID] = link
-        link.start { [id = containerID] frame in
-            Task { await self.handleFrame(containerID: id, frame: frame) }
-        }
         try ensureForwarder()
+        publishDataplane()
+        link.start { [dataplane] frame in
+            dataplane.handleFrame(containerID: containerID, frame: frame)
+        }
         ensureUtun()
         return link.interface
     }
@@ -194,6 +200,16 @@ actor NetworkGateway {
         return try await forwarder.listenLocal(guestIP: guestIP, guestPort: guestPort, udp: udp)
     }
 
+    /// `-p` target: container IP when the host route exists (PortPublisher `connect`s
+    /// over utun, no lwIP). Without the helper, a localhost lwIP relay.
+    func portPublishTarget(guestIP: IPv4Address, guestPort: UInt16, udp: Bool) async throws -> (ip: String, port: Int) {
+        if utunReady {
+            return (guestIP.description, Int(guestPort))
+        }
+        let port = try await startPortRelay(guestIP: guestIP, guestPort: guestPort, udp: udp)
+        return ("127.0.0.1", port)
+    }
+
     func stopPortRelay(guestIP: IPv4Address, guestPort: UInt16, udp: Bool) {
         forwarder?.stopListenLocal(guestIP: guestIP, guestPort: guestPort, udp: udp)
     }
@@ -203,17 +219,20 @@ actor NetworkGateway {
     /// Off-link traffic is terminated by the in-process lwIP forwarder.
     private func ensureForwarder() throws {
         guard forwarder == nil else { return }
-        let onGuest: @Sendable (IPv4Address, Data) -> Void = { [weak self] guestIP, packet in
-            Task { await self?.deliver(packet, toIP: guestIP) }
+        let dataplane = self.dataplane
+        let onGuest: @Sendable (IPv4Address, Data) -> Void = { guestIP, packet in
+            dataplane.deliver(packet, toIP: guestIP)
         }
         guard let stack = GatewayLwIP(onGuest: onGuest) else {
             throw EngineError.runtimeUnavailable("failed to start lwIP gateway forwarder")
         }
         forwarder = stack
+        publishDataplane()
     }
 
     /// Host routes into container subnets. The helper (root) opens utun and passes
-    /// the fd; signed `mackerd` cannot `connect(utun)` on macOS 26. `-p` does not need this.
+    /// the fd; signed `mackerd` cannot `connect(utun)` on macOS 26. When this succeeds,
+    /// `-p` can `connect` the container IP instead of an lwIP localhost relay.
     private func ensureUtun() {
         guard !utunReady else { return }
         do {
@@ -221,8 +240,12 @@ actor NetworkGateway {
                 .filter { $0.driver == "bridge" && !$0.subnet.isEmpty }
                 .map(\.subnet)
             try applyHostNet(routes: routes)
-            utun.start { [weak self] packet in
-                Task { await self?.handleUtun(packet) }
+            let dataplane = self.dataplane
+            utun.start { packet in
+                dataplane.handleUtun(packet)
+            }
+            dataplane.setUtunWriter { [utun] packet in
+                utun.writeIP(packet)
             }
             utunReady = true
             Self.utunNote("host routes ready on \(utun.name)")
@@ -267,11 +290,6 @@ actor NetworkGateway {
         }
     }
 
-    func writeToUtun(_ packet: Data) {
-        guard utunReady else { return }
-        utun.writeIP(packet)
-    }
-
     private static let utunLog = Logger(subsystem: "io.macker.daemon", category: "utun")
 
     private static func utunNote(_ message: String) {
@@ -290,8 +308,18 @@ actor NetworkGateway {
         if utunReady, !utun.name.isEmpty {
             try? HelperClient.teardown(interface: utun.name)
         }
+        dataplane.setUtunWriter(nil)
         utun.closeDevice()
         utunReady = false
+    }
+
+    private func publishDataplane() {
+        dataplane.update(
+            records: records,
+            dnsUpstreams: dnsUpstreams,
+            links: links,
+            forwarder: forwarder
+        )
     }
 
     // MARK: - Helpers
@@ -300,11 +328,6 @@ actor NetworkGateway {
     func networks(of ip: IPv4Address) -> Set<String> {
         let containers = Set(records.filter { $0.ip == ip }.map(\.containerID))
         return Set(records.filter { containers.contains($0.containerID) }.map(\.networkID))
-    }
-
-    func nextID() -> UInt16 {
-        ipID &+= 1
-        return ipID
     }
 
     private func match(_ needle: String, in records: [Record]) -> IPv4Address? {

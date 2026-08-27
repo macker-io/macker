@@ -1,6 +1,89 @@
 import ContainerizationExtras
 import Foundation
 
+/// Wire-header peeks that do not copy the frame into `[UInt8]` / re-`encode()`.
+enum IPv4Peek {
+    struct Tuple {
+        var src: UInt32
+        var dst: UInt32
+        var proto: UInt8
+        var srcPort: UInt16
+        var dstPort: UInt16
+        var tcpFlags: UInt8
+    }
+
+    static func ethernetType(_ frame: Data) -> UInt16? {
+        frame.withUnsafeBytes { ethernetType($0) }
+    }
+
+    static func ethernetType(_ bytes: UnsafeRawBufferPointer) -> UInt16? {
+        guard bytes.count >= Ethernet.headerLength else { return nil }
+        return UInt16(bytes[12]) << 8 | UInt16(bytes[13])
+    }
+
+    static func ipv4Range(inEthernet bytes: UnsafeRawBufferPointer) -> Range<Int>? {
+        guard bytes.count >= Ethernet.headerLength + IPv4Packet.headerLength else { return nil }
+        let start = Ethernet.headerLength
+        let versionIhl = bytes[start]
+        let ihl = Int(versionIhl & 0x0f) * 4
+        guard versionIhl >> 4 == 4, ihl >= IPv4Packet.headerLength else { return nil }
+        let total = Int(bytes[start + 2]) << 8 | Int(bytes[start + 3])
+        guard total >= ihl, bytes.count >= start + total else { return nil }
+        return start..<(start + total)
+    }
+
+    static func ipv4Datagram(fromEthernet frame: Data) -> Data? {
+        frame.withUnsafeBytes { bytes in
+            guard let range = ipv4Range(inEthernet: bytes) else { return nil }
+            return Data(bytes[range])
+        }
+    }
+
+    static func tuple(_ packet: Data) -> Tuple? {
+        packet.withUnsafeBytes { tuple($0) }
+    }
+
+    static func tuple(_ bytes: UnsafeRawBufferPointer) -> Tuple? {
+        guard bytes.count >= IPv4Packet.headerLength else { return nil }
+        let versionIhl = bytes[0]
+        let ihl = Int(versionIhl & 0x0f) * 4
+        guard versionIhl >> 4 == 4, ihl >= IPv4Packet.headerLength, bytes.count >= ihl else { return nil }
+        let total = Int(bytes[2]) << 8 | Int(bytes[3])
+        guard total >= ihl, bytes.count >= total else { return nil }
+        let proto = bytes[9]
+        var srcPort: UInt16 = 0
+        var dstPort: UInt16 = 0
+        var tcpFlags: UInt8 = 0
+        if proto == Ethernet.protoTCP || proto == Ethernet.protoUDP {
+            guard bytes.count >= ihl + 4 else { return nil }
+            srcPort = UInt16(bytes[ihl]) << 8 | UInt16(bytes[ihl + 1])
+            dstPort = UInt16(bytes[ihl + 2]) << 8 | UInt16(bytes[ihl + 3])
+        }
+        if proto == Ethernet.protoTCP {
+            guard bytes.count >= ihl + 14 else { return nil }
+            tcpFlags = bytes[ihl + 13]
+        }
+        return Tuple(
+            src: read32(bytes, 12),
+            dst: read32(bytes, 16),
+            proto: proto,
+            srcPort: srcPort,
+            dstPort: dstPort,
+            tcpFlags: tcpFlags
+        )
+    }
+
+    static func read32(_ data: Data, _ offset: Int) -> UInt32 {
+        data.withUnsafeBytes { read32($0, offset) }
+    }
+
+    static func read32(_ bytes: UnsafeRawBufferPointer, _ offset: Int) -> UInt32 {
+        guard bytes.count >= offset + 4 else { return 0 }
+        return UInt32(bytes[offset]) << 24 | UInt32(bytes[offset + 1]) << 16
+            | UInt32(bytes[offset + 2]) << 8 | UInt32(bytes[offset + 3])
+    }
+}
+
 enum Ethernet {
     static let headerLength = 14
     static let typeARP: UInt16 = 0x0806
@@ -48,14 +131,29 @@ enum Ethernet {
 
 enum ARP {
     static func parseRequest(_ payload: Data) -> (senderIP: IPv4Address, targetIP: IPv4Address)? {
+        payload.withUnsafeBytes { parseRequest($0) }
+    }
+
+    static func parseRequest(_ payload: UnsafeRawBufferPointer) -> (senderIP: IPv4Address, targetIP: IPv4Address)? {
         guard payload.count >= 28 else { return nil }
-        let bytes = [UInt8](payload)
-        let oper = UInt16(bytes[6]) << 8 | UInt16(bytes[7])
+        let oper = UInt16(payload[6]) << 8 | UInt16(payload[7])
         guard oper == 1 else { return nil }
-        guard let sender = try? IPv4Address(Array(bytes[14..<18])),
-            let target = try? IPv4Address(Array(bytes[24..<28]))
+        guard let sender = try? IPv4Address(Array(payload[14..<18])),
+            let target = try? IPv4Address(Array(payload[24..<28]))
         else { return nil }
         return (sender, target)
+    }
+
+    /// Ethernet frame: src MAC + ARP who-has `gateway`.
+    static func parseEthernetRequest(
+        _ frame: UnsafeRawBufferPointer,
+        gateway: IPv4Address
+    ) -> (srcMAC: MACAddress, senderIP: IPv4Address)? {
+        guard frame.count >= Ethernet.headerLength + 28 else { return nil }
+        let payload = UnsafeRawBufferPointer(rebasing: frame[Ethernet.headerLength...])
+        guard let request = parseRequest(payload), request.targetIP == gateway else { return nil }
+        guard let srcMAC = try? MACAddress(Array(frame[6..<12])) else { return nil }
+        return (srcMAC, request.senderIP)
     }
 
     static func reply(senderMAC: MACAddress, senderIP: IPv4Address, targetMAC: MACAddress, targetIP: IPv4Address) -> Data {
@@ -156,6 +254,8 @@ struct TCPSegment {
     var srcPort: UInt16
     var dstPort: UInt16
     var seq: UInt32
+    var ack: UInt32
+    var window: UInt16
     var flags: Flags
     var payload: Data
 
@@ -170,6 +270,8 @@ struct TCPSegment {
             srcPort: UInt16(bytes[0]) << 8 | UInt16(bytes[1]),
             dstPort: UInt16(bytes[2]) << 8 | UInt16(bytes[3]),
             seq: UInt32(bytes[4]) << 24 | UInt32(bytes[5]) << 16 | UInt32(bytes[6]) << 8 | UInt32(bytes[7]),
+            ack: UInt32(bytes[8]) << 24 | UInt32(bytes[9]) << 16 | UInt32(bytes[10]) << 8 | UInt32(bytes[11]),
+            window: UInt16(bytes[14]) << 8 | UInt16(bytes[15]),
             flags: Flags(rawValue: bytes[13]),
             payload: payload
         )

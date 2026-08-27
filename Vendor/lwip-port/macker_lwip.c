@@ -19,7 +19,9 @@
 #define MACKER_FIRST_PORT 40000u
 #define MACKER_LAST_PORT 49999u
 #define MACKER_MAX_PACKET 65535u
-#define MACKER_MAX_PENDING (256u * 1024u)
+#define MACKER_MAX_PENDING (1024u * 1024u)
+#define MACKER_COAL_BYTES (32u * 1024u)
+#define MACKER_TX_STACK 2048u
 
 typedef struct macker_tcp_flow macker_tcp_flow_t;
 typedef struct macker_udp_flow macker_udp_flow_t;
@@ -33,11 +35,16 @@ struct macker_tcp_flow {
   uint16_t guest_port;
   uint16_t local_port;
   bool outbound;
+  bool write_blocked;
   struct tcp_pcb *listener;
   struct tcp_pcb *pcb;
   uint8_t *pending;
   size_t pending_length;
+  size_t pending_capacity;
   size_t pending_offset;
+  uint8_t *to_host;
+  size_t to_host_length;
+  size_t to_host_capacity;
   macker_tcp_flow_t *next;
 };
 
@@ -54,6 +61,13 @@ struct macker_udp_flow {
   macker_udp_flow_t *next;
 };
 
+struct tx_packet {
+  uint32_t id;
+  uint16_t length;
+  struct tx_packet *next;
+  uint8_t data[];
+};
+
 struct macker_lwip {
   struct netif netif;
   macker_lwip_output_fn output;
@@ -62,7 +76,11 @@ struct macker_lwip {
   uint16_t next_port;
   macker_tcp_flow_t *tcp;
   macker_udp_flow_t *udp;
+  struct tx_packet *tx_head;
+  struct tx_packet *tx_tail;
 };
+
+static __thread int in_wait_action;
 
 static pthread_once_t tcpip_once = PTHREAD_ONCE_INIT;
 static pthread_mutex_t tcpip_init_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -158,7 +176,6 @@ static bool rewrite_input(uint8_t *packet, size_t length, uint16_t local_port) {
   if (packet[9] != IP_PROTO_TCP && packet[9] != IP_PROTO_UDP) return false;
   write32(packet + 16, MACKER_GATEWAY_IP);
   write16(packet + header_length + 2, local_port);
-  fix_checksums(packet, length);
   return true;
 }
 
@@ -181,7 +198,6 @@ static bool rewrite_output(macker_tcp_flow_t *tcp, macker_udp_flow_t *udp,
     write32(packet + 16, udp->guest_ip);
     write16(packet + header_length + 2, udp->guest_port);
   }
-  fix_checksums(packet, length);
   return true;
 }
 
@@ -229,25 +245,72 @@ static macker_udp_flow_t *find_udp_output(struct macker_lwip *stack,
   return NULL;
 }
 
+static void queue_tx(struct macker_lwip *stack, uint32_t id,
+                     const uint8_t *packet, size_t length) {
+  struct tx_packet *item = malloc(sizeof(*item) + length);
+  if (item == NULL) return;
+  item->id = id;
+  item->length = (uint16_t)length;
+  item->next = NULL;
+  memcpy(item->data, packet, length);
+  if (stack->tx_tail != NULL) stack->tx_tail->next = item;
+  else stack->tx_head = item;
+  stack->tx_tail = item;
+}
+
+static void flush_tx(struct macker_lwip *stack) {
+  struct tx_packet *item = stack->tx_head;
+  stack->tx_head = NULL;
+  stack->tx_tail = NULL;
+  while (item != NULL) {
+    struct tx_packet *next = item->next;
+    if (stack->output != NULL) {
+      stack->output(stack->context, item->id, item->data, item->length);
+    }
+    free(item);
+    item = next;
+  }
+}
+
+static void emit_output(struct macker_lwip *stack, uint32_t id,
+                        const uint8_t *packet, size_t length) {
+  if (stack->output == NULL) return;
+  /* Defer until wait_action drops the core lock so Swift can deliver
+     synchronously on the same thread without deadlocking. Timer/tcpip
+     thread paths still emit immediately (Swift will async). */
+  if (in_wait_action) {
+    queue_tx(stack, id, packet, length);
+    return;
+  }
+  stack->output(stack->context, id, packet, length);
+}
+
 static err_t macker_netif_output(struct netif *netif, struct pbuf *p,
                                  const ip4_addr_t *destination) {
   (void)destination;
   struct macker_lwip *stack = (struct macker_lwip *)netif->state;
   if (p == NULL || p->tot_len > MACKER_MAX_PACKET) return ERR_BUF;
-  uint8_t *packet = malloc(p->tot_len);
-  if (packet == NULL) return ERR_MEM;
+  uint8_t stack_packet[MACKER_TX_STACK];
+  uint8_t *packet;
+  uint8_t *heap = NULL;
+  if (p->tot_len <= MACKER_TX_STACK) {
+    packet = stack_packet;
+  } else {
+    heap = malloc(p->tot_len);
+    if (heap == NULL) return ERR_MEM;
+    packet = heap;
+  }
   pbuf_copy_partial(p, packet, p->tot_len, 0);
   macker_tcp_flow_t *tcp = find_tcp_output(stack, packet, p->tot_len);
   macker_udp_flow_t *udp = tcp == NULL ? find_udp_output(stack, packet, p->tot_len) : NULL;
   if (tcp == NULL && udp == NULL) {
-    free(packet);
+    free(heap);
     return ERR_OK;
   }
   rewrite_output(tcp, udp, packet, p->tot_len);
-  if (stack->output != NULL) {
-    stack->output(stack->context, tcp != NULL ? tcp->id : udp->id, packet, p->tot_len);
-  }
-  free(packet);
+  fix_checksums(packet, p->tot_len);
+  emit_output(stack, tcp != NULL ? tcp->id : udp->id, packet, p->tot_len);
+  free(heap);
   return ERR_OK;
 }
 
@@ -255,7 +318,7 @@ static err_t macker_netif_init(struct netif *netif) {
   struct macker_lwip *stack = (struct macker_lwip *)netif->state;
   netif->name[0] = 'm';
   netif->name[1] = 'k';
-  netif->mtu = 1500;
+  netif->mtu = 65535;
   netif->flags = 0;
   netif->output = macker_netif_output;
   netif->linkoutput = NULL;
@@ -272,6 +335,40 @@ static void emit_event(struct macker_lwip *stack, uint32_t id, int event,
 
 static void tcp_pump(macker_tcp_flow_t *flow);
 static void clear_tcp_callbacks(struct tcp_pcb *pcb);
+static void tcp_flush_host(macker_tcp_flow_t *flow, int force);
+
+static void tcp_flush_hosts(struct macker_lwip *stack) {
+  for (macker_tcp_flow_t *flow = stack->tcp; flow != NULL; flow = flow->next) {
+    tcp_flush_host(flow, 1);
+  }
+}
+
+static void tcp_flush_host(macker_tcp_flow_t *flow, int force) {
+  if (flow->to_host_length == 0) return;
+  if (!force && flow->to_host_length < MACKER_COAL_BYTES) return;
+  emit_event(flow->stack, flow->id, MACKER_LWIP_EVENT_DATA, flow->to_host, flow->to_host_length);
+  free(flow->to_host);
+  flow->to_host = NULL;
+  flow->to_host_length = 0;
+  flow->to_host_capacity = 0;
+}
+
+static int tcp_queue_host(macker_tcp_flow_t *flow, const uint8_t *data, size_t length) {
+  if (length == 0) return 0;
+  if (flow->to_host_length + length > MACKER_MAX_PENDING) return -1;
+  if (flow->to_host_length + length > flow->to_host_capacity) {
+    size_t cap = flow->to_host_capacity == 0 ? MACKER_COAL_BYTES : flow->to_host_capacity * 2;
+    if (cap < flow->to_host_length + length) cap = flow->to_host_length + length;
+    uint8_t *buf = realloc(flow->to_host, cap);
+    if (buf == NULL) return -1;
+    flow->to_host = buf;
+    flow->to_host_capacity = cap;
+  }
+  memcpy(flow->to_host + flow->to_host_length, data, length);
+  flow->to_host_length += length;
+  if (flow->to_host_length >= MACKER_COAL_BYTES) tcp_flush_host(flow, 1);
+  return 0;
+}
 
 static err_t tcp_connected(void *arg, struct tcp_pcb *pcb, err_t error) {
   macker_tcp_flow_t *flow = (macker_tcp_flow_t *)arg;
@@ -309,6 +406,7 @@ static err_t tcp_receive(void *arg, struct tcp_pcb *pcb, struct pbuf *p,
   (void)error;
   macker_tcp_flow_t *flow = (macker_tcp_flow_t *)arg;
   if (p == NULL) {
+    tcp_flush_host(flow, 1);
     clear_tcp_callbacks(pcb);
     flow->pcb = NULL;
     emit_event(flow->stack, flow->id, MACKER_LWIP_EVENT_CLOSED, NULL, 0);
@@ -316,16 +414,28 @@ static err_t tcp_receive(void *arg, struct tcp_pcb *pcb, struct pbuf *p,
     return ERR_OK;
   }
   if (p->tot_len != 0) {
-    uint8_t *data = malloc(p->tot_len);
-    if (data == NULL) {
-      pbuf_free(p);
+    if (flow->to_host_length + p->tot_len > MACKER_MAX_PENDING) {
       return ERR_MEM;
     }
-    pbuf_copy_partial(p, data, p->tot_len, 0);
-    emit_event(flow->stack, flow->id, MACKER_LWIP_EVENT_DATA, data, p->tot_len);
-    free(data);
+    if (p->next == NULL) {
+      if (tcp_queue_host(flow, (const uint8_t *)p->payload, p->len) != 0) {
+        return ERR_MEM;
+      }
+    } else {
+      if (flow->to_host_length + p->tot_len > flow->to_host_capacity) {
+        size_t cap = flow->to_host_capacity == 0 ? MACKER_COAL_BYTES : flow->to_host_capacity * 2;
+        if (cap < flow->to_host_length + p->tot_len) cap = flow->to_host_length + p->tot_len;
+        uint8_t *buf = realloc(flow->to_host, cap);
+        if (buf == NULL) return ERR_MEM;
+        flow->to_host = buf;
+        flow->to_host_capacity = cap;
+      }
+      pbuf_copy_partial(p, flow->to_host + flow->to_host_length, p->tot_len, 0);
+      flow->to_host_length += p->tot_len;
+      if (flow->to_host_length >= MACKER_COAL_BYTES) tcp_flush_host(flow, 1);
+    }
+    tcp_recved(pcb, p->tot_len);
   }
-  tcp_recved(pcb, p->tot_len);
   pbuf_free(p);
   return ERR_OK;
 }
@@ -350,6 +460,14 @@ static void attach_tcp_callbacks(struct tcp_pcb *pcb, macker_tcp_flow_t *flow) {
   tcp_recv(pcb, tcp_receive);
   tcp_sent(pcb, on_tcp_sent);
   tcp_err(pcb, tcp_error);
+  tcp_nagle_disable(pcb);
+}
+
+static void tcp_notify_writable(macker_tcp_flow_t *flow) {
+  if (!flow->write_blocked) return;
+  if (flow->pending_length > MACKER_MAX_PENDING / 2) return;
+  flow->write_blocked = false;
+  emit_event(flow->stack, flow->id, MACKER_LWIP_EVENT_WRITABLE, NULL, 0);
 }
 
 static void tcp_pump(macker_tcp_flow_t *flow) {
@@ -358,8 +476,10 @@ static void tcp_pump(macker_tcp_flow_t *flow) {
     size_t remaining = flow->pending_length - flow->pending_offset;
     size_t amount = remaining < tcp_sndbuf(flow->pcb) ? remaining : tcp_sndbuf(flow->pcb);
     if (amount > 0xffffu) amount = 0xffffu;
+    u8_t flags = TCP_WRITE_FLAG_COPY;
+    if (amount < remaining) flags |= TCP_WRITE_FLAG_MORE;
     err_t result = tcp_write(flow->pcb, flow->pending + flow->pending_offset,
-                             (u16_t)amount, TCP_WRITE_FLAG_COPY);
+                             (u16_t)amount, flags);
     if (result == ERR_MEM) break;
     if (result != ERR_OK) {
       emit_event(flow->stack, flow->id, MACKER_LWIP_EVENT_ERROR, NULL, 0);
@@ -371,6 +491,7 @@ static void tcp_pump(macker_tcp_flow_t *flow) {
     free(flow->pending);
     flow->pending = NULL;
     flow->pending_length = 0;
+    flow->pending_capacity = 0;
     flow->pending_offset = 0;
   } else if (flow->pending_offset != 0) {
     memmove(flow->pending, flow->pending + flow->pending_offset,
@@ -379,27 +500,26 @@ static void tcp_pump(macker_tcp_flow_t *flow) {
     flow->pending_offset = 0;
   }
   tcp_output(flow->pcb);
+  tcp_notify_writable(flow);
 }
 
 static err_t input_packet(struct macker_lwip *stack, uint16_t local_port,
                           const uint8_t *packet, size_t length, bool rewrite) {
   if (packet == NULL || length == 0 || length > MACKER_MAX_PACKET) return ERR_ARG;
-  uint8_t *copy = malloc(length);
-  if (copy == NULL) return ERR_MEM;
-  memcpy(copy, packet, length);
-  if (rewrite && !rewrite_input(copy, length, local_port)) {
-    free(copy);
-    return ERR_VAL;
-  }
   struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t)length, PBUF_RAM);
-  if (p == NULL) {
-    free(copy);
+  if (p == NULL) return ERR_MEM;
+  if (pbuf_take(p, packet, (u16_t)length) != ERR_OK) {
+    pbuf_free(p);
     return ERR_MEM;
   }
-  pbuf_take(p, copy, (u16_t)length);
-  free(copy);
-  err_t result = ip4_input(p, &stack->netif);
-  return result;
+  if (rewrite) {
+    if (p->next != NULL || p->len < length ||
+        !rewrite_input((uint8_t *)p->payload, length, local_port)) {
+      pbuf_free(p);
+      return ERR_VAL;
+    }
+  }
+  return ip4_input(p, &stack->netif);
 }
 
 static uint16_t next_port(struct macker_lwip *stack) {
@@ -432,8 +552,12 @@ static void init_netif_action(void *arg) {
   }
 }
 
-static int wait_action(void (*function)(void *), void *argument) {
-  return tcpip_callback_wait(function, argument) == ERR_OK ? 0 : -1;
+static int wait_action(struct macker_lwip *stack, void (*function)(void *), void *argument) {
+  in_wait_action++;
+  int result = tcpip_callback_wait(function, argument) == ERR_OK ? 0 : -1;
+  in_wait_action--;
+  if (stack != NULL) flush_tx(stack);
+  return result;
 }
 
 macker_lwip_t *macker_lwip_create(macker_lwip_output_fn output,
@@ -447,7 +571,7 @@ macker_lwip_t *macker_lwip_create(macker_lwip_output_fn output,
   stack->context = context;
   stack->next_port = MACKER_FIRST_PORT;
   struct init_netif_action action = { .stack = stack, .result = -1 };
-  if (wait_action(init_netif_action, &action) != 0 || action.result != 0) {
+  if (wait_action(stack, init_netif_action, &action) != 0 || action.result != 0) {
     free(stack);
     return NULL;
   }
@@ -498,6 +622,7 @@ static void tcp_outbound_start_action(void *arg) {
   stack->tcp = flow;
   action->result = input_packet(stack, flow->local_port, action->packet, action->length, true) == ERR_OK ? 0 : -1;
   close_tcp_listener(flow);
+  tcp_flush_hosts(stack);
 }
 
 static void tcp_inbound_start_action(void *arg) {
@@ -544,6 +669,7 @@ static void tcp_input_action(void *arg) {
     input_packet(action->stack, flow->local_port, action->packet, action->length, flow->outbound) == ERR_OK ? 0 : -1;
   close_tcp_listener(flow);
   if (action->result == 0) tcp_pump(flow);
+  tcp_flush_hosts(action->stack);
 }
 
 int macker_lwip_tcp_outbound_start(macker_lwip_t *stack, uint32_t flow_id,
@@ -553,7 +679,7 @@ int macker_lwip_tcp_outbound_start(macker_lwip_t *stack, uint32_t flow_id,
   if (stack == NULL || packet == NULL) return -1;
   struct tcp_start_action action = { stack, flow_id, remote_ip, guest_ip, remote_port,
                                      guest_port, 0, packet, length, -1 };
-  return wait_action(tcp_outbound_start_action, &action) == 0 ? action.result : -1;
+  return wait_action(stack, tcp_outbound_start_action, &action) == 0 ? action.result : -1;
 }
 
 int macker_lwip_tcp_inbound_start(macker_lwip_t *stack, uint32_t flow_id,
@@ -562,30 +688,88 @@ int macker_lwip_tcp_inbound_start(macker_lwip_t *stack, uint32_t flow_id,
   if (stack == NULL) return -1;
   struct tcp_start_action action = { stack, flow_id, 0, guest_ip, 0, guest_port,
                                      host_port, NULL, 0, -1 };
-  return wait_action(tcp_inbound_start_action, &action) == 0 ? action.result : -1;
+  return wait_action(stack, tcp_inbound_start_action, &action) == 0 ? action.result : -1;
 }
 
 int macker_lwip_tcp_input(macker_lwip_t *stack, uint32_t flow_id,
                           const uint8_t *packet, size_t length) {
   if (stack == NULL || packet == NULL) return -1;
   struct packet_action action = { stack, flow_id, packet, length, -1 };
-  return wait_action(tcp_input_action, &action) == 0 ? action.result : -1;
+  return wait_action(stack, tcp_input_action, &action) == 0 ? action.result : -1;
+}
+
+struct batch_action {
+  struct macker_lwip *stack;
+  const uint32_t *ids;
+  const uint8_t *const *packets;
+  const size_t *lengths;
+  size_t count;
+  int result;
+};
+
+static void tcp_input_many_action(void *arg) {
+  struct batch_action *action = arg;
+  uint32_t last_id = 0;
+  int have_last = 0;
+  action->result = 0;
+  for (size_t i = 0; i < action->count; i++) {
+    macker_tcp_flow_t *flow = find_tcp(action->stack, action->ids[i]);
+    if (flow == NULL) { action->result = -1; continue; }
+    if (input_packet(action->stack, flow->local_port, action->packets[i],
+                     action->lengths[i], flow->outbound) != ERR_OK) {
+      action->result = -1;
+    }
+    close_tcp_listener(flow);
+    if (have_last && last_id != action->ids[i]) {
+      macker_tcp_flow_t *previous = find_tcp(action->stack, last_id);
+      if (previous != NULL) tcp_pump(previous);
+    }
+    last_id = action->ids[i];
+    have_last = 1;
+  }
+  if (have_last) {
+    macker_tcp_flow_t *flow = find_tcp(action->stack, last_id);
+    if (flow != NULL) tcp_pump(flow);
+  }
+  tcp_flush_hosts(action->stack);
+}
+
+int macker_lwip_tcp_input_many(macker_lwip_t *stack, const uint32_t *flow_ids,
+                               const uint8_t *const *packets, const size_t *lengths,
+                               size_t count) {
+  if (stack == NULL || flow_ids == NULL || packets == NULL || lengths == NULL || count == 0) return -1;
+  struct batch_action action = { stack, flow_ids, packets, lengths, count, -1 };
+  return wait_action(stack, tcp_input_many_action, &action) == 0 ? action.result : -1;
 }
 
 struct write_action { struct macker_lwip *stack; uint32_t id; const uint8_t *data; size_t length; int result; };
 static void tcp_write_action(void *arg) {
   struct write_action *action = arg;
   macker_tcp_flow_t *flow = find_tcp(action->stack, action->id);
-  if (flow == NULL || action->length > MACKER_MAX_PACKET) { action->result = -1; return; }
+  if (flow == NULL) { action->result = -1; return; }
   if (action->length != 0) {
-    if (flow->pending_length + action->length > MACKER_MAX_PENDING) { action->result = -1; return; }
-    uint8_t *pending = realloc(flow->pending, flow->pending_length + action->length);
-    if (pending == NULL) { action->result = -1; return; }
-    memcpy(pending + flow->pending_length, action->data, action->length);
-    flow->pending = pending;
+    if (flow->pending_length + action->length > MACKER_MAX_PENDING) {
+      flow->write_blocked = true;
+      action->result = 1;
+      return;
+    }
+    if (flow->pending_length + action->length > flow->pending_capacity) {
+      size_t cap = flow->pending_capacity == 0 ? MACKER_COAL_BYTES : flow->pending_capacity * 2;
+      if (cap < flow->pending_length + action->length) cap = flow->pending_length + action->length;
+      uint8_t *pending = realloc(flow->pending, cap);
+      if (pending == NULL) { action->result = -1; return; }
+      flow->pending = pending;
+      flow->pending_capacity = cap;
+    }
+    memcpy(flow->pending + flow->pending_length, action->data, action->length);
     flow->pending_length += action->length;
   }
   tcp_pump(flow);
+  if (flow->pending_length > MACKER_MAX_PENDING / 2) {
+    flow->write_blocked = true;
+    action->result = 1;
+    return;
+  }
   action->result = 0;
 }
 
@@ -593,7 +777,7 @@ int macker_lwip_tcp_write(macker_lwip_t *stack, uint32_t flow_id,
                           const uint8_t *data, size_t length) {
   if (stack == NULL || (length != 0 && data == NULL)) return -1;
   struct write_action action = { stack, flow_id, data, length, -1 };
-  return wait_action(tcp_write_action, &action) == 0 ? action.result : -1;
+  return wait_action(stack, tcp_write_action, &action) == 0 ? action.result : -1;
 }
 
 static void tcp_fin_action(void *arg) {
@@ -605,7 +789,7 @@ static void tcp_fin_action(void *arg) {
 int macker_lwip_tcp_fin(macker_lwip_t *stack, uint32_t flow_id) {
   if (stack == NULL) return -1;
   struct write_action action = { stack, flow_id, NULL, 0, -1 };
-  return wait_action(tcp_fin_action, &action) == 0 ? action.result : -1;
+  return wait_action(stack, tcp_fin_action, &action) == 0 ? action.result : -1;
 }
 
 static void clear_tcp_callbacks(struct tcp_pcb *pcb) {
@@ -633,6 +817,7 @@ static void tcp_close_action(void *arg) {
   abort_tcp_pcb(flow->listener, true);
   abort_tcp_pcb(flow->pcb, false);
   free(flow->pending);
+  free(flow->to_host);
   free(flow);
   action->result = 0;
 }
@@ -640,7 +825,7 @@ static void tcp_close_action(void *arg) {
 void macker_lwip_tcp_close(macker_lwip_t *stack, uint32_t flow_id) {
   if (stack == NULL) return;
   struct write_action action = { stack, flow_id, NULL, 0, -1 };
-  (void)wait_action(tcp_close_action, &action);
+  (void)wait_action(stack, tcp_close_action, &action);
 }
 
 static void udp_receive(void *arg, struct udp_pcb *pcb, struct pbuf *p,
@@ -696,9 +881,9 @@ int macker_lwip_udp_outbound_start(macker_lwip_t *stack, uint32_t flow_id,
                                    const uint8_t *packet, size_t length) {
   if (stack == NULL || packet == NULL) return -1;
   struct udp_start_action action = { stack, flow_id, remote_ip, guest_ip, remote_port, guest_port, 0, -1 };
-  if (wait_action(udp_start_action, &action) != 0 || action.result != 0) return -1;
+  if (wait_action(stack, udp_start_action, &action) != 0 || action.result != 0) return -1;
   struct packet_action input = { stack, flow_id, packet, length, -1 };
-  return wait_action(udp_input_action, &input) == 0 ? input.result : -1;
+  return wait_action(stack, udp_input_action, &input) == 0 ? input.result : -1;
 }
 
 int macker_lwip_udp_inbound_start(macker_lwip_t *stack, uint32_t flow_id,
@@ -706,7 +891,7 @@ int macker_lwip_udp_inbound_start(macker_lwip_t *stack, uint32_t flow_id,
                                   uint16_t host_port) {
   if (stack == NULL) return -1;
   struct udp_start_action action = { stack, flow_id, 0, guest_ip, 0, guest_port, host_port, -1 };
-  return wait_action(udp_start_action, &action) == 0 ? action.result : -1;
+  return wait_action(stack, udp_start_action, &action) == 0 ? action.result : -1;
 }
 
 static void udp_input_action(void *arg) {
@@ -721,7 +906,7 @@ int macker_lwip_udp_input(macker_lwip_t *stack, uint32_t flow_id,
                           const uint8_t *packet, size_t length) {
   if (stack == NULL || packet == NULL) return -1;
   struct packet_action action = { stack, flow_id, packet, length, -1 };
-  return wait_action(udp_input_action, &action) == 0 ? action.result : -1;
+  return wait_action(stack, udp_input_action, &action) == 0 ? action.result : -1;
 }
 
 static void udp_write_action(void *arg) {
@@ -740,7 +925,7 @@ int macker_lwip_udp_write(macker_lwip_t *stack, uint32_t flow_id,
                           const uint8_t *data, size_t length) {
   if (stack == NULL || (length != 0 && data == NULL)) return -1;
   struct write_action action = { stack, flow_id, data, length, -1 };
-  return wait_action(udp_write_action, &action) == 0 ? action.result : -1;
+  return wait_action(stack, udp_write_action, &action) == 0 ? action.result : -1;
 }
 
 static void udp_close_action(void *arg) {
@@ -757,7 +942,7 @@ static void udp_close_action(void *arg) {
 void macker_lwip_udp_close(macker_lwip_t *stack, uint32_t flow_id) {
   if (stack == NULL) return;
   struct write_action action = { stack, flow_id, NULL, 0, -1 };
-  (void)wait_action(udp_close_action, &action);
+  (void)wait_action(stack, udp_close_action, &action);
 }
 
 static void destroy_action(void *arg) {
@@ -768,6 +953,7 @@ static void destroy_action(void *arg) {
     abort_tcp_pcb(flow->listener, true);
     abort_tcp_pcb(flow->pcb, false);
     free(flow->pending);
+    free(flow->to_host);
     free(flow);
   }
   while (stack->udp != NULL) {
@@ -781,6 +967,6 @@ static void destroy_action(void *arg) {
 
 void macker_lwip_destroy(macker_lwip_t *stack) {
   if (stack == NULL) return;
-  (void)wait_action(destroy_action, stack);
+  (void)wait_action(stack, destroy_action, stack);
   free(stack);
 }
