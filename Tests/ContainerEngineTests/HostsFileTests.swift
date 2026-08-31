@@ -25,7 +25,7 @@ struct HostsFileTests {
         let rendered = EngineManager.hostsFile(for: record, peers: [record]).hostsFile
         #expect(rendered.contains("10.0.0.9"))
         #expect(rendered.contains("foo.local"))
-        #expect(rendered.contains(NetworkGateway.gatewayAddress.description))
+        #expect(rendered.contains("172.17.0.1"))
         #expect(rendered.contains("host.docker.internal"))
     }
 

@@ -90,5 +90,27 @@ struct HelperProtocolTests {
         #expect(decoded.op == .attach)
         let add = try JSONEncoder().encode(HelperRequest.addRoute(interface: "utun0", subnet: "10.0.0.0/24"))
         #expect(String(data: add, encoding: .utf8)?.contains("add-route") == true)
+        let alias = try HelperRequest.addAddress(
+            interface: "utun0",
+            address: "172.18.0.1",
+            peer: "172.18.0.1",
+            prefix: 32
+        ).validated()
+        #expect(
+            alias == .addAddress(
+                interface: "utun0",
+                address: "172.18.0.1",
+                peer: "172.18.0.1",
+                prefix: 32
+            )
+        )
+        #expect(throws: HelperError.self) {
+            try HelperRequest.addAddress(
+                interface: "en0",
+                address: "172.18.0.1",
+                peer: "172.18.0.1",
+                prefix: 32
+            ).validated()
+        }
     }
 }

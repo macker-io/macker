@@ -211,7 +211,12 @@ struct ContainerOptionsTests {
         #expect(extra.host == "db.local")
         #expect(extra.ip == "10.1.2.3")
         let gateway = try EngineExtraHost.parse("host.docker.internal:host-gateway")
-        #expect(gateway.ip == NetworkGateway.gatewayAddress.description)
+        #expect(gateway.ip == "host-gateway")
+        let resolved = try EngineExtraHost.parse(
+            "host.docker.internal:host-gateway",
+            hostGateway: "172.17.0.1"
+        )
+        #expect(resolved.ip == "172.17.0.1")
         let labels = EngineLabelFile.parse("# comment\nenv=prod\nempty=\nflag\n")
         #expect(labels["env"] == "prod")
         #expect(labels["empty"] == "")

@@ -73,6 +73,7 @@ enum HelperServer {
         case .ping: return HelperOperation.ping.rawValue
         case .attach: return HelperOperation.attach.rawValue
         case .addRoute: return HelperOperation.addRoute.rawValue
+        case .addAddress: return HelperOperation.addAddress.rawValue
         case .teardown: return HelperOperation.teardown.rawValue
         }
     }
@@ -80,6 +81,8 @@ enum HelperServer {
     private static func interface(of command: ValidatedHelperRequest) -> String? {
         switch command {
         case .addRoute(let interface, _), .teardown(let interface):
+            return interface
+        case let .addAddress(interface, _, _, _):
             return interface
         case .ping, .attach:
             return nil

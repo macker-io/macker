@@ -12,9 +12,10 @@ import os
 /// broadcast domain. Packet handling lives in ``BridgeDataplane`` so virtio RX/TX
 /// does not hop onto this actor.
 actor NetworkGateway {
-    /// The address the guest sees as gateway *and* resolver.
-    static let gatewayAddress = IPv4Address(0xC0A8_FF01) // 192.168.255.1
+    /// Ethernet source for every per-network gateway IP.
     static let gatewayMAC = MACAddress(0x0A00_2700_0001)
+    /// Fallback when a network has no configured gateway. Builtin bridge is `172.17.0.1`.
+    static let defaultGatewayIP = IPv4Address(0xAC11_0001)
 
     /// One container's membership in one network.
     struct Record: Sendable, Equatable {
@@ -24,6 +25,7 @@ actor NetworkGateway {
         var networkID: String
         var networkName: String
         var ip: IPv4Address
+        var gateway: IPv4Address
         var aliases: [String]
         var internalNetwork: Bool
     }
@@ -39,6 +41,7 @@ actor NetworkGateway {
     private let dataplane = BridgeDataplane()
     private var utun = UtunDevice()
     private(set) var utunReady = false
+    private var hostGateways: Set<String> = []
 
     /// IPAM handle for one container on one network.
     static func endpointKey(containerID: String, networkID: String) -> String {
@@ -55,12 +58,17 @@ actor NetworkGateway {
         }
         if utunReady {
             addHostRoute(network.subnet)
+            if let gateway = Self.parseGateway(network) {
+                addHostAddress(gateway.description)
+            }
         }
+        publishDataplane()
     }
 
     func unregisterNetwork(_ id: String) {
         ipam[id] = nil
         nets[id] = nil
+        publishDataplane()
     }
 
     // MARK: - IPAM
@@ -105,6 +113,7 @@ actor NetworkGateway {
                 networkID: network.id,
                 networkName: network.name,
                 ip: ip,
+                gateway: Self.parseGateway(network) ?? Self.defaultGatewayIP,
                 aliases: aliases,
                 internalNetwork: network.internalNetwork
             )
@@ -148,14 +157,14 @@ actor NetworkGateway {
     }
 
     /// Opens the guest's single virtio-net link. Extra bridge networks reuse it with another `/32`.
-    func openLink(containerID: String, primary: CIDRv4) throws -> any Interface {
+    func openLink(containerID: String, primary: CIDRv4, gateway: IPv4Address) throws -> any Interface {
         if let existing = links[containerID] {
             return existing.interface
         }
         let link = try FileHandleLink(
             containerID: containerID,
             ipv4: primary,
-            gateway: Self.gatewayAddress,
+            gateway: gateway,
             mac: try MACAddress(Self.macBytes(for: primary.address))
         )
         links[containerID] = link
@@ -183,10 +192,7 @@ actor NetworkGateway {
 
     /// Resolves a name against the networks the caller is attached to.
     func lookup(name: String, from src: IPv4Address) -> IPv4Address? {
-        let needle = name.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
-        guard !needle.isEmpty else { return nil }
-        let visible = networks(of: src)
-        return match(needle, in: records.filter { visible.contains($0.networkID) })
+        return GatewayDNS.lookup(name: name, records: records, visibleNetworks: networks(of: src))
     }
 
     // MARK: - Published ports
@@ -197,11 +203,17 @@ actor NetworkGateway {
         guard let forwarder else {
             throw EngineError.runtimeUnavailable("gateway forwarder is not ready")
         }
-        return try await forwarder.listenLocal(guestIP: guestIP, guestPort: guestPort, udp: udp)
+        let gatewayIP = records.first { $0.ip == guestIP }?.gateway ?? Self.defaultGatewayIP
+        return try await forwarder.listenLocal(
+            guestIP: guestIP,
+            guestPort: guestPort,
+            udp: udp,
+            gatewayIP: gatewayIP
+        )
     }
 
     /// `-p` target: container IP when the host route exists (PortPublisher `connect`s
-    /// over utun, no lwIP). Without the helper, a localhost lwIP relay.
+    /// over utun). Without the helper, a localhost SwiftTCP relay.
     func portPublishTarget(guestIP: IPv4Address, guestPort: UInt16, udp: Bool) async throws -> (ip: String, port: Int) {
         if utunReady {
             return (guestIP.description, Int(guestPort))
@@ -216,30 +228,25 @@ actor NetworkGateway {
 
     // MARK: - Dataplane wiring
 
-    /// Off-link traffic is terminated by the in-process lwIP forwarder.
+    /// Off-link traffic is terminated by in-process SwiftTCP.
     private func ensureForwarder() throws {
         guard forwarder == nil else { return }
         let dataplane = self.dataplane
         let onGuest: @Sendable (IPv4Address, Data) -> Void = { guestIP, packet in
             dataplane.deliver(packet, toIP: guestIP)
         }
-        guard let stack = GatewayLwIP(onGuest: onGuest) else {
-            throw EngineError.runtimeUnavailable("failed to start lwIP gateway forwarder")
-        }
-        forwarder = stack
+        forwarder = GatewaySwiftTCP(onGuest: onGuest)
         publishDataplane()
     }
 
     /// Host routes into container subnets. The helper (root) opens utun and passes
     /// the fd; signed `mackerd` cannot `connect(utun)` on macOS 26. When this succeeds,
-    /// `-p` can `connect` the container IP instead of an lwIP localhost relay.
+    /// `-p` can `connect` the container IP instead of a SwiftTCP localhost relay.
     private func ensureUtun() {
         guard !utunReady else { return }
         do {
-            let routes = nets.values
-                .filter { $0.driver == "bridge" && !$0.subnet.isEmpty }
-                .map(\.subnet)
-            try applyHostNet(routes: routes)
+            let bridges = nets.values.filter { $0.driver == "bridge" && !$0.subnet.isEmpty }
+            try applyHostNet(bridges: Array(bridges))
             let dataplane = self.dataplane
             utun.start { packet in
                 dataplane.handleUtun(packet)
@@ -256,8 +263,12 @@ actor NetworkGateway {
         }
     }
 
-    private func applyHostNet(routes: [String]) throws {
-        let address = Self.gatewayAddress.description
+    private func applyHostNet(bridges: [EngineNetwork]) throws {
+        let gateways = bridges.compactMap { Self.parseGateway($0)?.description }
+        let routes = bridges.map(\.subnet)
+        guard let address = gateways.first else {
+            throw EngineError.runtimeUnavailable("no bridge gateway for utun")
+        }
         do {
             let attached = try HelperClient.attach(
                 address: address,
@@ -266,15 +277,18 @@ actor NetworkGateway {
                 routes: routes
             )
             utun.adopt(fd: attached.fd, name: attached.name)
-            return
         } catch {
             Self.utunNote("helper attach failed: \(error.localizedDescription)")
             guard geteuid() == 0 else { throw error }
+            try utun.open()
+            try utun.configure(address: address, peer: address, prefix: 32)
+            for subnet in routes {
+                utun.addRoute(subnet: subnet)
+            }
         }
-        try utun.open()
-        try utun.configure(address: address, peer: address, prefix: 32)
-        for subnet in routes {
-            utun.addRoute(subnet: subnet)
+        hostGateways = [address]
+        for extra in gateways.dropFirst() {
+            addHostAddress(extra)
         }
     }
 
@@ -286,6 +300,30 @@ actor NetworkGateway {
                 utun.addRoute(subnet: subnet)
             } else {
                 Self.utunNote("add-route \(subnet) failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func addHostAddress(_ address: String) {
+        guard hostGateways.insert(address).inserted else { return }
+        do {
+            try HelperClient.addAddress(
+                interface: utun.name,
+                address: address,
+                peer: address,
+                prefix: 32
+            )
+        } catch {
+            if geteuid() == 0 {
+                try? HostNetCommands.addAddress(
+                    interface: utun.name,
+                    address: address,
+                    peer: address,
+                    prefix: 32
+                )
+            } else {
+                hostGateways.remove(address)
+                Self.utunNote("add-address \(address) failed: \(error.localizedDescription)")
             }
         }
     }
@@ -311,15 +349,28 @@ actor NetworkGateway {
         dataplane.setUtunWriter(nil)
         utun.closeDevice()
         utunReady = false
+        hostGateways.removeAll()
     }
 
     private func publishDataplane() {
+        let gateways = gatewayIPs()
         dataplane.update(
             records: records,
             dnsUpstreams: dnsUpstreams,
             links: links,
-            forwarder: forwarder
+            forwarder: forwarder,
+            gateways: gateways
         )
+        (forwarder as? GatewaySwiftTCP)?.setGateways(gateways)
+    }
+
+    private func gatewayIPs() -> Set<UInt32> {
+        Set(nets.values.compactMap { Self.parseGateway($0)?.value })
+    }
+
+    static func parseGateway(_ network: EngineNetwork) -> IPv4Address? {
+        guard !network.gateway.isEmpty else { return nil }
+        return try? IPv4Address(network.gateway)
     }
 
     // MARK: - Helpers
@@ -328,23 +379,6 @@ actor NetworkGateway {
     func networks(of ip: IPv4Address) -> Set<String> {
         let containers = Set(records.filter { $0.ip == ip }.map(\.containerID))
         return Set(records.filter { containers.contains($0.containerID) }.map(\.networkID))
-    }
-
-    private func match(_ needle: String, in records: [Record]) -> IPv4Address? {
-        for record in records {
-            let names = [record.containerName, record.hostname, String(record.containerID.prefix(12))]
-                + record.aliases
-            for raw in names {
-                let name = raw.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
-                if name == needle || "\(name).\(record.networkName)" == needle {
-                    return record.ip
-                }
-            }
-            if needle.count >= 12, record.containerID.lowercased().hasPrefix(needle) {
-                return record.ip
-            }
-        }
-        return nil
     }
 
     /// Locally administered MAC derived from the address, stable across restarts.

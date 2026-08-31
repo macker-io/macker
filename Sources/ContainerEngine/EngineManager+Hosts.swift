@@ -22,8 +22,11 @@ extension EngineManager {
         if !names.isEmpty {
             hosts.entries.append(Hosts.Entry(ipAddress: ip, hostnames: names))
         }
+        let hostGateway = record.endpoints.first { !$0.gateway.isEmpty }?.gateway
         for extra in record.run.extraHosts {
-            guard let parsed = try? EngineExtraHost.parse(extra) else { continue }
+            guard let parsed = try? EngineExtraHost.parse(extra, hostGateway: hostGateway),
+                parsed.ip != "host-gateway"
+            else { continue }
             hosts.entries.append(Hosts.Entry(ipAddress: parsed.ip, hostnames: [parsed.host]))
         }
         return hosts

@@ -6,6 +6,7 @@ public enum HelperOperation: String, Codable, Sendable {
     case ping
     case attach
     case addRoute = "add-route"
+    case addAddress = "add-address"
     case teardown
 }
 
@@ -51,6 +52,21 @@ public struct HelperRequest: Codable, Sendable, Equatable {
         HelperRequest(op: .addRoute, interface: interface, subnet: subnet)
     }
 
+    public static func addAddress(
+        interface: String,
+        address: String,
+        peer: String,
+        prefix: Int
+    ) -> HelperRequest {
+        HelperRequest(
+            op: .addAddress,
+            interface: interface,
+            address: address,
+            peer: peer,
+            prefix: prefix
+        )
+    }
+
     public static func teardown(interface: String) -> HelperRequest {
         HelperRequest(op: .teardown, interface: interface)
     }
@@ -72,6 +88,13 @@ public struct HelperRequest: Codable, Sendable, Equatable {
                 interface: try HelperNetText.requireUtun(interface),
                 subnet: try HelperNetText.requireCIDR(subnet)
             )
+        case .addAddress:
+            return .addAddress(
+                interface: try HelperNetText.requireUtun(interface),
+                address: try HelperNetText.requireIPv4(address, field: "address"),
+                peer: try HelperNetText.requireIPv4(peer, field: "peer"),
+                prefix: try HelperNetText.requirePrefix(prefix)
+            )
         case .teardown:
             return .teardown(interface: try HelperNetText.requireUtun(interface))
         }
@@ -83,6 +106,7 @@ public enum ValidatedHelperRequest: Sendable, Equatable {
     case ping
     case attach(address: String, peer: String, prefix: Int, routes: [String])
     case addRoute(interface: String, subnet: String)
+    case addAddress(interface: String, address: String, peer: String, prefix: Int)
     case teardown(interface: String)
 }
 
@@ -99,7 +123,7 @@ public struct HelperResponse: Codable, Sendable, Equatable {
         self.interface = interface
     }
 
-    public static let protocolVersion = 2
+    public static let protocolVersion = 3
 
     public static var pong: HelperResponse {
         HelperResponse(ok: true, version: protocolVersion)

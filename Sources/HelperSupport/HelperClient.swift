@@ -40,6 +40,19 @@ public enum HelperClient: Sendable {
         try send(.addRoute(interface: interface, subnet: subnet), socketPath: socketPath)
     }
 
+    public static func addAddress(
+        interface: String,
+        address: String,
+        peer: String,
+        prefix: Int,
+        socketPath: String = HelperPaths.socketPath
+    ) throws {
+        try send(
+            .addAddress(interface: interface, address: address, peer: peer, prefix: prefix),
+            socketPath: socketPath
+        )
+    }
+
     public static func teardown(interface: String, socketPath: String = HelperPaths.socketPath) throws {
         try send(.teardown(interface: interface), socketPath: socketPath)
     }

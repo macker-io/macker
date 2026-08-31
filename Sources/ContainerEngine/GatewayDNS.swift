@@ -1,19 +1,55 @@
 import ContainerizationExtras
 import Foundation
+import SystemConfiguration
+import os
 
 /// Minimal DNS A-record codec for the embedded gateway resolver.
 enum GatewayDNS {
     static let typeA: UInt16 = 1
     static let typeAAAA: UInt16 = 28
-    /// Resolvers for names the gateway does not own. The guest's `resolv.conf` still points at
-    /// the gateway; these are used only when recursing. `--dns` replaces this list.
-    static let upstream: [String] = ["1.1.1.1", "8.8.8.8"]
+    /// Last-resort resolvers when the Mac has none. Prefer ``systemServers``.
+    static let fallback: [String] = ["1.1.1.1", "8.8.8.8"]
+    /// Resolvers for names the gateway does not own. Follows macOS / Clash DNS when possible.
+    static var upstream: [String] {
+        let servers = systemServers()
+        return servers.isEmpty ? fallback : servers
+    }
     static var primaryUpstream: String { upstream[0] }
 
     /// Empty / invalid `--dns` falls back to ``upstream``.
     static func upstreams(for nameservers: [String]) -> [String] {
         let trimmed = nameservers.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
         return trimmed.isEmpty ? upstream : trimmed
+    }
+
+    /// IPv4 nameservers from `State:/Network/Global/DNS` (Clash/Surge TUN usually 127.0.0.1).
+    static func systemServers() -> [String] {
+        cache.withLock { state in
+            let now = Date()
+            if !state.servers.isEmpty, now.timeIntervalSince(state.at) < 5 {
+                return state.servers
+            }
+            state.servers = readSystemServers()
+            state.at = now
+            return state.servers
+        }
+    }
+
+    private struct Cache {
+        var servers: [String] = []
+        var at = Date.distantPast
+    }
+
+    private static let cache = OSAllocatedUnfairLock(initialState: Cache())
+
+    private static func readSystemServers() -> [String] {
+        guard let store = SCDynamicStoreCreate(nil, "io.macker.dns" as CFString, nil, nil),
+            let value = SCDynamicStoreCopyValue(store, "State:/Network/Global/DNS" as CFString) as? [String: Any],
+            let addresses = value["ServerAddresses"] as? [String]
+        else { return [] }
+        return addresses.filter { address in
+            address.contains(".") && !address.contains(":")
+        }
     }
     struct Question: Equatable {
         var name: String
@@ -23,18 +59,46 @@ enum GatewayDNS {
     }
 
     static func parseQuery(_ packet: Data) -> Question? {
-        guard packet.count >= 12 else { return nil }
-        let bytes = [UInt8](packet)
-        let id = UInt16(bytes[0]) << 8 | UInt16(bytes[1])
-        let flags = UInt16(bytes[2]) << 8 | UInt16(bytes[3])
-        let qdcount = UInt16(bytes[4]) << 8 | UInt16(bytes[5])
-        guard flags & 0x8000 == 0, qdcount >= 1 else { return nil }
-        var offset = 12
-        guard let name = readName(bytes, offset: &offset) else { return nil }
-        guard offset + 4 <= bytes.count else { return nil }
-        let type = UInt16(bytes[offset]) << 8 | UInt16(bytes[offset + 1])
-        let cls = UInt16(bytes[offset + 2]) << 8 | UInt16(bytes[offset + 3])
-        return Question(name: name, type: type, dnsClass: cls, id: id)
+        packet.withUnsafeBytes { bytes -> Question? in
+            guard bytes.count >= 12 else { return nil }
+            let id = UInt16(bytes[0]) << 8 | UInt16(bytes[1])
+            let flags = UInt16(bytes[2]) << 8 | UInt16(bytes[3])
+            let qdcount = UInt16(bytes[4]) << 8 | UInt16(bytes[5])
+            guard flags & 0x8000 == 0, qdcount >= 1 else { return nil }
+            var offset = 12
+            guard let name = readName(bytes, offset: &offset) else { return nil }
+            guard offset + 4 <= bytes.count else { return nil }
+            let type = UInt16(bytes[offset]) << 8 | UInt16(bytes[offset + 1])
+            let cls = UInt16(bytes[offset + 2]) << 8 | UInt16(bytes[offset + 3])
+            return Question(name: name, type: type, dnsClass: cls, id: id)
+        }
+    }
+
+    static func lookup(
+        name: String,
+        records: [NetworkGateway.Record],
+        visibleNetworks: Set<String>
+    ) -> IPv4Address? {
+        let needle = name.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
+        guard !needle.isEmpty else { return nil }
+        return match(needle, in: records.filter { visibleNetworks.contains($0.networkID) })
+    }
+
+    static func match(_ needle: String, in records: [NetworkGateway.Record]) -> IPv4Address? {
+        for record in records {
+            let names = [record.containerName, record.hostname, String(record.containerID.prefix(12))]
+                + record.aliases
+            for raw in names {
+                let candidate = raw.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
+                if candidate == needle || "\(candidate).\(record.networkName)" == needle {
+                    return record.ip
+                }
+            }
+            if needle.count >= 12, record.containerID.lowercased().hasPrefix(needle) {
+                return record.ip
+            }
+        }
+        return nil
     }
 
     static func answer(
@@ -79,7 +143,7 @@ enum GatewayDNS {
         return out
     }
 
-    private static func readName(_ bytes: [UInt8], offset: inout Int) -> String? {
+    private static func readName(_ bytes: UnsafeRawBufferPointer, offset: inout Int) -> String? {
         var labels: [String] = []
         var jumped = false
         var cursor = offset
@@ -104,7 +168,7 @@ enum GatewayDNS {
             }
             cursor += 1
             guard cursor + len <= bytes.count else { return nil }
-            labels.append(String(bytes: bytes[cursor..<(cursor + len)], encoding: .ascii) ?? "")
+            labels.append(String(decoding: bytes[cursor..<(cursor + len)], as: UTF8.self))
             cursor += len
         }
         return nil

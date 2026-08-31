@@ -7,6 +7,15 @@ public enum HostNetCommands: Sendable {
             "/sbin/ifconfig",
             [interface, "inet", address, peer, "netmask", HelperNetText.netmask(prefix: prefix), "up"]
         )
+        // Point-to-point utun still ARPs if the netmask makes the subnet on-link.
+        try run("/sbin/ifconfig", [interface, "-arp"])
+    }
+
+    public static func addAddress(interface: String, address: String, peer: String, prefix: Int) throws {
+        try run(
+            "/sbin/ifconfig",
+            [interface, "inet", address, peer, "netmask", HelperNetText.netmask(prefix: prefix), "alias"]
+        )
     }
 
     public static func addRoute(interface: String, subnet: String) throws {

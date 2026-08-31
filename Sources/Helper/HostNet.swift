@@ -33,6 +33,14 @@ final class HostNet: @unchecked Sendable {
             try HostNetCommands.addRoute(interface: interface, subnet: subnet)
             routes[interface, default: []].insert(subnet)
             return nil
+        case .addAddress(let interface, let address, let peer, let prefix):
+            try HostNetCommands.addAddress(
+                interface: interface,
+                address: address,
+                peer: peer,
+                prefix: prefix
+            )
+            return nil
         case .teardown(let interface):
             for subnet in routes.removeValue(forKey: interface) ?? [] {
                 try? HostNetCommands.deleteRoute(subnet: subnet)

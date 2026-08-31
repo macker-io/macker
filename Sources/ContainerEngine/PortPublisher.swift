@@ -43,7 +43,8 @@ final class PortPublisher: @unchecked Sendable {
         hostPort: Int,
         containerIP: String,
         containerPort: Int,
-        protocolName: String
+        protocolName: String,
+        localIP: String = ""
     ) async throws -> Int {
         guard (0...65535).contains(hostPort), (1...65535).contains(containerPort) else {
             throw EngineError.invalidArgument("invalid port mapping \(hostPort):\(containerPort)")
@@ -97,7 +98,14 @@ final class PortPublisher: @unchecked Sendable {
         }
 
         listener.newConnectionHandler = { [weak self] incoming in
-            self?.bridge(incoming, key: key, to: containerIP, port: containerPort, transport: transport)
+            self?.bridge(
+                incoming,
+                key: key,
+                to: containerIP,
+                port: containerPort,
+                transport: transport,
+                localIP: localIP
+            )
         }
 
         do {
@@ -127,16 +135,24 @@ final class PortPublisher: @unchecked Sendable {
         key: String,
         to containerIP: String,
         port: Int,
-        transport: Transport
+        transport: Transport,
+        localIP: String
     ) {
         guard let targetPort = NWEndpoint.Port(rawValue: UInt16(port)) else {
             incoming.cancel()
             return
         }
+        let parameters = transport.parameters
+        if !localIP.isEmpty {
+            parameters.requiredLocalEndpoint = NWEndpoint.hostPort(
+                host: NWEndpoint.Host(localIP),
+                port: 0
+            )
+        }
         let outgoing = NWConnection(
             host: NWEndpoint.Host(containerIP),
             port: targetPort,
-            using: transport.parameters
+            using: parameters
         )
         incoming.start(queue: queue)
         outgoing.start(queue: queue)

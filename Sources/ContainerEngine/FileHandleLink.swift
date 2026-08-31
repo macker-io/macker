@@ -3,6 +3,30 @@ import ContainerizationExtras
 import Darwin
 import Foundation
 import Virtualization
+import os
+
+/// Bounded datagram TX queue shared by virtio-net and utun.
+struct PacketTxQueue {
+    var pending: [Data] = []
+    var bytes = 0
+    static let limit = 4 * 1024 * 1024
+
+    var isEmpty: Bool { pending.isEmpty }
+    var isSaturated: Bool { bytes >= Self.limit }
+    var shouldResumeReads: Bool { bytes < Self.limit / 2 }
+
+    mutating func append(_ frame: Data) {
+        guard !isSaturated else { return }
+        pending.append(frame)
+        bytes += frame.count
+    }
+
+    mutating func popFirst() {
+        guard !pending.isEmpty else { return }
+        let dropped = pending.removeFirst()
+        bytes = max(0, bytes - dropped.count)
+    }
+}
 
 /// virtio-net attached with a datagram socketpair. The host end is read by ``BridgeDataplane``.
 ///
@@ -18,9 +42,13 @@ final class FileHandleLink: @unchecked Sendable {
     private let hostHandle: FileHandle
     private let guestHandle: FileHandle
     private var source: DispatchSourceRead?
+    private var writeSource: DispatchSourceWrite?
     private let queue = DispatchQueue(label: "io.macker.net.link")
     private var rx = [UInt8](repeating: 0, count: rxCapacity)
-    private var txEthernet = [UInt8](repeating: 0, count: Ethernet.headerLength)
+    private let ethernetHeader: [UInt8]
+    private let tx = OSAllocatedUnfairLock(initialState: PacketTxQueue())
+    private var writesResumed = false
+    private var readsPaused = false
 
     init(containerID: String, ipv4: CIDRv4, gateway: IPv4Address, mac: MACAddress) throws {
         var fds: [Int32] = [0, 0]
@@ -44,14 +72,16 @@ final class FileHandleLink: @unchecked Sendable {
             macAddress: mac,
             fileHandle: guestHandle
         )
+        var header = [UInt8](repeating: 0, count: Ethernet.headerLength)
         let dst = mac.bytes
         let src = NetworkGateway.gatewayMAC.bytes
-        for i in 0..<6 {
-            txEthernet[i] = dst[i]
-            txEthernet[6 + i] = src[i]
+        for index in 0..<6 {
+            header[index] = dst[index]
+            header[6 + index] = src[index]
         }
-        txEthernet[12] = UInt8(Ethernet.typeIPv4 >> 8)
-        txEthernet[13] = UInt8(Ethernet.typeIPv4 & 0xff)
+        header[12] = UInt8(Ethernet.typeIPv4 >> 8)
+        header[13] = UInt8(Ethernet.typeIPv4 & 0xff)
+        self.ethernetHeader = header
     }
 
     func start(_ onFrame: @escaping (UnsafeRawBufferPointer) -> Void) {
@@ -75,33 +105,33 @@ final class FileHandleLink: @unchecked Sendable {
     }
 
     func send(_ frame: Data) {
-        frame.withUnsafeBytes { raw in
-            _ = Darwin.send(hostHandle.fileDescriptor, raw.baseAddress, frame.count, MSG_DONTWAIT)
+        if enqueueIfBusy(frame) {
+            armWrite()
+            return
         }
+        if sendFrame(frame) { return }
+        enqueue(frame)
     }
 
-    /// Ethernet wrap + send without concatenating into a new `Data`.
+    /// Ethernet wrap + send without concatenating into a new `Data` on the success path.
     func sendIPv4(_ packet: UnsafeRawBufferPointer) {
-        guard let payload = packet.baseAddress, packet.count > 0 else { return }
-        let fd = hostHandle.fileDescriptor
-        txEthernet.withUnsafeMutableBytes { eth in
-            guard let ethBase = eth.baseAddress else { return }
-            var iovs = [
-                iovec(iov_base: ethBase, iov_len: Ethernet.headerLength),
-                iovec(iov_base: UnsafeMutableRawPointer(mutating: payload), iov_len: packet.count),
-            ]
-            iovs.withUnsafeMutableBufferPointer { buf in
-                var msg = msghdr()
-                msg.msg_iov = buf.baseAddress
-                msg.msg_iovlen = 2
-                _ = sendmsg(fd, &msg, MSG_DONTWAIT)
-            }
+        guard packet.count > 0 else { return }
+        if enqueueIfBusy(nil) {
+            enqueue(copyIPv4Frame(packet))
+            return
         }
+        if sendIPv4Now(packet) { return }
+        enqueue(copyIPv4Frame(packet))
     }
 
     func stop() {
         source?.cancel()
         source = nil
+        writeSource?.cancel()
+        writeSource = nil
+        writesResumed = false
+        readsPaused = false
+        tx.withLock { $0 = PacketTxQueue() }
     }
 
     /// Guest-end datagram (the VZ side of the socketpair). Tests use this to observe TX.
@@ -117,6 +147,126 @@ final class FileHandleLink: @unchecked Sendable {
 
     deinit {
         stop()
+    }
+
+    private func enqueueIfBusy(_ frame: Data?) -> Bool {
+        tx.withLock { state in
+            guard !state.isEmpty else { return false }
+            if let frame {
+                state.append(frame)
+            }
+            return true
+        }
+    }
+
+    private func enqueue(_ frame: Data) {
+        tx.withLock { $0.append(frame) }
+        armWrite()
+    }
+
+    private func sendFrame(_ frame: Data) -> Bool {
+        frame.withUnsafeBytes { raw -> Bool in
+            guard let base = raw.baseAddress else { return true }
+            let sent = Darwin.send(hostHandle.fileDescriptor, base, frame.count, MSG_DONTWAIT)
+            if sent >= 0 { return true }
+            return errno != EAGAIN && errno != EWOULDBLOCK
+        }
+    }
+
+    private func sendIPv4Now(_ packet: UnsafeRawBufferPointer) -> Bool {
+        guard let payload = packet.baseAddress else { return true }
+        let fd = hostHandle.fileDescriptor
+        return ethernetHeader.withUnsafeBytes { eth -> Bool in
+            guard let ethBase = eth.baseAddress else { return true }
+            var iovs = [
+                iovec(iov_base: UnsafeMutableRawPointer(mutating: ethBase), iov_len: Ethernet.headerLength),
+                iovec(iov_base: UnsafeMutableRawPointer(mutating: payload), iov_len: packet.count),
+            ]
+            return iovs.withUnsafeMutableBufferPointer { buf -> Bool in
+                var msg = msghdr()
+                msg.msg_iov = buf.baseAddress
+                msg.msg_iovlen = 2
+                let sent = sendmsg(fd, &msg, MSG_DONTWAIT)
+                if sent >= 0 { return true }
+                return errno != EAGAIN && errno != EWOULDBLOCK
+            }
+        }
+    }
+
+    private func copyIPv4Frame(_ packet: UnsafeRawBufferPointer) -> Data {
+        var frame = Data(count: Ethernet.headerLength + packet.count)
+        frame.withUnsafeMutableBytes { dest in
+            guard let base = dest.baseAddress else { return }
+            ethernetHeader.withUnsafeBytes { eth in
+                if let ethBase = eth.baseAddress {
+                    base.copyMemory(from: ethBase, byteCount: Ethernet.headerLength)
+                }
+            }
+            if let payload = packet.baseAddress {
+                base.advanced(by: Ethernet.headerLength).copyMemory(from: payload, byteCount: packet.count)
+            }
+        }
+        return frame
+    }
+
+    private func armWrite() {
+        queue.async { self.drainTx() }
+    }
+
+    private func drainTx() {
+        while true {
+            let snapshot = tx.withLock { ($0.pending.first, $0.bytes) }
+            if snapshot.1 >= PacketTxQueue.limit {
+                pauseReadsIfNeeded()
+            }
+            guard let frame = snapshot.0 else {
+                suspendWrites()
+                resumeReadsIfNeeded()
+                return
+            }
+            if !sendFrame(frame) {
+                resumeWrites()
+                return
+            }
+            tx.withLock { $0.popFirst() }
+        }
+    }
+
+    private func resumeWrites() {
+        if writeSource == nil {
+            let fd = hostHandle.fileDescriptor
+            let source = DispatchSource.makeWriteSource(fileDescriptor: fd, queue: queue)
+            source.setEventHandler { [weak self] in
+                self?.drainTx()
+            }
+            writeSource = source
+            source.resume()
+            writesResumed = true
+            return
+        }
+        if !writesResumed {
+            writeSource?.resume()
+            writesResumed = true
+        }
+    }
+
+    private func suspendWrites() {
+        guard writesResumed else { return }
+        writeSource?.suspend()
+        writesResumed = false
+    }
+
+    private func pauseReadsIfNeeded() {
+        guard let source, !readsPaused else { return }
+        source.suspend()
+        readsPaused = true
+    }
+
+    private func resumeReadsIfNeeded() {
+        let resume = tx.withLock { $0.shouldResumeReads }
+        guard resume, readsPaused, let source else { return }
+        readsPaused = false
+        source.resume()
     }
 
     /// Apple: RCVBUF should be 4× SNDBUF on the datagram socket passed to VZ.

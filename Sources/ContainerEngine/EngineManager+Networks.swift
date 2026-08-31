@@ -342,14 +342,25 @@ extension EngineManager {
         guestNics[record.id] = nics
     }
 
-    private func addGuestBridgeAddress(_ containerID: String, ip: String) async throws {
+    private func addGuestBridgeAddress(_ containerID: String, ip: String, gateway: String) async throws {
         let cidr = try CIDRv4("\(ip)/32")
+        let gatewayIP = try parseIPv4(gateway)
+        let sourceIP = try parseIPv4(ip)
         do {
             try await withGuestAgent(containerID) { agent in
                 try await agent.addressAdd(name: "eth0", address: InterfaceAddress(ipv4Address: cidr))
+                try await agent.routeAddLink(
+                    name: "eth0",
+                    route: LinkRoute(ipv4Destination: gatewayIP, ipv4Source: sourceIP)
+                )
             }
         } catch {
             if await guestHasAddress(containerID, ip: ip) {
+                _ = try? await runGuest(
+                    containerID,
+                    command: ["ip", "route", "add", "\(gateway)/32", "dev", "eth0"],
+                    privileged: true
+                )
                 return
             }
             let added = try? await runGuest(
@@ -360,6 +371,11 @@ extension EngineManager {
             if added?.code != 0, !(await guestHasAddress(containerID, ip: ip)) {
                 throw error
             }
+            _ = try? await runGuest(
+                containerID,
+                command: ["ip", "route", "add", "\(gateway)/32", "dev", "eth0"],
+                privileged: true
+            )
         }
     }
 
@@ -395,7 +411,7 @@ extension EngineManager {
             networks[endpoint.networkID]?.driver == "bridge" && !endpoint.ipv4Address.isEmpty
         }
         for endpoint in bridges.dropFirst() {
-            try await addGuestBridgeAddress(record.id, ip: endpoint.ipv4Address)
+            try await addGuestBridgeAddress(record.id, ip: endpoint.ipv4Address, gateway: endpoint.gateway)
         }
     }
 
@@ -440,7 +456,7 @@ extension EngineManager {
         }
         record.endpoints[index].ipv4Address = ip.description
         record.endpoints[index].ipv4Prefix = 32
-        record.endpoints[index].gateway = NetworkGateway.gatewayAddress.description
+        record.endpoints[index].gateway = network.gateway
         record.endpoints[index].networkName = network.name
         await networkGateway.bind(
             containerID: record.id,
@@ -452,7 +468,12 @@ extension EngineManager {
         )
         if !openedBridge {
             let cidr = try CIDRv4("\(ip.description)/32")
-            let iface = try await networkGateway.openLink(containerID: record.id, primary: cidr)
+            let gatewayIP = try parseIPv4(network.gateway)
+            let iface = try await networkGateway.openLink(
+                containerID: record.id,
+                primary: cidr,
+                gateway: gatewayIP
+            )
             record.endpoints[index].macAddress = iface.macAddress?.description ?? ""
             interfaces.append(iface)
             openedBridge = true
@@ -500,7 +521,7 @@ extension EngineManager {
         await networkGateway.registerNetwork(network)
         let key = NetworkGateway.endpointKey(containerID: container.id, networkID: network.id)
         let ip = try await allocateBridgeIP(networkID: network.id, key: key, requested: request.ipv4)
-        try await addGuestBridgeAddress(container.id, ip: ip.description)
+        try await addGuestBridgeAddress(container.id, ip: ip.description, gateway: network.gateway)
         await networkGateway.bind(
             containerID: container.id,
             containerName: container.name,
@@ -515,7 +536,7 @@ extension EngineManager {
             networkName: network.name,
             ipv4Address: ip.description,
             ipv4Prefix: 32,
-            gateway: NetworkGateway.gatewayAddress.description,
+            gateway: network.gateway,
             macAddress: mac,
             aliases: request.aliases,
             driverOpts: request.driverOpts,
@@ -570,8 +591,10 @@ extension EngineManager {
             return nil
         }
         var nameservers: [String]
-        if attached.contains(where: { $0.driver == "bridge" }) {
-            nameservers = [NetworkGateway.gatewayAddress.description]
+        if let bridgeGateway = record.endpoints.first(where: {
+            networks[$0.networkID]?.driver == "bridge" && !$0.gateway.isEmpty
+        })?.gateway {
+            nameservers = [bridgeGateway]
         } else if !record.run.dns.isEmpty {
             nameservers = record.run.dns
         } else {
@@ -622,7 +645,8 @@ extension EngineManager {
                 hostPort: binding.hostPort,
                 containerIP: destIP,
                 containerPort: destPort,
-                protocolName: binding.protocolName
+                protocolName: binding.protocolName,
+                localIP: destIP == "127.0.0.1" ? "" : (bridgeTarget?.gateway ?? "")
             )
             published.append(
                 EnginePortBinding(

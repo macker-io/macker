@@ -1,5 +1,5 @@
 {
-  "originHash" : "8e4c6069cf26f250e56808106f27a4b9f195b21ed07d863bb8b992dde37840e7",
+  "originHash" : "09236e73f86b7b58fdd1b3c97a4edef059e1674249350de1f99ec6def21c7313",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -242,6 +242,14 @@
       "state" : {
         "revision" : "869129b7bf4ecc57b97d0193ad29690ca2134750",
         "version" : "1.8.1"
+      }
+    },
+    {
+      "identity" : "swifttcp",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/PrizmX/SwiftTCP.git",
+      "state" : {
+        "revision" : "006725d09483b87286b067c7b1b19945b2c7998c"
       }
     },
     {

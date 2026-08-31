@@ -3,7 +3,7 @@ import Foundation
 import os
 
 /// Packet path for `bridge` virtio-net. Runs off ``NetworkGateway`` (an actor): RX comes
-/// from ``FileHandleLink`` queues, TX from the lwIP queue. The actor only publishes
+/// from ``FileHandleLink`` queues, TX from the SwiftTCP queue. The actor only publishes
 /// IPAM / ACL / DNS snapshots here.
 ///
 /// Same-network L3 is a peer table (IP → link + network set). The hot path takes the lock
@@ -21,6 +21,7 @@ final class BridgeDataplane: @unchecked Sendable {
         var peers: [UInt32: Peer] = [:]
         var allowsOutbound: [UInt32: Bool] = [:]
         var networksOfContainer: [String: Set<String>] = [:]
+        var gateways: Set<UInt32> = []
         var forwarder: (any GatewayForwarder)?
         var writeUtun: (@Sendable (Data) -> Void)?
     }
@@ -29,6 +30,7 @@ final class BridgeDataplane: @unchecked Sendable {
         case drop
         case sameNet(FileHandleLink)
         case outbound(any GatewayForwarder)
+        case icmp(any GatewayForwarder)
         case toGateway(Snapshot)
     }
 
@@ -39,13 +41,15 @@ final class BridgeDataplane: @unchecked Sendable {
         records: [NetworkGateway.Record],
         dnsUpstreams: [String: [String]],
         links: [String: FileHandleLink],
-        forwarder: (any GatewayForwarder)?
+        forwarder: (any GatewayForwarder)?,
+        gateways: Set<UInt32>
     ) {
         lock.withLock { state in
             state.records = records
             state.dnsUpstreams = dnsUpstreams
             state.links = links
             state.forwarder = forwarder
+            state.gateways = gateways
             state.peers.removeAll(keepingCapacity: true)
             state.allowsOutbound.removeAll(keepingCapacity: true)
             var networks: [String: Set<String>] = [:]
@@ -58,7 +62,7 @@ final class BridgeDataplane: @unchecked Sendable {
             state.networksOfContainer = networks
             for record in records {
                 guard let link = links[record.containerID] else { continue }
-                let ip = Self.address(record.ip)
+                let ip = record.ip.value
                 state.peers[ip] = Peer(link: link, networks: networks[record.containerID] ?? [])
                 state.allowsOutbound[ip] = outbound[record.containerID] == true
             }
@@ -83,21 +87,30 @@ final class BridgeDataplane: @unchecked Sendable {
     }
 
     func handleUtun(_ packet: UnsafeRawBufferPointer) {
-        guard let header = IPv4Peek.tuple(packet) else { return }
-        deliver(packet, toIP: header.dst)
+        guard packet.count >= IPv4Packet.headerLength, packet[0] >> 4 == 4 else { return }
+        let ihl = Int(packet[0] & 0x0f) * 4
+        let total = Int(packet[2]) << 8 | Int(packet[3])
+        guard ihl >= IPv4Packet.headerLength, total >= ihl, packet.count >= total else { return }
+        var prepared = Data(bytes: packet.baseAddress!, count: total)
+        IPv4Peek.finishChecksums(&prepared)
+        guard let header = IPv4Peek.tuple(prepared) else { return }
+        prepared.withUnsafeBytes { deliver($0, toIP: header.dst) }
     }
 
     func deliver(_ packet: Data, toIP ip: IPv4Address) {
-        packet.withUnsafeBytes { deliver($0, toIP: Self.address(ip)) }
+        packet.withUnsafeBytes { deliver($0, toIP: ip.value) }
     }
 
     private func handleARP(containerID: String, frame: UnsafeRawBufferPointer) {
-        guard let request = ARP.parseEthernetRequest(frame, gateway: NetworkGateway.gatewayAddress) else {
+        guard let request = ARP.parseEthernetRequest(frame) else {
             return
         }
+        let target = request.targetIP.value
+        let known = lock.withLock { $0.gateways.contains(target) }
+        guard known else { return }
         let reply = ARP.reply(
             senderMAC: NetworkGateway.gatewayMAC,
-            senderIP: NetworkGateway.gatewayAddress,
+            senderIP: request.targetIP,
             targetMAC: request.srcMAC,
             targetIP: request.senderIP
         )
@@ -114,7 +127,7 @@ final class BridgeDataplane: @unchecked Sendable {
     private func handleIPv4(_ packet: UnsafeRawBufferPointer, from containerID: String) {
         guard let header = IPv4Peek.tuple(packet) else { return }
         let action = lock.withLock { state -> IPv4Action in
-            if header.dst == Self.address(NetworkGateway.gatewayAddress) {
+            if state.gateways.contains(header.dst) {
                 return .toGateway(state)
             }
             if let dst = state.peers[header.dst] {
@@ -123,11 +136,15 @@ final class BridgeDataplane: @unchecked Sendable {
                 }
                 return .sameNet(dst.link)
             }
-            guard header.proto != Ethernet.protoICMP else { return .drop }
-            guard state.allowsOutbound[header.src] == true,
-                header.proto == Ethernet.protoTCP || header.proto == Ethernet.protoUDP,
-                let forwarder = state.forwarder
-            else { return .drop }
+            guard state.allowsOutbound[header.src] == true, let forwarder = state.forwarder else {
+                return .drop
+            }
+            if header.proto == Ethernet.protoICMP {
+                return .icmp(forwarder)
+            }
+            guard header.proto == Ethernet.protoTCP || header.proto == Ethernet.protoUDP else {
+                return .drop
+            }
             return .outbound(forwarder)
         }
         switch action {
@@ -137,6 +154,8 @@ final class BridgeDataplane: @unchecked Sendable {
             link.sendIPv4(packet)
         case .outbound(let forwarder):
             forwarder.ingestIPv4(Data(packet))
+        case .icmp(let forwarder):
+            forwarder.handleICMP(Data(packet))
         case .toGateway(let snap):
             handleToGateway(containerID: containerID, packet: packet, header: header, snapshot: snap)
         }
@@ -156,8 +175,9 @@ final class BridgeDataplane: @unchecked Sendable {
             handleDNS(containerID: containerID, packet: parsed, datagram: datagram, snapshot: snapshot)
             return
         }
-        if header.proto == Ethernet.protoICMP, let parsed = IPv4Packet.parse(copied) {
+        if header.proto == Ethernet.protoICMP, let parsed = IPv4Packet.parse(copied),
             replyPing(containerID: containerID, packet: parsed, snapshot: snapshot)
+        {
             return
         }
         if snapshot.forwarder?.acceptIPv4(copied) == true {
@@ -202,11 +222,12 @@ final class BridgeDataplane: @unchecked Sendable {
             )
             return
         }
-        if allowsOutbound(src: Self.address(packet.src), snapshot: snapshot), question.name.contains(".") {
+        if allowsOutbound(src: packet.src.value, snapshot: snapshot), question.name.contains(".") {
             snapshot.forwarder?.forwardDNS(
                 query: datagram.payload,
                 guestIP: packet.src,
                 guestPort: datagram.srcPort,
+                gatewayIP: packet.dst,
                 upstreams: GatewayDNS.upstreams(for: snapshot.dnsUpstreams[containerID] ?? [])
             )
             return
@@ -239,16 +260,17 @@ final class BridgeDataplane: @unchecked Sendable {
             id: nextID(),
             ttl: 64,
             proto: Ethernet.protoUDP,
-            src: NetworkGateway.gatewayAddress,
+            src: packet.dst,
             dst: packet.src,
-            payload: reply.encode(src: NetworkGateway.gatewayAddress, dst: packet.src)
+            payload: reply.encode(src: packet.dst, dst: packet.src)
         )
         let encoded = ip.encode()
         encoded.withUnsafeBytes { snapshot.links[containerID]?.sendIPv4($0) }
     }
 
-    private func replyPing(containerID: String, packet: IPv4Packet, snapshot: Snapshot) {
-        guard packet.payload.count >= 8, packet.payload[0] == 8 else { return }
+    @discardableResult
+    private func replyPing(containerID: String, packet: IPv4Packet, snapshot: Snapshot) -> Bool {
+        guard packet.payload.count >= 8, packet.payload[0] == 8 else { return false }
         var payload = packet.payload
         payload[0] = 0
         payload[2] = 0
@@ -267,6 +289,7 @@ final class BridgeDataplane: @unchecked Sendable {
         )
         let encoded = reply.encode()
         encoded.withUnsafeBytes { snapshot.links[containerID]?.sendIPv4($0) }
+        return true
     }
 
     private func deliver(_ packet: UnsafeRawBufferPointer, toIP ip: UInt32) {
@@ -279,30 +302,14 @@ final class BridgeDataplane: @unchecked Sendable {
     }
 
     private func lookup(name: String, from src: IPv4Address, snapshot: Snapshot) -> IPv4Address? {
-        let needle = name.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
-        guard !needle.isEmpty else { return nil }
-        let srcIP = Self.address(src)
-        guard let owner = snapshot.records.first(where: { Self.address($0.ip) == srcIP })?.containerID,
+        guard let owner = snapshot.records.first(where: { $0.ip.value == src.value })?.containerID,
             let visible = snapshot.networksOfContainer[owner]
         else { return nil }
-        return match(needle, in: snapshot.records.filter { visible.contains($0.networkID) })
-    }
-
-    private func match(_ needle: String, in records: [NetworkGateway.Record]) -> IPv4Address? {
-        for record in records {
-            let names = [record.containerName, record.hostname, String(record.containerID.prefix(12))]
-                + record.aliases
-            for raw in names {
-                let name = raw.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
-                if name == needle || "\(name).\(record.networkName)" == needle {
-                    return record.ip
-                }
-            }
-            if needle.count >= 12, record.containerID.lowercased().hasPrefix(needle) {
-                return record.ip
-            }
-        }
-        return nil
+        return GatewayDNS.lookup(
+            name: name,
+            records: snapshot.records,
+            visibleNetworks: visible
+        )
     }
 
     private func nextID() -> UInt16 {
@@ -312,7 +319,4 @@ final class BridgeDataplane: @unchecked Sendable {
         }
     }
 
-    private static func address(_ ip: IPv4Address) -> UInt32 {
-        ip.bytes.reduce(0) { ($0 << 8) | UInt32($1) }
-    }
 }

@@ -478,8 +478,9 @@ public enum EngineVolumeSpec {
 }
 
 public enum EngineExtraHost {
-    /// Docker `--add-host host:ip`. `host-gateway` maps to the userspace gateway.
-    public static func parse(_ raw: String) throws -> (host: String, ip: String) {
+    /// Docker `--add-host host:ip`. `host-gateway` stays a token until `hostGateway` is supplied
+    /// (the container's per-network gateway, typically `172.17.0.1`).
+    public static func parse(_ raw: String, hostGateway: String? = nil) throws -> (host: String, ip: String) {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let colon = trimmed.lastIndex(of: ":") else {
             throw EngineError.invalidArgument("invalid extra host: \(raw)")
@@ -490,7 +491,7 @@ public enum EngineExtraHost {
             throw EngineError.invalidArgument("invalid extra host: \(raw)")
         }
         if ip == "host-gateway" {
-            ip = NetworkGateway.gatewayAddress.description
+            ip = hostGateway ?? ip
         }
         return (host, ip)
     }
