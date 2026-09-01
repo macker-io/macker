@@ -1,6 +1,7 @@
 .PHONY: help app macker helper sign run fetch-runtime reset cli dist install bundle pkg check sync-runtime sync-runtime-latest test smoke
 
 # VERSION=1.2.3 make dist
+# CERT_NAME='Developer ID Application: …' NOTARIZE=1 VERSION=1.2.3 make dist
 # VERSION=1.2.3 make pkg
 # make sync-runtime ARGS='containerization 0.42.0'
 # make sync-runtime ARGS='kata 3.28.0'
@@ -14,7 +15,8 @@ help:
 	@echo "fetch-runtime         download the pinned kernel + vminit into the daemon store"
 	@echo "reset                 wipe images/containers/volumes/networks (keeps kernel)"
 	@echo "cli                   release CLI prefix in dist/cli"
-	@echo "dist                  CLI prefix + tarball + Homebrew formula"
+	@echo "dist                  CLI prefix + tarball + SHA256SUMS"
+	@echo "                       CERT_NAME + NOTARIZE=1: Developer ID + notarytool"
 	@echo "install               copy dist/cli to PREFIX ($(PREFIX))"
 	@echo "bundle                release .app in dist/ (VERSION=... optional)"
 	@echo "pkg                   release .app + dist/MackerDaemon.pkg"

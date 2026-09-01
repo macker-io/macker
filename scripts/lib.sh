@@ -35,15 +35,61 @@ is_regular_file() {
   [ -f "$1" ] && [ ! -L "$1" ]
 }
 
+is_macho() {
+  file -b "$1" 2>/dev/null | grep -q "Mach-O"
+}
+
+# Developer ID identity for release signing. Same names as mediaforge CI:
+# CERT_NAME (workflow) or APPLE_CERT_NAME. Unset → ad-hoc (`-`).
+sign_identity() {
+  if [ -n "${CERT_NAME:-}" ]; then
+    printf '%s\n' "$CERT_NAME"
+  elif [ -n "${APPLE_CERT_NAME:-}" ]; then
+    printf '%s\n' "$APPLE_CERT_NAME"
+  else
+    printf '%s\n' "-"
+  fi
+}
+
 sign_bin() {
   bin="$1"
+  entitlements="${2:-}"
+  identity="$(sign_identity)"
   if [ ! -f "$bin" ]; then
     echo "binary not found: $bin" >&2
     exit 1
   fi
-  if [ -n "${2:-}" ]; then
-    codesign --force --sign - --timestamp=none --entitlements="$2" "$bin"
+  if [ "$identity" = "-" ]; then
+    if [ -n "$entitlements" ]; then
+      codesign --force --sign - --timestamp=none --entitlements="$entitlements" "$bin"
+    else
+      codesign --force --sign - --timestamp=none "$bin"
+    fi
+  elif [ -n "$entitlements" ]; then
+    codesign --force --sign "$identity" --options runtime --timestamp --entitlements="$entitlements" "$bin"
   else
-    codesign --force --sign - --timestamp=none "$bin"
+    codesign --force --sign "$identity" --options runtime --timestamp "$bin"
   fi
+}
+
+# Sign Mach-O files under a prefix (deepest path first). `mackerd` gets Daemon.entitlements.
+sign_macho_tree() {
+  root="$1"
+  if [ ! -d "$root" ]; then
+    echo "sign tree missing: $root" >&2
+    exit 1
+  fi
+  list="$(mktemp)"
+  find "$root" -type f -print |
+    awk '{ printf "%04d\t%s\n", length($0), $0 }' |
+    sort -nr >"$list"
+  while IFS="$(printf '\t')" read -r _len path; do
+    [ -n "$path" ] || continue
+    is_macho "$path" || continue
+    case "$(basename "$path")" in
+    mackerd) sign_bin "$path" "$ENTITLEMENTS" ;;
+    *) sign_bin "$path" ;;
+    esac
+  done <"$list"
+  rm -f "$list"
 }
