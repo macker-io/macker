@@ -1,0 +1,125 @@
+# Builds a signed, notarized macOS CLI tarball when a version tag is pushed
+# (e.g. v0.1.0-alpha.1), then creates a GitHub Release.
+#
+# Required repository secrets (same names as mediaforge):
+#   APPLE_CERTIFICATE_BASE64      Developer ID Application .p12 (base64)
+#   APPLE_CERTIFICATE_PASSWORD    .p12 export password
+#   APPLE_CERT_NAME               Developer ID Application identity
+#   APPLE_ID                      Apple ID email for notarization
+#   APPLE_TEAM_ID                 Apple Developer Team ID
+#   APPLE_APP_SPECIFIC_PASSWORD   App-specific password for notarytool
+#
+# Optional:
+#   KEYCHAIN_PASSWORD             CI keychain password (random value is fine)
+
+name: Release macOS CLI
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-release:
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      CERT_NAME: ${{ secrets.APPLE_CERT_NAME }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Resolve version from tag
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          case "$GITHUB_REF_NAME" in
+          *alpha* | *beta* | *rc*) echo "prerelease=true" >>"$GITHUB_OUTPUT" ;;
+          *) echo "prerelease=false" >>"$GITHUB_OUTPUT" ;;
+          esac
+          echo "Building version $VERSION"
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Import code signing certificate
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          if [ -z "$APPLE_CERTIFICATE_BASE64" ]; then
+            echo "❌ Missing secret APPLE_CERTIFICATE_BASE64"
+            exit 1
+          fi
+          if [ -z "$APPLE_CERTIFICATE_PASSWORD" ]; then
+            echo "❌ Missing secret APPLE_CERTIFICATE_PASSWORD"
+            exit 1
+          fi
+          if [ -z "$CERT_NAME" ]; then
+            echo "❌ Missing secret APPLE_CERT_NAME"
+            exit 1
+          fi
+
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          CERTIFICATE_PATH="$RUNNER_TEMP/build_certificate.p12"
+          KEYCHAIN_PASSWORD="${KEYCHAIN_PASSWORD:-$RUNNER_TEMP-keychain}"
+
+          echo -n "$APPLE_CERTIFICATE_BASE64" |
+            base64 --decode -o "$CERTIFICATE_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH"
+
+      - name: Build, sign, and notarize CLI
+        id: build
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          NOTARIZE: "1"
+        run: |
+          make dist
+          TARBALL="dist/macker-${VERSION}-darwin-arm64.tar.gz"
+          test -f "$TARBALL"
+          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
+          codesign -dv --verbose=4 dist/cli/libexec/macker/mackerd
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Macker ${{ steps.version.outputs.version }} (macOS CLI)
+          generate_release_notes: true
+          prerelease: ${{ steps.version.outputs.prerelease == 'true' }}
+          files: |
+            ${{ steps.build.outputs.tarball }}
+            dist/SHA256SUMS
+            scripts/install.sh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

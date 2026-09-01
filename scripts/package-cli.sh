@@ -1,7 +1,7 @@
 #!/bin/sh
-# CLI prefix layout used by Homebrew and `make install`.
+# CLI prefix layout used by `make dist` and `scripts/install.sh`.
 #   ./scripts/package-cli.sh            # dist/cli
-#   ./scripts/package-cli.sh archive    # tarball + sha256 + formula (needs dist/cli)
+#   ./scripts/package-cli.sh archive    # tarball + sha256 (needs dist/cli)
 #   ./scripts/package-cli.sh dist       # prefix + archive
 #   ./scripts/package-cli.sh install    # copy dist/cli → $DESTDIR$PREFIX
 set -euo pipefail
@@ -29,9 +29,7 @@ LIBEXEC="$PREFIX_ROOT/libexec/macker"
 BIN_WRAP="$PREFIX_ROOT/bin"
 SHARE="$PREFIX_ROOT/share/macker"
 RUNTIME="$SHARE/runtime"
-TEMPLATE="$REPO_ROOT/packaging/homebrew/macker.rb.in"
 TARBALL_NAME="macker-${VERSION}-darwin-arm64.tar.gz"
-GITHUB_URL="https://github.com/macker-io/macker/releases/download/v${VERSION}/${TARBALL_NAME}"
 
 write_wrapper() {
   dest="$1"
@@ -63,20 +61,6 @@ write_plist() {
 </dict>
 </plist>
 EOF
-}
-
-fill_formula() {
-  url="$1"
-  dest="$2"
-  sha="$3"
-  mkdir -p "$(dirname "$dest")"
-  python3 - "$TEMPLATE" "$dest" "$VERSION" "$sha" "$url" <<'PY'
-import pathlib, sys
-src, dest, version, sha, url = sys.argv[1:]
-text = pathlib.Path(src).read_text()
-text = text.replace("__VERSION__", version).replace("__SHA256__", sha).replace("__URL__", url)
-pathlib.Path(dest).write_text(text)
-PY
 }
 
 build_prefix() {
@@ -116,9 +100,8 @@ build_prefix() {
   write_wrapper "$BIN_WRAP/mackerd" mackerd
   write_plist "$SHARE/launchd/io.macker.daemon.plist.in"
 
-  sign_bin "$LIBEXEC/mackerd" "$ENTITLEMENTS"
-  sign_bin "$LIBEXEC/macker"
-  sign_bin "$LIBEXEC/macker-helper"
+  sign_macho_tree "$LIBEXEC"
+  echo "signed libexec with $(sign_identity)"
 
   echo "cli $PREFIX_ROOT ($VERSION, containerization $CONTAINERIZATION)"
 }
@@ -141,11 +124,14 @@ archive_prefix() {
     shasum -a 256 "$TARBALL_NAME" >SHA256SUMS
   )
   sha="$(awk '{ print $1; exit }' "$DAEMON_ROOT/dist/SHA256SUMS")"
-  fill_formula "file://${tarball}" "$DAEMON_ROOT/dist/homebrew/Formula/macker.rb" "$sha"
-  fill_formula "$GITHUB_URL" "$DAEMON_ROOT/dist/homebrew/macker.rb" "$sha"
+  if [ "${NOTARIZE:-}" = "1" ]; then
+    ./scripts/notarize-cli.sh
+  fi
+  if [ -n "${GITHUB_OUTPUT:-}" ]; then
+    echo "tarball=dist/$TARBALL_NAME" >>"$GITHUB_OUTPUT"
+  fi
   echo "dist $tarball"
-  echo "formula dist/homebrew/Formula/macker.rb (file://) sha256 $sha"
-  echo "tap    dist/homebrew/macker.rb ($GITHUB_URL)"
+  echo "sha256 $sha"
 }
 
 install_prefix() {
@@ -166,7 +152,7 @@ pathlib.Path(dest).write_text(pathlib.Path(src).read_text().replace("@PREFIX@", 
 PY
   echo "install $dest"
   echo "LaunchAgent template: $plist_out"
-  echo "Start: launchctl load $plist_out   (or: brew services start macker)"
+  echo "Start: launchctl bootstrap gui/$(id -u) $plist_out"
 }
 
 case "$MODE" in
