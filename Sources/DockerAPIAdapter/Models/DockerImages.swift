@@ -13,6 +13,7 @@ public struct DockerImageSummary: Encodable, Sendable {
     public let VirtualSize: Int64
     public let Labels: [String: String]
     public let Containers: Int
+    public let Platform: String?
 
     public init(_ engine: EngineImageSummary) {
         self.Id = engine.id
@@ -25,6 +26,7 @@ public struct DockerImageSummary: Encodable, Sendable {
         self.VirtualSize = engine.size
         self.Labels = engine.labels
         self.Containers = engine.containers
+        self.Platform = engine.platform
     }
 }
 

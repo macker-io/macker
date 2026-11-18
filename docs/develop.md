@@ -35,7 +35,8 @@ make reset
 
 | Path | What it is |
 | --- | --- |
-| `App/` | SwiftUI GUI (`io.macker.app`) — not on the CLI release line |
+| `App/` | SwiftUI desktop preview (`io.macker.app`) — not on the CLI release line |
+| `ClientTransport/` | Unix HTTP transport shared by the desktop app and CLI |
 | `Sources/` | SPM: products `mackerd` / `macker` / `macker-helper` |
 | `Vendor/containerization` | Pinned Apple containerization submodule |
 
@@ -106,7 +107,22 @@ Guest versions are pinned in `Sources/ContainerEngine/RuntimePin.json` (`contain
 
 ## GUI
 
-Open `App/Macker.xcodeproj`. Debug uses Xcode’s default `MARKETING_VERSION` (`1.0`). Archive with:
+On macOS 26.5+, open `App/Macker.xcodeproj` and run the **Macker** scheme with `mackerd` already running (for example, `make run` from another terminal). Containers, Images, Networks, and Volumes share one periodic refresh loop with the menu bar. The Images page filters images by container references (including stopped containers), and supports pulling, loading image archives, importing root filesystem archives, exporting, copying references, and deleting unused images. The other resource pages are read-only. Use **Refresh** or ⌘R to refresh immediately. Close the window and reopen it via **Open Macker** in the menu bar. Quitting the app leaves the daemon running. The fish's stripe is bright when a container is running; its eye blinks during an active classic build reported by `GET /macker/status`. Older daemons fall back to container list data without a build indicator. With Reduce Motion enabled, the eye remains visible and the menu still shows build activity.
+
+The app connects to the default Macker Unix socket and does not use `DOCKER_HOST`. To test against an isolated daemon, set `MACKER_HOST=unix:///absolute/path/to/macker.sock` in the Xcode Run scheme. The desktop app is not sandboxed because it connects directly to the existing daemon socket outside its app container. It keeps the hardened runtime enabled and needs neither root nor virtualization entitlements.
+
+For a local command-line build without a development team:
+
+```bash
+xcodebuild -project App/Macker.xcodeproj -scheme Macker -configuration Debug \
+  -destination 'platform=macOS,arch=arm64' -derivedDataPath .build/desktop \
+  CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM=
+open .build/desktop/Build/Products/Debug/Macker.app
+```
+
+The Dock icon is the layered [`AppIcon.icon`](../App/Macker/AppIcon.icon), opened with Icon Composer. The Dock and menu bar share the [`MackerFish.svg`](../App/Artwork/MackerFish.svg) outline. After editing the fish geometry, run `python3 scripts/generate-desktop-icons.py` on macOS to regenerate the transparent foreground layer and the monochrome menu bar variants. Edit the Dock background in Icon Composer, not in the foreground layer.
+
+Debug uses Xcode's default `MARKETING_VERSION` (`1.0`). Archive with:
 
 ```bash
 xcodebuild -project App/Macker.xcodeproj \

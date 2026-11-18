@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		5BC64804302F4F1000C9F5A6 /* MackerTransport in Frameworks */ = {isa = PBXBuildFile; productRef = 5BC64806302F4F1000C9F5A6 /* MackerTransport */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		5BC647F6302F4F0F00C9F5A6 /* Macker.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Macker.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -23,6 +27,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				5BC64804302F4F1000C9F5A6 /* MackerTransport in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -65,6 +70,7 @@
 			);
 			name = Macker;
 			packageProductDependencies = (
+				5BC64806302F4F1000C9F5A6 /* MackerTransport */,
 			);
 			productName = Macker;
 			productReference = 5BC647F6302F4F0F00C9F5A6 /* Macker.app */;
@@ -94,6 +100,9 @@
 			);
 			mainGroup = 5BC647ED302F4F0F00C9F5A6;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				5BC64805302F4F1000C9F5A6 /* XCLocalSwiftPackageReference "../ClientTransport" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 5BC647F7302F4F0F00C9F5A6 /* Products */;
 			projectDirPath = "";
@@ -254,7 +263,7 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = N49M3Z72D3;
-				ENABLE_APP_SANDBOX = YES;
+				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
@@ -286,7 +295,7 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = N49M3Z72D3;
-				ENABLE_APP_SANDBOX = YES;
+				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
@@ -331,6 +340,21 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		5BC64805302F4F1000C9F5A6 /* XCLocalSwiftPackageReference "../ClientTransport" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../ClientTransport;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		5BC64806302F4F1000C9F5A6 /* MackerTransport */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 5BC64805302F4F1000C9F5A6 /* XCLocalSwiftPackageReference "../ClientTransport" */;
+			productName = MackerTransport;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 5BC647EE302F4F0F00C9F5A6 /* Project object */;
 }

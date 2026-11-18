@@ -38,6 +38,7 @@ public actor EngineManager {
     var gatewayReady = false
     var containerManager: ContainerManager?
     var vms: [String: LinuxContainer] = [:]
+    var activeBuildCount = 0
     var startingContainers: Set<String> = []
     var manuallySignaledForExit: Set<String> = []
     var waitTasks: [String: Task<Void, Never>] = [:]

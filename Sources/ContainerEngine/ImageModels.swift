@@ -16,6 +16,7 @@ public struct EngineImageSummary: Sendable {
     public let size: Int64
     public let labels: [String: String]
     public let containers: Int
+    public let platform: String?
 
     public var isDangling: Bool { repoTags.isEmpty }
 }

@@ -40,6 +40,25 @@ struct RouterImageAPITests {
         }
     }
 
+    @Test func listReportsPlatformAndReferencesFromCreatedContainers() async throws {
+        try await withRouter { router, engine in
+            try await RouterTestSupport.importTagged(engine, repo: "in-use")
+            try await RouterTestSupport.importTagged(engine, repo: "unused")
+            _ = try await RouterTestSupport.createContainer(router, image: "in-use:latest")
+            let response = await router.handle(try RouterTestSupport.request("GET", "/images/json", query: ["all": "1"]))
+            #expect(response.status == 200)
+            let images = try RouterTestSupport.jsonArray(response)
+            for (repo, count) in [("in-use", 1), ("unused", 0)] {
+                let row = try #require(images.first { image in
+                    (image["RepoTags"] as? [String])?.contains { $0.hasSuffix("/\(repo):latest") } == true
+                })
+                #expect(row["Containers"] as? Int == count)
+                #expect((row["Platform"] as? String)?.hasPrefix("linux/") == true)
+                #expect((row["Created"] as? Int64 ?? 0) > 0)
+            }
+        }
+    }
+
     @Test func pruneRemovesDanglingImages() async throws {
         try await withRouter { router, engine in
             try await TemporaryDirectory.with("macker-router-dangling") { work in

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#1688A3" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Shared right-facing mackerel mark. The chevron doubles as the run indicator. -->
+  <path d="M6.05 12 L2.2 7.05"/>
+  <path d="M6.05 12 L2.2 16.95"/>
+  <rect x="6.05" y="5.8" width="15.5" height="12.4" rx="6.2"/>
+  <path d="M10.8 8.9 L13 12 L10.8 15.1"/>
+  <circle cx="17.35" cy="11" r="1.1" fill="#1688A3" stroke="none"/>
+</svg>

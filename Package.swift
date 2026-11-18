@@ -18,6 +18,7 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "./Vendor/containerization"),
+        .package(path: "./ClientTransport"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.80.0"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.10.1"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
@@ -39,6 +40,7 @@ let package = Package(
             dependencies: [
                 "ContainerEngine",
                 "HelperSupport",
+                .product(name: "MackerTransport", package: "ClientTransport"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
             path: "Sources/Cli"

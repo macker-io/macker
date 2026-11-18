@@ -146,15 +146,20 @@ extension EngineManager {
             guard let primary = members.first else { continue }
             let tags = Self.uniqueDisplayTags(members.map(\.reference))
             let repoDigests = members.map { "\(Self.repository(from: $0.reference))@\(digest)" }
+            let platform = await Self.preferredPlatform(for: primary)
+            let config = try? await primary.config(for: platform)
             summaries.append(
                 EngineImageSummary(
                     id: digest,
                     repoTags: Array(Set(tags)).sorted(),
                     repoDigests: Array(Set(repoDigests)).sorted(),
-                    created: await Self.createdDate(of: primary),
+                    created: config?.created.flatMap(ISO8601.parse) ?? Date(timeIntervalSince1970: 0),
                     size: await Self.totalSize(of: primary),
-                    labels: await configLabels(of: primary),
-                    containers: containers.values.filter { $0.imageID == digest }.count
+                    labels: config?.config?.labels ?? [:],
+                    containers: containers.values.filter { $0.imageID == digest }.count,
+                    platform: config.map {
+                        Platform(arch: $0.architecture, os: $0.os, variant: platform.variant).description
+                    }
                 )
             )
         }

@@ -29,6 +29,33 @@ struct RouterSystemAPITests {
         }
     }
 
+    @Test func mackerStatusReportsIdleAndClearsAfterBuildFailure() async throws {
+        try await withRouter { router, _ in
+            let statusRequest = try RouterTestSupport.request("GET", "/macker/status")
+            let idle = await router.handle(statusRequest)
+            #expect(idle.status == 200)
+            #expect(try RouterTestSupport.jsonObject(idle)["runningContainers"] as? Int == 0)
+            #expect(try RouterTestSupport.jsonObject(idle)["activeBuilds"] as? Int == 0)
+
+            try await TemporaryDirectory.with("macker-build-status") { work in
+                let archive = try pack(hello: "invalid Dockerfile", in: work, file: "Dockerfile")
+                let response = await router.handle(try RouterTestSupport.request("POST", "/build", bodyFile: archive))
+                guard case .stream(let body) = response.body else {
+                    Issue.record("expected build progress stream")
+                    return
+                }
+                var output = ""
+                for await var chunk in body.chunks {
+                    output += chunk.readString(length: chunk.readableBytes) ?? ""
+                }
+                #expect(output.contains("\"error\""))
+            }
+
+            let after = await router.handle(statusRequest)
+            #expect(try RouterTestSupport.jsonObject(after)["activeBuilds"] as? Int == 0)
+        }
+    }
+
     @Test func authRequiresBody() async throws {
         try await withRouter { router, _ in
             let empty = await router.handle(try RouterTestSupport.request("POST", "/auth"))

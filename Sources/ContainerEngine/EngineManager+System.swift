@@ -2,6 +2,11 @@ import Darwin
 import Foundation
 
 extension EngineManager {
+    /// Cheap snapshot for the desktop status item; does not query the image store.
+    public func activityCounts() -> (runningContainers: Int, activeBuilds: Int) {
+        (containers.values.count { $0.state == "running" }, activeBuildCount)
+    }
+
     /// Docker `GET /info` — host and daemon facts.
     public func systemInfo() async -> EngineSystemInfo {
         let containers = Array(self.containers.values)

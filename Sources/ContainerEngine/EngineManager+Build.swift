@@ -43,7 +43,10 @@ extension EngineManager {
     public func buildImage(spec: EngineBuildSpec, contextArchive: URL) -> AsyncThrowingStream<EngineBuildEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
+                self.activeBuildCount += 1
+                defer { self.activeBuildCount -= 1 }
                 do {
+                    try Task.checkCancellation()
                     let digest = try await self.performBuild(spec: spec, contextArchive: contextArchive) { event in
                         continuation.yield(event)
                     }

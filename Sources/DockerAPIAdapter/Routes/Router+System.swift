@@ -31,6 +31,16 @@ extension Router {
         Self.jsonOK(DockerSystemInfo(await engine.systemInfo()))
     }
 
+    func mackerStatus() async -> HTTPResponse {
+        struct Status: Encodable {
+            let runningContainers: Int
+            let activeBuilds: Int
+        }
+
+        let counts = await engine.activityCounts()
+        return Self.jsonOK(Status(runningContainers: counts.runningContainers, activeBuilds: counts.activeBuilds))
+    }
+
     func systemDataUsage() async -> HTTPResponse {
         do {
             return Self.jsonOK(DockerDiskUsage(try await engine.diskUsage()))

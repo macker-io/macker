@@ -38,6 +38,8 @@ public struct Router: Sendable {
             return Self.version()
         case ("GET", "/info"):
             return await info()
+        case ("GET", "/macker/status"):
+            return await mackerStatus()
         case ("GET", "/events"):
             return await events(request)
         case ("GET", "/system/df"):

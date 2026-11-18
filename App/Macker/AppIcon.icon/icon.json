@@ -1,0 +1,20 @@
+{
+  "fill" : {
+    "automatic-gradient" : "extended-srgb:0.08627,0.53333,0.63922,1.00000"
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "image-name" : "Fish.png",
+          "name" : "Fish"
+        }
+      ]
+    }
+  ],
+  "supported-platforms" : {
+    "squares" : [
+      "macOS"
+    ]
+  }
+}
