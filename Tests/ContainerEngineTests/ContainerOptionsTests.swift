@@ -187,8 +187,10 @@ struct ContainerOptionsTests {
         let request = try spec.asRequest()
         #expect(request.ipv4 == "172.20.0.10")
         #expect(request.macAddress == "aa:bb:cc:dd:ee:ff")
+        let v6Spec = try EngineNetworkAttachSpec.parse("name=front,ip6=fd00::1").asRequest()
+        #expect(v6Spec.ipv6 == "fd00::1")
         #expect(throws: EngineError.self) {
-            _ = try EngineNetworkAttachSpec.parse("name=front,ip6=fe80::1").asRequest()
+            _ = try EngineNetworkAttachSpec.parse("name=front,ip6=not-an-ip").asRequest()
         }
     }
 

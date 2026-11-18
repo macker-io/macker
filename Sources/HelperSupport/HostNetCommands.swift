@@ -12,6 +12,13 @@ public enum HostNetCommands: Sendable {
     }
 
     public static func addAddress(interface: String, address: String, peer: String, prefix: Int) throws {
+        if HelperNetText.isIPv6(address) {
+            try run(
+                "/sbin/ifconfig",
+                [interface, "inet6", address, "prefixlen", "\(prefix)", "alias"]
+            )
+            return
+        }
         try run(
             "/sbin/ifconfig",
             [interface, "inet", address, peer, "netmask", HelperNetText.netmask(prefix: prefix), "alias"]
@@ -19,10 +26,18 @@ public enum HostNetCommands: Sendable {
     }
 
     public static func addRoute(interface: String, subnet: String) throws {
+        if HelperNetText.isIPv6CIDR(subnet) {
+            try run("/sbin/route", ["-n", "add", "-inet6", subnet, "-interface", interface])
+            return
+        }
         try run("/sbin/route", ["-n", "add", "-net", subnet, "-interface", interface])
     }
 
     public static func deleteRoute(subnet: String) throws {
+        if HelperNetText.isIPv6CIDR(subnet) {
+            try run("/sbin/route", ["-n", "delete", "-inet6", subnet])
+            return
+        }
         try run("/sbin/route", ["-n", "delete", "-net", subnet])
     }
 

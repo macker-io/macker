@@ -81,10 +81,18 @@ public struct DockerContainerSummary: Encodable, Sendable {
 
         public struct IPAMConfig: Encodable, Sendable {
             public let IPv4Address: String
+            public let IPv6Address: String?
         }
 
         public init(_ endpoint: EngineEndpoint) {
-            self.IPAMConfig = endpoint.ipv4Address.isEmpty ? nil : .init(IPv4Address: endpoint.ipv4Address)
+            if endpoint.ipv4Address.isEmpty, endpoint.ipv6Address.isEmpty {
+                self.IPAMConfig = nil
+            } else {
+                self.IPAMConfig = .init(
+                    IPv4Address: endpoint.ipv4Address,
+                    IPv6Address: endpoint.ipv6Address.isEmpty ? nil : endpoint.ipv6Address
+                )
+            }
             self.Links = nil
             self.Aliases = endpoint.aliases
             self.NetworkID = endpoint.networkID
@@ -92,9 +100,9 @@ public struct DockerContainerSummary: Encodable, Sendable {
             self.Gateway = endpoint.gateway
             self.IPAddress = endpoint.ipv4Address
             self.IPPrefixLen = endpoint.ipv4Prefix
-            self.IPv6Gateway = ""
-            self.GlobalIPv6Address = ""
-            self.GlobalIPv6PrefixLen = 0
+            self.IPv6Gateway = endpoint.ipv6Gateway
+            self.GlobalIPv6Address = endpoint.ipv6Address
+            self.GlobalIPv6PrefixLen = endpoint.ipv6Prefix
             self.MacAddress = endpoint.macAddress
             self.DriverOpts = endpoint.driverOpts.isEmpty ? nil : endpoint.driverOpts
             self.GwPriority = endpoint.gwPriority
@@ -345,6 +353,9 @@ public struct DockerContainerInspect: Encodable, Sendable {
         public let Gateway: String
         public let IPAddress: String
         public let IPPrefixLen: Int
+        public let IPv6Gateway: String
+        public let GlobalIPv6Address: String
+        public let GlobalIPv6PrefixLen: Int
         public let MacAddress: String
         public let Networks: [String: DockerContainerSummary.EndpointSettings]
     }
@@ -439,6 +450,9 @@ public struct DockerContainerInspect: Encodable, Sendable {
             Gateway: primary?.gateway ?? "",
             IPAddress: primary?.ipv4Address ?? "",
             IPPrefixLen: primary?.ipv4Prefix ?? 0,
+            IPv6Gateway: primary?.ipv6Gateway ?? "",
+            GlobalIPv6Address: primary?.ipv6Address ?? "",
+            GlobalIPv6PrefixLen: primary?.ipv6Prefix ?? 0,
             MacAddress: primary?.macAddress ?? "",
             Networks: Dictionary(uniqueKeysWithValues: container.endpoints.map {
                 ($0.networkName, DockerContainerSummary.EndpointSettings($0))
@@ -496,12 +510,76 @@ public struct DockerContainerPruneResponse: Encodable, Sendable {
 }
 
 public struct DockerUpdateContainerRequest: Decodable, Sendable {
-    public let Memory: Int64?
-    public let NanoCpus: Int64?
+    public var Memory: Int64?
+    public var NanoCpus: Int64?
+    public var RestartPolicy: RestartPolicy?
+    public var CpuShares: Int64?
+    public var CpuPeriod: Int64?
+    public var CpuQuota: Int64?
+    public var CpuRealtimePeriod: Int64?
+    public var CpuRealtimeRuntime: Int64?
+    public var CpusetCpus: String?
+    public var CpusetMems: String?
+    public var MemoryReservation: Int64?
+    public var MemorySwap: Int64?
+    public var BlkioWeight: Int64?
+    public var PidsLimit: Int64?
+    public var KernelMemory: Int64?
+    public var CpuCount: Int64?
+    public var CpuPercent: Int64?
+    public var IOMaximumIOps: Int64?
+    public var IOMaximumBandwidth: Int64?
 
-    public init(Memory: Int64? = nil, NanoCpus: Int64? = nil) {
-        self.Memory = Memory
-        self.NanoCpus = NanoCpus
+    public struct RestartPolicy: Decodable, Sendable {
+        public var Name: String?
+        public var MaximumRetryCount: Int?
+    }
+
+    public init() {}
+
+    /// `0` means "leave unchanged", matching Docker's container update.
+    public var appliedMemory: Int64? {
+        guard let Memory, Memory != 0 else { return nil }
+        return Memory
+    }
+
+    public var appliedNanoCpus: Int64? {
+        guard let NanoCpus, NanoCpus != 0 else { return nil }
+        return NanoCpus
+    }
+
+    /// Non-zero resource fields the Docker update API accepts and this runtime does not apply.
+    public func ignoredResourceWarnings() -> [String] {
+        var warnings: [String] = []
+        func ignore(_ label: String, _ value: Int64?) {
+            if let value, value != 0 {
+                warnings.append("\(label) is not supported on this runtime and was ignored")
+            }
+        }
+        func ignoreText(_ label: String, _ value: String?) {
+            if let value, !value.isEmpty {
+                warnings.append("\(label) is not supported on this runtime and was ignored")
+            }
+        }
+        ignore("CpuShares", CpuShares)
+        ignore("CpuPeriod", CpuPeriod)
+        ignore("CpuQuota", CpuQuota)
+        ignore("CpuRealtimePeriod", CpuRealtimePeriod)
+        ignore("CpuRealtimeRuntime", CpuRealtimeRuntime)
+        ignoreText("CpusetCpus", CpusetCpus)
+        ignoreText("CpusetMems", CpusetMems)
+        ignore("MemoryReservation", MemoryReservation)
+        ignore("MemorySwap", MemorySwap)
+        ignore("BlkioWeight", BlkioWeight)
+        if PidsLimit != nil {
+            warnings.append("PidsLimit is not supported on this runtime and was ignored")
+        }
+        ignore("KernelMemory", KernelMemory)
+        ignore("CpuCount", CpuCount)
+        ignore("CpuPercent", CpuPercent)
+        ignore("IOMaximumIOps", IOMaximumIOps)
+        ignore("IOMaximumBandwidth", IOMaximumBandwidth)
+        return warnings
     }
 }
 

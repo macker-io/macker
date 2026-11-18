@@ -20,6 +20,7 @@ public actor EngineManager {
     let portPublisher = PortPublisher()
     var containers: [String: EngineContainer] = [:]
     var waiters: [String: [CheckedContinuation<Int, Never>]] = [:]
+    var removedWaiters: [String: [CheckedContinuation<Int, Never>]] = [:]
     var execs: [String: EngineExec] = [:]
     var execProcesses: [String: LinuxProcess] = [:]
     var execStdin: [String: ProcessStdin] = [:]

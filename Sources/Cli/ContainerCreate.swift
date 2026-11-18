@@ -404,9 +404,6 @@ struct Create: ParsableCommand {
 
     static func encodeRequest(_ options: ContainerCreateOptions, autoRemove: Bool) throws -> EncodedRequest {
         try rejectRestartWithAutoRemove(restart: options.restart, autoRemove: autoRemove)
-        if let ip6 = options.ip6, !ip6.isEmpty {
-            throw CLIError.io("IPv6 is not implemented")
-        }
         try validatePull(options.pull)
         let env = try DaemonAPI.envFile(options.envFile) + options.env
         var labels = try DaemonAPI.labelFile(options.labelFile)
@@ -469,7 +466,60 @@ struct Create: ParsableCommand {
         if let name = options.name, !name.isEmpty {
             path += "?name=\(DaemonAPI.query(name))"
         }
-        return EncodedRequest(path: path, body: try JSONEncoder().encode(body))
+        return EncodedRequest(path: path, body: try Self.attachUnsupported(JSONEncoder().encode(body), options))
+    }
+
+    /// Fields the engine records only as warnings. Sending them keeps `macker run` and the Engine API on one path.
+    private static func attachUnsupported(_ data: Data, _ options: ContainerCreateOptions) throws -> Data {
+        var root = (try JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+        var host = (root["HostConfig"] as? [String: Any]) ?? [:]
+        if !options.capAdd.isEmpty { host["CapAdd"] = options.capAdd }
+        if !options.capDrop.isEmpty { host["CapDrop"] = options.capDrop }
+        if !options.securityOpt.isEmpty { host["SecurityOpt"] = options.securityOpt }
+        if !options.sysctl.isEmpty {
+            var sysctls: [String: String] = [:]
+            for item in options.sysctl {
+                let parts = item.split(separator: "=", maxSplits: 1).map(String.init)
+                guard let key = parts.first, !key.isEmpty else { continue }
+                sysctls[key] = parts.count == 2 ? parts[1] : ""
+            }
+            if !sysctls.isEmpty { host["Sysctls"] = sysctls }
+        }
+        if !options.device.isEmpty { host["Devices"] = options.device }
+        if let gpus = options.gpus, !gpus.isEmpty { host["DeviceRequests"] = [gpus] }
+        if !options.deviceCgroupRule.isEmpty { host["DeviceCgroupRules"] = options.deviceCgroupRule }
+        if !options.ulimit.isEmpty { host["Ulimits"] = options.ulimit }
+        if let shm = options.shmSize { host["ShmSize"] = try DaemonAPI.parseBytes(shm) }
+        if let logDriver = options.logDriver, !logDriver.isEmpty, logDriver != "json-file" {
+            var config: [String: String] = [:]
+            for item in options.logOpt {
+                let parts = item.split(separator: "=", maxSplits: 1).map(String.init)
+                guard let key = parts.first, !key.isEmpty else { continue }
+                config[key] = parts.count == 2 ? parts[1] : ""
+            }
+            host["LogConfig"] = ["Type": logDriver, "Config": config]
+        }
+        if options.`init` { host["Init"] = true }
+        if let pid = options.pid, !pid.isEmpty { host["PidMode"] = pid }
+        if let ipc = options.ipc, !ipc.isEmpty { host["IpcMode"] = ipc }
+        if let uts = options.uts, !uts.isEmpty { host["UTSMode"] = uts }
+        if let cgroupns = options.cgroupns, !cgroupns.isEmpty { host["CgroupnsMode"] = cgroupns }
+        if let userns = options.userns, !userns.isEmpty { host["UsernsMode"] = userns }
+        if let isolation = options.isolation, !isolation.isEmpty { host["Isolation"] = isolation }
+        if let parent = options.cgroupParent, !parent.isEmpty { host["CgroupParent"] = parent }
+        if let shares = options.cpuShares { host["CpuShares"] = shares }
+        if let period = options.cpuPeriod { host["CpuPeriod"] = period }
+        if let quota = options.cpuQuota { host["CpuQuota"] = quota }
+        if let cpus = options.cpusetCpus, !cpus.isEmpty { host["CpusetCpus"] = cpus }
+        if let mems = options.cpusetMems, !mems.isEmpty { host["CpusetMems"] = mems }
+        if let reservation = options.memoryReservation { host["MemoryReservation"] = try DaemonAPI.parseBytes(reservation) }
+        if let swap = options.memorySwap {
+            host["MemorySwap"] = swap == "-1" ? -1 : try DaemonAPI.parseBytes(swap)
+        }
+        if let swappiness = options.memorySwappiness { host["MemorySwappiness"] = swappiness }
+        if let pids = options.pidsLimit { host["PidsLimit"] = pids }
+        if !host.isEmpty { root["HostConfig"] = host }
+        return try JSONSerialization.data(withJSONObject: root)
     }
 
     private static func validatePull(_ pull: String?) throws {
@@ -495,6 +545,9 @@ struct Create: ParsableCommand {
         if let ip = options.ip, specs[0].ipv4 == nil {
             specs[0].ipv4 = ip
         }
+        if let ip6 = options.ip6, specs[0].ipv6 == nil {
+            specs[0].ipv6 = ip6
+        }
         if let mac = options.macAddress, specs[0].macAddress == nil {
             specs[0].macAddress = mac
         }
@@ -509,7 +562,7 @@ struct Create: ParsableCommand {
         for spec in specs {
             endpoints[spec.name] = try Self.endpointConfig(spec)
         }
-        if endpoints.count == 1, specs[0].name == "default", options.ip == nil, options.networkAlias.isEmpty, options.link.isEmpty, options.macAddress == nil, options.linkLocalIP.isEmpty {
+        if endpoints.count == 1, specs[0].name == "default", options.ip == nil, options.ip6 == nil, options.networkAlias.isEmpty, options.link.isEmpty, options.macAddress == nil, options.linkLocalIP.isEmpty {
             return (mode, [:])
         }
         return (mode, endpoints)
@@ -518,10 +571,10 @@ struct Create: ParsableCommand {
     private static func endpointConfig(_ spec: EngineNetworkAttachSpec) throws -> CreateBody.EndpointConfig {
         let request = try spec.asRequest()
         let ipam: CreateBody.IPAMConfig?
-        if request.ipv4 != nil || !spec.linkLocalIPs.isEmpty {
+        if request.ipv4 != nil || request.ipv6 != nil || !spec.linkLocalIPs.isEmpty {
             ipam = .init(
                 IPv4Address: request.ipv4,
-                IPv6Address: nil,
+                IPv6Address: request.ipv6,
                 LinkLocalIPs: spec.linkLocalIPs.isEmpty ? nil : spec.linkLocalIPs
             )
         } else {

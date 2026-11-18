@@ -63,11 +63,12 @@ struct NetworkTests {
         }
     }
 
-    @Test func createRejectsUnsupportedIPAMAndIPv6() async throws {
+    @Test func createAllowsIPv6AndRejectsUnsupportedIPAM() async throws {
         try await withEngine { engine in
-            await #expect(throws: EngineError.self) {
-                _ = try await engine.createNetwork(EngineNetworkCreateSpec(name: "v6", enableIPv6: true))
-            }
+            let v6 = try await engine.createNetwork(EngineNetworkCreateSpec(name: "v6", enableIPv6: true))
+            #expect(v6.network.enableIPv6 == true)
+            #expect(!v6.network.subnet6.isEmpty)
+            #expect(!v6.network.gateway6.isEmpty)
             await #expect(throws: EngineError.self) {
                 _ = try await engine.createNetwork(EngineNetworkCreateSpec(name: "no4", enableIPv4: false))
             }

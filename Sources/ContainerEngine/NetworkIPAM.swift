@@ -99,3 +99,61 @@ struct NetworkIPAM: Sendable {
         return !reserved.contains(ip) && !used.contains(ip)
     }
 }
+
+/// IPv6 address pool for a bridge network. Allocates sequentially from `cidr.lower + 1`,
+/// skipping the network address (`::`) and the gateway address.
+struct NetworkIPAMv6: Sendable {
+    let cidr: CIDRv6
+    let gateway: IPv6Address
+    private var used: Set<IPv6Address>
+    private var byID: [String: IPv6Address] = [:]
+    private var cursor: UInt128
+
+    init(subnet: String, gateway: String) throws {
+        self.cidr = try CIDRv6(subnet)
+        self.gateway = try IPv6Address(gateway)
+        self.used = [self.gateway]
+        let lower = self.cidr.lower.value
+        let upper = self.cidr.upper.value
+        self.cursor = lower < upper ? lower &+ 1 : lower
+    }
+
+    mutating func allocate(id: String) throws -> IPv6Address {
+        if let existing = byID[id] { return existing }
+        let start = cidr.lower.value
+        let end = cidr.upper.value
+        let maxAttempts = 65_536
+        var candidate = cursor
+        for _ in 0..<maxAttempts {
+            if candidate <= start || candidate > end {
+                candidate = start &+ 1
+            }
+            let ip = IPv6Address(candidate)
+            if !used.contains(ip) {
+                byID[id] = ip
+                used.insert(ip)
+                cursor = candidate < end ? candidate &+ 1 : start &+ 1
+                return ip
+            }
+            candidate = candidate < end ? candidate &+ 1 : start &+ 1
+        }
+        throw EngineError.invalidArgument("no IPv6 addresses left in \(cidr)")
+    }
+
+    mutating func reserve(id: String, ip: IPv6Address) throws {
+        if let existing = byID[id] {
+            if existing == ip { return }
+            throw EngineError.conflict("endpoint \(id) already has IPv6 \(existing)")
+        }
+        guard cidr.contains(ip), ip != cidr.lower, ip != gateway, !used.contains(ip) else {
+            throw EngineError.invalidArgument("address \(ip) is not allocatable in \(cidr)")
+        }
+        byID[id] = ip
+        used.insert(ip)
+    }
+
+    mutating func release(id: String) {
+        guard let ip = byID.removeValue(forKey: id) else { return }
+        used.remove(ip)
+    }
+}

@@ -54,13 +54,17 @@ struct ContainerCreateCLITests {
         #expect(host["AutoRemove"] as? Bool == true)
     }
 
-    @Test func encodeRequestRejectsIPv6RestartConflictAndBadPull() throws {
-        expectCLIError("IPv6 is not implemented") {
-            _ = try Create.encodeRequest(
-                ContainerCreateOptions.parse(["--ip6", "fe80::1", "alpine"]),
-                autoRemove: false
-            )
-        }
+    @Test func encodeRequestEncodesIPv6AndRejectsConflicts() throws {
+        let encoded = try Create.encodeRequest(
+            ContainerCreateOptions.parse(["--network", "v6net", "--ip6", "fd00:29::42", "alpine"]),
+            autoRemove: false
+        )
+        let root = try jsonObject(encoded.body)
+        let endpoints = try jsonObject(try jsonObject(root["NetworkingConfig"])["EndpointsConfig"])
+        let endpoint = try jsonObject(endpoints["v6net"])
+        let ipam = try jsonObject(endpoint["IPAMConfig"])
+        #expect(ipam["IPv6Address"] as? String == "fd00:29::42")
+
         expectCLIError("Conflicting options: --restart and --rm") {
             _ = try Create.encodeRequest(
                 ContainerCreateOptions.parse(["--restart", "always", "alpine"]),

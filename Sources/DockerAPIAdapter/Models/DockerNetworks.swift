@@ -49,18 +49,30 @@ public struct DockerNetwork: Encodable, Sendable {
         self.Driver = network.driver
         self.EnableIPv4 = network.enableIPv4
         self.EnableIPv6 = network.enableIPv6
+        var ipamConfigs: [IPAM.Config] = []
+        if !network.subnet.isEmpty {
+            ipamConfigs.append(
+                .init(
+                    Subnet: network.subnet,
+                    IPRange: network.ipRange,
+                    Gateway: network.gateway,
+                    AuxiliaryAddresses: network.auxiliaryAddresses
+                )
+            )
+        }
+        if !network.subnet6.isEmpty {
+            ipamConfigs.append(
+                .init(
+                    Subnet: network.subnet6,
+                    IPRange: "",
+                    Gateway: network.gateway6,
+                    AuxiliaryAddresses: [:]
+                )
+            )
+        }
         self.IPAM = .init(
             Driver: network.ipamDriver,
-            Config: network.subnet.isEmpty
-                ? []
-                : [
-                    .init(
-                        Subnet: network.subnet,
-                        IPRange: network.ipRange,
-                        Gateway: network.gateway,
-                        AuxiliaryAddresses: network.auxiliaryAddresses
-                    )
-                ],
+            Config: ipamConfigs,
             Options: network.ipamOptions
         )
         self.Internal = network.internalNetwork
@@ -74,7 +86,7 @@ public struct DockerNetwork: Encodable, Sendable {
                     EndpointID: item.endpointID,
                     MacAddress: item.macAddress,
                     IPv4Address: item.ipv4Address,
-                    IPv6Address: ""
+                    IPv6Address: item.ipv6Address
                 )
             )
         })

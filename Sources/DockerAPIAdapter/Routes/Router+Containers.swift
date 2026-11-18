@@ -29,6 +29,40 @@ extension Router {
 
     private static let reservedContainerNames: Set<String> = ["json", "create", "prune"]
 
+    struct CheckpointRoute: Equatable {
+        var id: String
+        var name: String?
+    }
+
+    /// `GET|POST /containers/{id}/checkpoints` and `DELETE /containers/{id}/checkpoints/{name}`.
+    static func matchCheckpoint(method: String, path: String) -> CheckpointRoute? {
+        guard path.hasPrefix("/containers/") else { return nil }
+        let rest = String(path.dropFirst("/containers/".count))
+        guard let marker = rest.range(of: "/checkpoints") else { return nil }
+        let rawID = String(rest[..<marker.lowerBound])
+        let id = rawID.removingPercentEncoding ?? rawID
+        guard !id.isEmpty, !id.contains("/") else { return nil }
+        let after = rest[marker.upperBound...]
+        if after.isEmpty {
+            guard method == "GET" || method == "POST" else { return nil }
+            return CheckpointRoute(id: id, name: nil)
+        }
+        guard method == "DELETE", after.hasPrefix("/") else { return nil }
+        let rawName = String(after.dropFirst())
+        let name = rawName.removingPercentEncoding ?? rawName
+        guard !name.isEmpty, !name.contains("/") else { return nil }
+        return CheckpointRoute(id: id, name: name)
+    }
+
+    func checkpointResponse(_ route: CheckpointRoute) async -> HTTPResponse {
+        do {
+            _ = try await engine.inspectContainer(route.id)
+        } catch {
+            return Self.engineError(error)
+        }
+        return Self.jsonError(status: 501, message: "checkpoint is not supported on this runtime")
+    }
+
     static func matchNamedContainer(method: String, path: String) -> NamedContainerRoute? {
         guard path.hasPrefix("/containers/") else { return nil }
         let rest = String(path.dropFirst("/containers/".count))
@@ -122,7 +156,7 @@ extension Router {
         case .unpause(let id):
             return await mutateContainer(id) { try await $0.unpauseContainer(id) }
         case .wait(let id):
-            return await waitContainer(id)
+            return await waitContainer(id, request: request)
         case .resize(let id):
             return await resizeContainer(id, request: request)
         case .delete(let id):
@@ -217,13 +251,14 @@ extension Router {
 
         do {
             let result = try await engine.createContainer(spec)
+            let warnings = Self.unsupportedCreateWarnings(request.body) + result.warnings
             return HTTPResponse(
                 status: 201,
                 headers: [
                     ("Content-Type", "application/json"),
                     ("Location", "/v1.41/containers/\(result.id)"),
                 ],
-                body: .buffer(JSONBody.encode(DockerCreateContainerResponse(Id: result.id, Warnings: result.warnings)))
+                body: .buffer(JSONBody.encode(DockerCreateContainerResponse(Id: result.id, Warnings: warnings)))
             )
         } catch {
             return Self.engineError(error)
@@ -430,7 +465,7 @@ extension Router {
     private func updateContainer(_ id: String, request: HTTPRequest) async -> HTTPResponse {
         let body: DockerUpdateContainerRequest
         if request.body.isEmpty {
-            body = DockerUpdateContainerRequest(Memory: nil, NanoCpus: nil)
+            body = DockerUpdateContainerRequest()
         } else {
             do {
                 body = try JSONDecoder().decode(DockerUpdateContainerRequest.self, from: request.body)
@@ -438,16 +473,44 @@ extension Router {
                 return Self.jsonError(status: 400, message: "invalid update config: \(error.localizedDescription)")
             }
         }
+        let restartPolicy: EngineRestartPolicy?
         do {
-            try await engine.updateContainer(id, memory: body.Memory, nanoCpus: body.NanoCpus)
-            return HTTPResponse(
-                status: 200,
-                headers: [("Content-Type", "application/json")],
-                body: .buffer(JSONBody.encode(DockerUpdateContainerResponse(Warnings: [])))
+            restartPolicy = try Self.updateRestartPolicy(body)
+        } catch {
+            return Self.engineError(error)
+        }
+        do {
+            let runtimeWarnings = try await engine.updateContainer(
+                id,
+                EngineContainerUpdate(
+                    memory: body.appliedMemory,
+                    nanoCpus: body.appliedNanoCpus,
+                    restartPolicy: restartPolicy
+                )
+            )
+            return Self.jsonOK(
+                DockerUpdateContainerResponse(Warnings: body.ignoredResourceWarnings() + runtimeWarnings)
             )
         } catch {
             return Self.engineError(error)
         }
+    }
+
+    /// Empty `RestartPolicy.Name` means "leave unchanged". `on-failure` takes `MaximumRetryCount`.
+    static func updateRestartPolicy(_ body: DockerUpdateContainerRequest) throws -> EngineRestartPolicy? {
+        guard let policy = body.RestartPolicy, let name = policy.Name?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !name.isEmpty
+        else {
+            return nil
+        }
+        if name == "on-failure" || name == "on-failure:" {
+            let count = policy.MaximumRetryCount ?? 0
+            guard count >= 0 else {
+                throw EngineError.invalidArgument("invalid restart policy: on-failure:\(count)")
+            }
+            return try EngineRestartPolicy.parse("on-failure:\(count)")
+        }
+        return try EngineRestartPolicy.parse(name)
     }
 
     private func renameContainer(_ id: String, request: HTTPRequest) async -> HTTPResponse {
@@ -462,9 +525,10 @@ extension Router {
         }
     }
 
-    private func waitContainer(_ id: String) async -> HTTPResponse {
+    private func waitContainer(_ id: String, request: HTTPRequest) async -> HTTPResponse {
+        let condition = request.query["condition"].flatMap { $0.isEmpty ? nil : $0 } ?? "not-running"
         do {
-            let code = try await engine.waitContainer(id)
+            let code = try await engine.waitContainer(id, condition: condition)
             return HTTPResponse(
                 status: 200,
                 headers: [("Content-Type", "application/json")],
@@ -616,14 +680,12 @@ extension Router {
     }
 
     static func endpointRequests(from body: DockerCreateContainerRequest) throws -> [EngineEndpointRequest] {
-        try (body.NetworkingConfig?.EndpointsConfig ?? [:]).map { name, config in
-            if let ip6 = config.IPAMConfig?.IPv6Address, !ip6.isEmpty {
-                throw EngineError.notImplemented("IPv6 is not implemented")
-            }
-            return EngineEndpointRequest(
+        (body.NetworkingConfig?.EndpointsConfig ?? [:]).map { name, config in
+            EngineEndpointRequest(
                 network: name,
                 aliases: Self.endpointAliases(config),
                 ipv4: config.IPAMConfig?.IPv4Address,
+                ipv6: config.IPAMConfig?.IPv6Address,
                 macAddress: config.MacAddress,
                 driverOpts: config.DriverOpts ?? [:],
                 gwPriority: config.GwPriority ?? 0,

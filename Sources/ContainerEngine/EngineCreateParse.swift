@@ -1,4 +1,32 @@
+import ContainerizationExtras
 import Foundation
+
+/// `POST /containers/{id}/update`. Nil fields are left unchanged. `0` is not a value here;
+/// the API layer already treats Docker's zero as "unset".
+public enum EngineWaitCondition: String, Sendable {
+    case notRunning = "not-running"
+    case nextExit = "next-exit"
+    case removed
+
+    static func parse(_ raw: String) throws -> EngineWaitCondition {
+        guard let condition = EngineWaitCondition(rawValue: raw) else {
+            throw EngineError.invalidArgument("invalid wait condition: \(raw)")
+        }
+        return condition
+    }
+}
+
+public struct EngineContainerUpdate: Sendable {
+    public var memory: Int64?
+    public var nanoCpus: Int64?
+    public var restartPolicy: EngineRestartPolicy?
+
+    public init(memory: Int64? = nil, nanoCpus: Int64? = nil, restartPolicy: EngineRestartPolicy? = nil) {
+        self.memory = memory
+        self.nanoCpus = nanoCpus
+        self.restartPolicy = restartPolicy
+    }
+}
 
 public struct EngineRestartPolicy: Sendable, Codable, Equatable {
     public var name: String
@@ -391,12 +419,17 @@ public struct EngineNetworkAttachSpec: Sendable, Equatable {
 
     public func asRequest() throws -> EngineEndpointRequest {
         if let ipv6, !ipv6.isEmpty {
-            throw EngineError.notImplemented("IPv6 is not implemented")
+            do {
+                _ = try IPv6Address(ipv6)
+            } catch {
+                throw EngineError.invalidArgument("invalid IPv6 address \(ipv6)")
+            }
         }
         return EngineEndpointRequest(
             network: name,
             aliases: aliases,
             ipv4: ipv4,
+            ipv6: ipv6,
             macAddress: macAddress,
             linkLocalIPs: linkLocalIPs
         )

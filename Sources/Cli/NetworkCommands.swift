@@ -116,23 +116,37 @@ struct NetworkCreate: ParsableCommand {
     }
 
     func encodedBody() throws -> Data {
-        let subnet = try Self.ipv4Value(subnet, what: "subnet")
-        let gateway = try Self.ipv4Value(gateway, what: "gateway")
-        let ipRange = try Self.ipv4Value(ipRange, what: "ip-range")
+        let subnet4 = try Self.singleValue(subnet.filter { !$0.contains(":") }, what: "IPv4 subnet")
+        let subnet6 = try Self.singleValue(subnet.filter { $0.contains(":") }, what: "IPv6 subnet")
+        let gateway4 = try Self.singleValue(gateway.filter { !$0.contains(":") }, what: "IPv4 gateway")
+        let gateway6 = try Self.singleValue(gateway.filter { $0.contains(":") }, what: "IPv6 gateway")
+        let ipRange4 = try Self.singleValue(ipRange.filter { !$0.contains(":") }, what: "IPv4 ip-range")
+        var configs: [NetworkCreateBody.IPAM.Config] = []
+        if subnet4 != nil || gateway4 != nil || ipRange4 != nil || !auxAddress.isEmpty {
+            configs.append(
+                .init(
+                    Subnet: subnet4,
+                    IPRange: ipRange4,
+                    Gateway: gateway4,
+                    AuxiliaryAddresses: NetworkKeyValues.map(auxAddress)
+                )
+            )
+        }
+        if subnet6 != nil || gateway6 != nil {
+            configs.append(
+                .init(
+                    Subnet: subnet6,
+                    IPRange: nil,
+                    Gateway: gateway6,
+                    AuxiliaryAddresses: nil
+                )
+            )
+        }
         var ipam: NetworkCreateBody.IPAM?
-        if subnet != nil || gateway != nil || ipRange != nil || !auxAddress.isEmpty || ipamDriver != "default"
-            || !ipamOpt.isEmpty
-        {
+        if !configs.isEmpty || ipamDriver != "default" || !ipamOpt.isEmpty {
             ipam = .init(
                 Driver: ipamDriver,
-                Config: [
-                    .init(
-                        Subnet: subnet,
-                        IPRange: ipRange,
-                        Gateway: gateway,
-                        AuxiliaryAddresses: NetworkKeyValues.map(auxAddress)
-                    )
-                ],
+                Config: configs,
                 Options: NetworkKeyValues.map(ipamOpt)
             )
         }
@@ -149,12 +163,9 @@ struct NetworkCreate: ParsableCommand {
         return try JSONEncoder().encode(body)
     }
 
-    static func ipv4Value(_ values: [String], what: String) throws -> String? {
-        if values.contains(where: { $0.contains(":") }) {
-            throw CLIError.io("IPv6 \(what) is not supported")
-        }
+    static func singleValue(_ values: [String], what: String) throws -> String? {
         guard values.count <= 1 else {
-            throw CLIError.io("only one IPv4 \(what) is supported")
+            throw CLIError.io("only one \(what) is supported")
         }
         return values.first
     }
