@@ -32,7 +32,71 @@ struct LogHistoryTests {
         }
     }
 
-    @Test func tailJoinsPipeFragmentsAndUsesCaptureTime() {
+    @Test func finiteTailStopsBeforeOldBlocksAndRespectsSnapshot() throws {
+        try TemporaryDirectory.with("macker-log-tail-blocks") { root in
+            let url = root.appendingPathComponent("logs")
+            let newest = String(repeating: "x", count: 70_000)
+            let old = String(repeating: "old record\n", count: 30_000)
+            try Data((old + newest).utf8).write(to: url)
+            let snapshot = try #require(LogFileSnapshot(url))
+            let writer = try FileHandle(forWritingTo: url)
+            defer { try? writer.close() }
+            _ = try writer.seekToEnd()
+            try writer.write(contentsOf: Data("\nnew live record".utf8))
+
+            var visited: [Data] = []
+            try snapshot.visitReversed {
+                visited.append($0)
+                return false
+            }
+            #expect(visited == [Data(newest.utf8)])
+            #expect(try snapshot.handle.offset() > 64 * 1024)
+        }
+    }
+
+    @Test func finiteTailFiltersAndReassemblesAcrossStreams() async throws {
+        try await withEngine { engine in
+            try await RouterTestSupport.importTagged(engine, repo: "tail-test")
+            let router = Router(engine: engine)
+            let id = try await RouterTestSupport.createContainer(router, image: "tail-test")
+            let root = await engine.containerRoot
+            try Data("legacy\n".utf8).write(to: EngineManager.logURL(id: id, root: root))
+            let time = Date(timeIntervalSince1970: 1_700_000_000)
+            for (text, stdout, offset) in [
+                ("old\n", false, -10), ("er", false, 0), ("out\n", true, 1),
+                ("ror\nlast", false, 2), (" discarded\n", false, 10),
+            ] {
+                await engine.appendLogRecord(id: id, chunk: EngineIOChunk(
+                    data: Data(text.utf8), stdout: stdout, timestamp: time.addingTimeInterval(Double(offset))
+                ))
+            }
+
+            func fetch(_ query: [String: String]) async throws -> [(UInt8, String)] {
+                let request = try RouterTestSupport.request("GET", "/containers/\(id)/logs", query: query)
+                let response = await router.handle(request)
+                #expect(response.status == 200)
+                var data = RouterTestSupport.data(response)
+                return DockerStdio.pullFrames(&data).frames.map { ($0.stream, String(decoding: $0.payload, as: UTF8.self)) }
+            }
+            let filtered = try await fetch([
+                "tail": "2", "stderr": "1", "timestamps": "1",
+                "since": ISO8601.string(from: time), "until": ISO8601.string(from: time.addingTimeInterval(2)),
+            ])
+            #expect(filtered.map { $0.0 } == [2, 2])
+            #expect(filtered.map { $0.1 } == [
+                "\(ISO8601.string(from: time)) error\n",
+                "\(ISO8601.string(from: time.addingTimeInterval(2))) last",
+            ])
+            let combined = try await fetch(["tail": "2", "stdout": "1", "stderr": "1"])
+            #expect(combined.map { $0.0 } == [2, 2])
+            #expect(combined.map { $0.1 } == ["error\n", "last discarded\n"])
+            let legacy = try await fetch(["tail": "2", "stdout": "1"])
+            #expect(legacy.map { $0.1 } == ["legacy\n", "out\n"])
+            #expect(try await fetch(["tail": "0", "stdout": "1", "stderr": "1"]).isEmpty)
+        }
+    }
+
+    @Test func historyJoinsPipeFragmentsAndUsesCaptureTime() {
         let older = Date(timeIntervalSince1970: 1_700_000_000)
         let newer = Date(timeIntervalSince1970: 1_700_000_010)
         let chunks = [
@@ -42,7 +106,7 @@ struct LogHistoryTests {
         ]
         var payload = Router.logHistoryPayload(
             chunks, tty: false, stdout: true, stderr: true, timestamps: true,
-            tail: "1", since: older.addingTimeInterval(1), until: nil
+            since: older.addingTimeInterval(1), until: nil
         )
         let frames = DockerStdio.pullFrames(&payload).frames
         #expect(frames.map(\.stream) == [2])

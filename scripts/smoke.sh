@@ -112,6 +112,9 @@ wait_running "$LIFECYCLE"
 "$MACKER" logs "$LIFECYCLE" >"$STORE/stdout" 2>"$STORE/stderr"
 grep -qx stdout-marker "$STORE/stdout"
 grep -qx stderr-marker "$STORE/stderr"
+"$MACKER" logs --tail 2 "$LIFECYCLE" >"$STORE/stdout" 2>"$STORE/stderr"
+test "$(wc -l <"$STORE/stdout" | tr -d ' ')" = 1
+test "$(wc -l <"$STORE/stderr" | tr -d ' ')" = 1
 ! grep -q stderr-marker "$STORE/stdout" || exit 1
 ! grep -q stdout-marker "$STORE/stderr" || exit 1
 "$MACKER" rm -f "$LIFECYCLE" >/dev/null

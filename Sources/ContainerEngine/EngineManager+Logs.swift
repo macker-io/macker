@@ -20,6 +20,67 @@ extension EngineManager {
         return (history, container.tty, live)
     }
 
+    public func tailContainerLogs(
+        _ idOrName: String, count: Int, follow: Bool, stdout: Bool, stderr: Bool, since: Date?, until: Date?
+    ) async throws -> (history: [EngineIOChunk], tty: Bool, live: EngineIOSession?) {
+        let container = try resolveContainer(idOrName)
+        let tty = container.tty
+        let live = follow && container.isActive
+            ? subscribeAttach(containerID: container.id, tty: tty, stdin: false, kind: .logs)
+            : nil
+        guard count > 0 else { return ([], tty, live) }
+
+        let records = LogFileSnapshot(Self.logRecordsURL(id: container.id, root: containerRoot))
+        let legacy = LogFileSnapshot(Self.logURL(id: container.id, root: containerRoot))
+        // Open files and subscribe in the same actor turn; do disk scans off the actor.
+        let reader = Task.detached {
+            var tail = LogTail(count: count)
+            let decoder = JSONDecoder()
+            try records?.visitReversed { data in
+                guard let record = try? decoder.decode(StoredLogChunk.self, from: data),
+                    tty || (record.stdout ? stdout : stderr),
+                    since.map({ record.timestamp >= $0 }) ?? true,
+                    until.map({ record.timestamp <= $0 }) ?? true
+                else { return true }
+                tail.visit(EngineIOChunk(data: record.data, stdout: record.stdout, timestamp: record.timestamp))
+                return !tail.complete
+            }
+            if !tail.complete, tty || stdout, let legacy, legacy.end > 0 {
+                try Task.checkCancellation()
+                let raw = String(decoding: try legacy.read(), as: UTF8.self)
+                let cooked = tty ? TTYSession.cook(raw) : raw
+                let text = Self.filterLegacyLogs(cooked, since: since, until: until)
+                tail.visit(EngineIOChunk(data: Data(text.utf8), stdout: true))
+            }
+            return tail.result()
+        }
+        do {
+            let history = try await withTaskCancellationHandler {
+                try await reader.value
+            } onCancel: {
+                reader.cancel()
+            }
+            return (history, tty, live)
+        } catch {
+            await live?.close()
+            throw error
+        }
+    }
+
+    private static func filterLegacyLogs(_ text: String, since: Date?, until: Date?) -> String {
+        guard since != nil || until != nil else { return text }
+        var lines = text.components(separatedBy: "\n")
+        let trailingNewline = text.hasSuffix("\n")
+        if trailingNewline { lines.removeLast() }
+        let filtered = lines.filter { line in
+            guard let token = line.split(separator: " ", maxSplits: 1).first,
+                let date = ISO8601.parse(String(token))
+            else { return true }
+            return (since.map { date >= $0 } ?? true) && (until.map { date <= $0 } ?? true)
+        }
+        return filtered.joined(separator: "\n") + (trailingNewline && !filtered.isEmpty ? "\n" : "")
+    }
+
     func logHistory(_ container: EngineContainer) -> [EngineIOChunk] {
         var chunks: [EngineIOChunk] = []
         if let raw = try? String(contentsOf: Self.logURL(id: container.id, root: containerRoot), encoding: .utf8),

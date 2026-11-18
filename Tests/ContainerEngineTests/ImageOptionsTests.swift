@@ -59,6 +59,11 @@ struct ImageOptionsTests {
                     )
                 )
                 try await engine.tagImage(name: "multi:v1", repo: "multi", tag: "v2")
+                let container = try await engine.createContainer(.init(image: "multi:v1"))
+                try await engine.deleteContainer(container.id, force: false, removeAnonymousVolumes: false)
+                await #expect(throws: EngineError.self) {
+                    _ = try await engine.deleteImage(name: digest)
+                }
 
                 let untagged = try await engine.deleteImage(name: "multi:v1")
                 #expect(untagged.count == 1)
@@ -71,8 +76,12 @@ struct ImageOptionsTests {
 
                 let removed = try await engine.deleteImage(name: "multi:v2")
                 #expect(removed.contains { $0.deleted == digest })
+                #expect(!removed.contains { $0.untagged == digest })
                 await #expect(throws: EngineError.self) {
                     _ = try await engine.inspectImage(name: "multi:v2")
+                }
+                await #expect(throws: EngineError.self) {
+                    _ = try await engine.inspectImage(name: digest)
                 }
             }
         }

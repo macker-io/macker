@@ -336,11 +336,27 @@ extension Router {
         let until = Self.parseTimestamp(request.query["until"])
 
         do {
-            let (history, tty, live) = try await engine.containerLogs(id, follow: follow)
-            let payload = Self.logHistoryPayload(
-                history, tty: tty, stdout: stdout, stderr: stderr, timestamps: timestamps,
-                tail: tail, since: since, until: until
-            )
+            let tty: Bool
+            let live: EngineIOSession?
+            let payload: Data
+            if let count = tail.flatMap(Int.init), count >= 0 {
+                let replay = try await engine.tailContainerLogs(
+                    id, count: count, follow: follow, stdout: stdout, stderr: stderr, since: since, until: until
+                )
+                tty = replay.tty
+                live = replay.live
+                payload = replay.history.reduce(into: Data()) { result, line in
+                    result.append(Self.framedIOChunk(line, tty: tty, stdout: stdout, stderr: stderr, timestamps: timestamps))
+                }
+            } else {
+                let replay = try await engine.containerLogs(id, follow: follow)
+                tty = replay.tty
+                live = replay.live
+                payload = Self.logHistoryPayload(
+                    replay.history, tty: tty, stdout: stdout, stderr: stderr, timestamps: timestamps,
+                    since: since, until: until
+                )
+            }
 
             guard follow, let session = live else {
                 var buffer = ByteBuffer()
@@ -808,9 +824,8 @@ extension Router {
 
     static func logHistoryPayload(
         _ history: [EngineIOChunk], tty: Bool, stdout: Bool, stderr: Bool, timestamps: Bool,
-        tail: String?, since: Date?, until: Date?
+        since: Date?, until: Date?
     ) -> Data {
-        let count = tail.flatMap(Int.init).flatMap { $0 >= 0 ? $0 : nil }
         let selected = history.filter { chunk in
             (tty || (chunk.stdout ? stdout : stderr)) && logDateMatches(chunk.timestamp, since: since, until: until)
         }.map { chunk in
@@ -818,9 +833,9 @@ extension Router {
             let text = formatLogs(String(decoding: chunk.data, as: UTF8.self), timestamps: false, tail: nil, since: since, until: until)
             return EngineIOChunk(data: Data(text.utf8), stdout: chunk.stdout)
         }
-        let chunks = count != nil || timestamps ? logLines(selected) : selected
+        let chunks = timestamps ? logLines(selected) : selected
         var result = Data()
-        for chunk in chunks.suffix(min(count ?? chunks.count, chunks.count)) {
+        for chunk in chunks {
             result.append(framedIOChunk(chunk, tty: tty, stdout: stdout, stderr: stderr, timestamps: timestamps))
         }
         return result

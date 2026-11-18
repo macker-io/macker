@@ -250,21 +250,35 @@ extension EngineManager {
                     "conflict: unable to remove repository reference \"\(reference)\" (must force) - image is being used by a container"
                 )
             }
-            if siblings.count > 1 {
+            let named = siblings.filter { !Self.isDigestReference($0.reference) }
+            let byID = Self.isDigestReference(name) || Self.isDigestReference(reference)
+            if byID, named.count > 1 {
+                throw EngineError.conflict(
+                    "conflict: unable to delete \(digest) (must force) - image is referenced in multiple repositories"
+                )
+            }
+            if !byID, named.contains(where: { $0.reference != reference }) {
                 try await imageStore.delete(reference: reference, performCleanup: false)
                 await publishImage(action: "untag", digest: digest, name: reference)
                 return [EngineImageDeleteItem(untagged: reference, deleted: nil)]
             }
-            try await imageStore.delete(reference: reference, performCleanup: !noPrune)
+
+            // A digest reference retains content for containers, but is not a second tag.
+            for sibling in siblings {
+                try await imageStore.delete(reference: sibling.reference, performCleanup: false)
+            }
             if !noPrune {
+                _ = try await imageStore.cleanUpOrphanedBlobs()
                 dropUnpackedCache(digest: digest)
             }
-            await publishImage(action: "untag", digest: digest, name: reference)
+            var items: [EngineImageDeleteItem] = []
+            for tag in named.map(\.reference) {
+                items.append(EngineImageDeleteItem(untagged: tag, deleted: nil))
+                await publishImage(action: "untag", digest: digest, name: tag)
+            }
             await publishImage(action: "delete", digest: digest, name: reference)
-            return [
-                EngineImageDeleteItem(untagged: reference, deleted: nil),
-                EngineImageDeleteItem(untagged: nil, deleted: digest),
-            ]
+            items.append(EngineImageDeleteItem(untagged: nil, deleted: digest))
+            return items
         }
 
         // Preserve the digest reference and its blobs while any container uses the image.
