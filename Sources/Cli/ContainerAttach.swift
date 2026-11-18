@@ -224,11 +224,16 @@ struct Logs: ParsableCommand {
         if let tail { path += "&tail=\(DaemonAPI.query(tail))" }
         if let since { path += "&since=\(DaemonAPI.query(since))" }
         if let until { path += "&until=\(DaemonAPI.query(until))" }
+        let inspect = try DaemonAPI.decode(
+            AttachInspect.self,
+            from: DaemonAPI.get("/containers/\(DaemonAPI.path(id))/json")
+        )
+        var pending = Data()
         let status = try DaemonAPI.streamBytes(
             method: "GET",
             path: path,
             timeoutSeconds: follow ? nil : 15
-        ) { DockerLog.write($0) }
+        ) { HijackIO.writeOutput($0, tty: inspect.Config.Tty == true, pending: &pending) }
         if status >= 400 {
             throw CLIError.http("logs failed with HTTP \(status)")
         }

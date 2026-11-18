@@ -87,10 +87,12 @@ public struct EngineExec: Sendable {
 public struct EngineIOChunk: Sendable {
     public let data: Data
     public let stdout: Bool
+    public let timestamp: Date?
 
-    public init(data: Data, stdout: Bool) {
+    public init(data: Data, stdout: Bool, timestamp: Date? = nil) {
         self.data = data
         self.stdout = stdout
+        self.timestamp = timestamp
     }
 }
 

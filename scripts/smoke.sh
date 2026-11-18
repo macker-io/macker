@@ -1,6 +1,6 @@
 #!/bin/sh
-# Isolated daemon smoke: UNIX socket, CLI control plane, then alpine pull + MicroVM
-# `run --rm`, `exec`, and `-p`. Set SMOKE_SKIP_VM=1 to stop after the control plane.
+# Isolated daemon smoke: control plane, real VM lifecycle, logging, and published ports.
+# Set SMOKE_SKIP_VM=1 to stop after the control plane.
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 cd "$ROOT"
@@ -16,10 +16,12 @@ fi
 STORE="$(mktemp -d "${TMPDIR:-/tmp}/macker-smoke.XXXXXX")"
 SOCK="${STORE}/macker.sock"
 NAME="smokewww"
-HOST_PORT=18080
+ALPINE=alpine:3.24
+NGINX=nginx:1.30-alpine
+LIFECYCLE=smoke-lifecycle
 cleanup() {
   if [ -n "${MACKER:-}" ] && [ -n "${MACKER_HOST:-}" ]; then
-    "$MACKER" rm -f "$NAME" >/dev/null 2>&1 || true
+    "$MACKER" rm -f "$NAME" "$LIFECYCLE" >/dev/null 2>&1 || true
   fi
   if [ -n "${PID:-}" ]; then
     kill "$PID" 2>/dev/null || true
@@ -27,7 +29,9 @@ cleanup() {
   fi
   rm -rf "$STORE"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 wait_running() {
   container="$1"
@@ -48,25 +52,28 @@ wait_running() {
   done
 }
 
-"$MACKERD" --store "$STORE" &
-PID=$!
+start_daemon() {
+  "$MACKERD" --store "$STORE" &
+  PID=$!
+  i=0
+  until "$MACKER" version >/dev/null 2>&1; do
+    i=$((i + 1))
+    if ! kill -0 "$PID" 2>/dev/null || [ "$i" -ge 50 ]; then
+      echo "mackerd did not start listening on $SOCK" >&2
+      exit 1
+    fi
+    sleep 0.1
+  done
+}
 
-i=0
-while [ ! -S "$SOCK" ]; do
-  i=$((i + 1))
-  if ! kill -0 "$PID" 2>/dev/null; then
-    echo "mackerd exited before listening on $SOCK" >&2
-    exit 1
-  fi
-  if [ "$i" -ge 50 ]; then
-    echo "mackerd did not create $SOCK" >&2
-    exit 1
-  fi
-  sleep 0.1
-done
+stop_daemon() {
+  kill -TERM "$PID"
+  wait "$PID"
+  PID=
+}
 
 export MACKER_HOST="unix://${SOCK}"
-"$MACKER" version >/dev/null
+start_daemon
 "$MACKER" info >/dev/null
 "$MACKER" volume create smokevol >/dev/null
 "$MACKER" volume ls | grep -q smokevol
@@ -79,19 +86,47 @@ if [ "${SMOKE_SKIP_VM:-}" = "1" ]; then
   exit 0
 fi
 
-echo "pulling alpine:latest…"
-"$MACKER" pull alpine:latest
+echo "pulling $ALPINE and ${NGINX}…"
+"$MACKER" pull "$ALPINE"
+"$MACKER" pull "$NGINX"
 
-echo "run --rm alpine:latest echo smoke-ok…"
-run_out="$("$MACKER" run --rm alpine:latest echo smoke-ok)"
+echo "run --rm $ALPINE echo smoke-ok…"
+run_out="$("$MACKER" run --rm "$ALPINE" echo smoke-ok)"
 printf '%s\n' "$run_out" | grep -q smoke-ok
 
-echo "pulling nginx:alpine…"
-"$MACKER" pull nginx:alpine
+echo "checking pinned image, writable layer, and historical streams…"
+"$MACKER" tag "$ALPINE" smoke-pinned:local
+"$MACKER" create --name "$LIFECYCLE" --restart always --network none --tmpfs /scratch smoke-pinned:local \
+  sh -c 'echo stdout-marker; echo stderr-marker >&2; exec sleep 600' >/dev/null
+"$MACKER" tag "$NGINX" smoke-pinned:local
+"$MACKER" start "$LIFECYCLE" >/dev/null
+"$MACKER" exec "$LIFECYCLE" grep -q '^ID=alpine' /etc/os-release
+"$MACKER" exec "$LIFECYCLE" sh -c 'echo persistent >/marker; echo ephemeral >/scratch/marker'
+"$MACKER" restart "$LIFECYCLE" >/dev/null
+"$MACKER" exec "$LIFECYCLE" sh -c 'grep -qx persistent /marker && test ! -e /scratch/marker'
 
-echo "run -d -p + exec + curl…"
-"$MACKER" run -d --name "$NAME" -p "127.0.0.1:${HOST_PORT}:80" nginx:alpine >/dev/null
+stop_daemon
+start_daemon
+wait_running "$LIFECYCLE"
+"$MACKER" exec "$LIFECYCLE" grep -qx persistent /marker
+"$MACKER" logs "$LIFECYCLE" >"$STORE/stdout" 2>"$STORE/stderr"
+grep -qx stdout-marker "$STORE/stdout"
+grep -qx stderr-marker "$STORE/stderr"
+! grep -q stderr-marker "$STORE/stdout" || exit 1
+! grep -q stdout-marker "$STORE/stderr" || exit 1
+"$MACKER" rm -f "$LIFECYCLE" >/dev/null
+
+echo "checking bridge publishing and nginx HUP reload…"
+"$MACKER" network create --ipv6 smoke-v6 >/dev/null
+"$MACKER" run -d --name "$NAME" --network smoke-v6 -p '127.0.0.1::80' -p '[::1]::80' "$NGINX" >/dev/null
 wait_running "$NAME"
+bindings="$("$MACKER" port "$NAME" 80)"
+HOST_PORT="$(printf '%s\n' "$bindings" | awk -F: '/^127[.]0[.]0[.]1:/ { print $NF }')"
+HOST_PORT_V6="$(printf '%s\n' "$bindings" | awk -F: 'index($0, "[::1]:") == 1 { print $NF }')"
+if [ -z "$HOST_PORT" ] || [ -z "$HOST_PORT_V6" ]; then
+  printf 'expected both IPv4 and IPv6 bindings; got:\n%s\n' "$bindings" >&2
+  exit 1
+fi
 
 exec_out="$("$MACKER" exec "$NAME" echo exec-ok)"
 printf '%s\n' "$exec_out" | grep -q exec-ok
@@ -110,6 +145,19 @@ while :; do
   sleep 1
 done
 
-"$MACKER" rm -f "$NAME" >/dev/null
+curl --noproxy '*' -gfsS --max-time 3 "http://[::1]:${HOST_PORT_V6}/" | grep -qi nginx
+"$MACKER" kill --signal HUP "$NAME" >/dev/null
+# Wait until nginx acknowledges the signal, not just until the API accepts it.
+i=0
+until "$MACKER" logs "$NAME" 2>&1 | grep -q 'reconfiguring'; do
+  i=$((i + 1))
+  test "$i" -lt 30
+  sleep 1
+done
+test "$("$MACKER" inspect -f '{{.State.Status}}' "$NAME")" = running
+curl -fsS --max-time 3 "http://127.0.0.1:${HOST_PORT}/" | grep -qi nginx
+"$MACKER" kill "$NAME" >/dev/null
+test "$("$MACKER" wait "$NAME")" = 137
+"$MACKER" rm "$NAME" >/dev/null
 
 echo "smoke ok store=$STORE"

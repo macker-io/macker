@@ -204,7 +204,8 @@ extension EngineManager {
         let image = try await resolveImage(name)
         let siblings = try await imageStore.list().filter { $0.digest == image.digest }
         let tags = Self.uniqueDisplayTags(siblings.map(\.reference))
-        let repoDigests = siblings.map { "\(Self.repository(from: $0.reference))@\(image.digest)" }
+        let repoDigests = siblings.filter { !Self.isDigestReference($0.reference) }
+            .map { "\(Self.repository(from: $0.reference))@\(image.digest)" }
 
         let platform = await Self.preferredPlatform(for: image)
         let config = try? await image.config(for: platform)
@@ -266,10 +267,10 @@ extension EngineManager {
             ]
         }
 
-        // Force: untag every stored reference of the digest. Layers (and the delete event)
-        // only go away when no container uses the image, mirroring Docker.
+        // Preserve the digest reference and its blobs while any container uses the image.
+        if inUse { try await retainImage(image) }
         var items: [EngineImageDeleteItem] = []
-        for sibling in siblings {
+        for sibling in siblings where !inUse || sibling.reference != digest {
             try? await imageStore.delete(reference: sibling.reference, performCleanup: false)
             items.append(EngineImageDeleteItem(untagged: sibling.reference, deleted: nil))
             await publishImage(action: "untag", digest: digest, name: sibling.reference)
@@ -283,6 +284,30 @@ extension EngineManager {
             await publishImage(action: "delete", digest: digest, name: reference)
         }
         return items
+    }
+
+    func retainImage(_ image: Containerization.Image) async throws {
+        if image.reference == image.digest { return }
+        _ = try await imageStore.create(description: .init(reference: image.digest, descriptor: image.descriptor))
+    }
+
+    func resolveContainerImage(_ container: EngineContainer) async throws -> Containerization.Image {
+        guard !container.imageID.isEmpty else { return try await resolveImage(container.image) }
+        let image = try await resolveImage(container.imageID)
+        guard image.digest == container.imageID else {
+            throw EngineError.imageNotFound("No such image: \(container.imageID)")
+        }
+        return image
+    }
+
+    /// Backfill digest references for stores created before images were retained at create time.
+    public func retainRestoredContainerImages() async throws {
+        let ids = Set(containers.values.map(\.imageID).filter { !$0.isEmpty })
+        let images = try await imageStore.list()
+        let retained = Set(images.filter { $0.reference == $0.digest }.map(\.digest))
+        for id in ids.subtracting(retained) {
+            if let image = images.first(where: { $0.digest == id }) { try await retainImage(image) }
+        }
     }
 
     func resolveImage(_ name: String) async throws -> Containerization.Image {
@@ -702,7 +727,7 @@ extension EngineManager {
 
     private func imageInUse(digest: String, members: [Containerization.Image]) -> Bool {
         containers.values.contains { container in
-            if !container.imageID.isEmpty, container.imageID == digest { return true }
+            if !container.imageID.isEmpty { return container.imageID == digest }
             guard !container.image.isEmpty else { return false }
             return members.contains { Self.matches($0, name: container.image) }
         }

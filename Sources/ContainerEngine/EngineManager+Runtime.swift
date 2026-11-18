@@ -29,9 +29,13 @@ extension EngineManager {
     }
 
     func bootContainer(_ record: EngineContainer) async throws {
-        let image = try await resolveImage(record.image)
+        let image = try await resolveContainerImage(record)
+        try await retainImage(image)
         var manager = try await ensureManager()
         await reclaimContainerRuntime(record.id)
+        for mount in record.mounts where mount.type == "tmpfs" {
+            try FileManager.default.createDirectory(atPath: mount.source, withIntermediateDirectories: true)
+        }
 
         let stdoutSink = ProcessLogSink(hopping: { [id = record.id] data in
             await self.appendOutput(id: id, data: data, stdout: true)
@@ -164,6 +168,7 @@ extension EngineManager {
             } catch {
                 result = .failure(error)
             }
+            guard !Task.isCancelled else { return }
             await self.finishWatchedVM(id: id, result: result)
         }
     }
@@ -223,43 +228,38 @@ extension EngineManager {
         guard !data.isEmpty else { return }
         let tty = containers[id]?.tty == true
         let attachData: Data
-        let logText: String
+        let logData: Data
         if tty {
             var session = ttySessions[id] ?? TTYSession()
             let output = session.ingest(data)
             ttySessions[id] = session
             attachData = output.attach
-            logText = output.log
+            logData = Data(output.log.utf8)
         } else {
             attachData = data
-            logText = String(decoding: data, as: UTF8.self)
+            logData = data
         }
-        if !logText.isEmpty, var record = containers[id] {
-            record.logs += logText
-            containers[id] = record
-            appendLogFile(id: id, text: logText)
+        let timestamp = Date()
+        if !logData.isEmpty, containers[id] != nil {
+            appendLogRecord(id: id, chunk: EngineIOChunk(data: logData, stdout: stdout, timestamp: timestamp))
         }
         guard let subscribers = attachSubscribers[id] else { return }
         for subscriber in subscribers.values {
             let payload: Data
             if subscriber.kind == .logs, tty {
-                payload = Data(logText.utf8)
+                payload = logData
             } else {
                 payload = attachData
             }
             guard !payload.isEmpty else { continue }
-            subscriber.continuation.yield(EngineIOChunk(data: payload, stdout: stdout))
+            subscriber.continuation.yield(EngineIOChunk(data: payload, stdout: stdout, timestamp: timestamp))
         }
     }
 
     func reclaimContainerRuntime(_ id: String) async {
         await stopPortPublishers(id)
         await releaseInterfaces(id)
-        resetContainerFiles(id)
-    }
-
-    func resetContainerFiles(_ id: String) {
-        Self.removeRuntimeDirectory(id, root: containerRoot)
+        Self.removeTransientContainerFiles(id, root: containerRoot)
     }
 
     func pauseVM(_ id: String) async throws {

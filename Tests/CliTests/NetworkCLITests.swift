@@ -24,6 +24,17 @@ struct NetworkCLITests {
         #expect(config?.first?["Gateway"] == "172.20.0.1")
     }
 
+    @Test(arguments: [
+        ["--ipv6", "front"], ["--ipv6=true", "front"], ["--ipv6", "true", "front"], ["front", "--ipv6"],
+    ]) func acceptsDockerBooleanSyntax(args: [String]) throws {
+        let rewritten = DockerGlobalFlags.rewriteNetworkBooleans(["network", "create"] + args)
+        let command = try NetworkCreate.parse(Array(rewritten.dropFirst(2)))
+        #expect(command.name == "front")
+        #expect(command.ipv6)
+        let disabled = DockerGlobalFlags.rewriteNetworkBooleans(["network", "create", "--ipv6=false", "front"])
+        #expect(try !NetworkCreate.parse(Array(disabled.dropFirst(2))).ipv6)
+    }
+
     @Test func encodesIPv6AndRejectsMultipleSubnets() throws {
         let command = try NetworkCreate.parse([
             "--ipv6", "true",

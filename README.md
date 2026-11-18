@@ -98,7 +98,7 @@ curl http://127.0.0.1:18080
 ## Preview limits
 
 - Apple Silicon only. No Compose, Swarm, buildx, plugins, secrets, or configs.
-- `macvlan` / `ipvlan` / `--net=container:` / IPv6 are not implemented.
+- `bridge` supports dual-stack IPv6 (`macker network create --ipv6 NAME`); IPv6-only and `host`-mode IPv6 are not supported. `macvlan` / `ipvlan` / `--net=container:` are not implemented.
 - Many Docker flags are accepted as no-ops (see [docs/cli.md](docs/cli.md)).
 - `macker setup` is opt-in and will fight Docker Desktop if you already use it.
 

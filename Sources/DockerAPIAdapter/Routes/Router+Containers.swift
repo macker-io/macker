@@ -331,22 +331,16 @@ extension Router {
 
         let timestamps = Self.queryFlag(request.query["timestamps"])
         let follow = Self.queryFlag(request.query["follow"])
-        let details = Self.queryFlag(request.query["details"])
         let tail = request.query["tail"]
         let since = Self.parseTimestamp(request.query["since"])
         let until = Self.parseTimestamp(request.query["until"])
 
         do {
-            let (text, tty, live) = try await engine.containerLogs(id, follow: follow)
-            let formatted = Self.formatLogs(
-                text,
-                timestamps: timestamps,
-                tail: tail,
-                since: since,
-                until: until,
-                details: details
+            let (history, tty, live) = try await engine.containerLogs(id, follow: follow)
+            let payload = Self.logHistoryPayload(
+                history, tty: tty, stdout: stdout, stderr: stderr, timestamps: timestamps,
+                tail: tail, since: since, until: until
             )
-            let payload = Self.dockerLogPayload(text: formatted, tty: tty, stdout: stdout)
 
             guard follow, let session = live else {
                 var buffer = ByteBuffer()
@@ -812,8 +806,54 @@ extension Router {
         return ISO8601.parse(token)
     }
 
-    static func dockerLogPayload(text: String, tty: Bool, stdout: Bool) -> Data {
-        dockerLogPayload(data: Data(text.utf8), tty: tty, stdout: stdout)
+    static func logHistoryPayload(
+        _ history: [EngineIOChunk], tty: Bool, stdout: Bool, stderr: Bool, timestamps: Bool,
+        tail: String?, since: Date?, until: Date?
+    ) -> Data {
+        let count = tail.flatMap(Int.init).flatMap { $0 >= 0 ? $0 : nil }
+        let selected = history.filter { chunk in
+            (tty || (chunk.stdout ? stdout : stderr)) && logDateMatches(chunk.timestamp, since: since, until: until)
+        }.map { chunk in
+            guard chunk.timestamp == nil, since != nil || until != nil else { return chunk }
+            let text = formatLogs(String(decoding: chunk.data, as: UTF8.self), timestamps: false, tail: nil, since: since, until: until)
+            return EngineIOChunk(data: Data(text.utf8), stdout: chunk.stdout)
+        }
+        let chunks = count != nil || timestamps ? logLines(selected) : selected
+        var result = Data()
+        for chunk in chunks.suffix(min(count ?? chunks.count, chunks.count)) {
+            result.append(framedIOChunk(chunk, tty: tty, stdout: stdout, stderr: stderr, timestamps: timestamps))
+        }
+        return result
+    }
+
+    private static func logDateMatches(_ date: Date?, since: Date?, until: Date?) -> Bool {
+        guard let date else { return true }
+        if let since, date < since { return false }
+        if let until, date > until { return false }
+        return true
+    }
+
+    // Pipe read boundaries are not line boundaries. Join fragments within each stream before tailing.
+    private static func logLines(_ chunks: [EngineIOChunk]) -> [EngineIOChunk] {
+        var lines: [EngineIOChunk] = []
+        var partial: [Bool: (data: Data, date: Date?, order: Int)] = [:]
+        for (index, chunk) in chunks.enumerated() where !chunk.data.isEmpty {
+            var pending = partial.removeValue(forKey: chunk.stdout) ?? (Data(), chunk.timestamp, index)
+            var start = chunk.data.startIndex
+            while let newline = chunk.data[start...].firstIndex(of: 0x0a) {
+                let next = chunk.data.index(after: newline)
+                pending.data.append(chunk.data[start..<next])
+                lines.append(EngineIOChunk(data: pending.data, stdout: chunk.stdout, timestamp: pending.date))
+                pending = (Data(), chunk.timestamp, index)
+                start = next
+            }
+            pending.data.append(chunk.data[start...])
+            if !pending.data.isEmpty { partial[chunk.stdout] = pending }
+        }
+        for (stdout, entry) in partial.sorted(by: { $0.value.order < $1.value.order }) {
+            lines.append(EngineIOChunk(data: entry.data, stdout: stdout, timestamp: entry.date))
+        }
+        return lines
     }
 
     static func dockerLogPayload(data: Data, tty: Bool, stdout: Bool) -> Data {
@@ -837,8 +877,24 @@ extension Router {
             if chunk.stdout && !stdout { return Data() }
             if !chunk.stdout && !stderr { return Data() }
         }
+        guard logDateMatches(chunk.timestamp, since: since, until: until) else { return Data() }
         let data: Data
-        if timestamps || since != nil || until != nil {
+        if let stamp = chunk.timestamp {
+            if timestamps {
+                let prefix = Data("\(ISO8601.string(from: stamp)) ".utf8)
+                var stamped = Data()
+                var start = chunk.data.startIndex
+                while start < chunk.data.endIndex {
+                    let end = chunk.data[start...].firstIndex(of: 0x0a).map { chunk.data.index(after: $0) } ?? chunk.data.endIndex
+                    stamped.append(prefix)
+                    stamped.append(chunk.data[start..<end])
+                    start = end
+                }
+                data = stamped
+            } else {
+                data = chunk.data
+            }
+        } else if timestamps || since != nil || until != nil {
             data = Data(
                 formatLogs(
                     String(decoding: chunk.data, as: UTF8.self),

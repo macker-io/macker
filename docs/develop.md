@@ -61,7 +61,7 @@ Run these from the repo root. Prefer Make over calling `scripts/` directly.
 | `sync-runtime` | Show or set pins (`ARGS='containerization 0.42.0'`) |
 | `sync-runtime-latest` | Bump pins to GitHub latest stable |
 | `test` | Run unit tests (CLI + REST + engine; no MicroVM) |
-| `smoke` | Signed daemon + alpine `run --rm` / `exec` / `-p` on an isolated `--store` (`SMOKE_SKIP_VM=1` skips MicroVMs) |
+| `smoke` | Signed daemon on an isolated `--store`: image pinning, writable layer and logs across restart, signal delivery, and IPv4/IPv6 port publishing (`SMOKE_SKIP_VM=1` skips MicroVMs) |
 
 ```bash
 VERSION=1.2.3 make dist
@@ -100,7 +100,7 @@ Daemon data lives in `~/Library/Application Support/io.macker.daemon/`:
 
 - `macker.sock` — API socket (removed when the daemon exits)
 - `runtime/vmlinux`, `initfs.ext4` — guest kernel and initfs
-- `content/`, `volumes/`, `containers/`, `networks/`, `auth.json` — engine state (`make reset` keeps `auth.json`). Container metadata is `containers/<id>.json`; MicroVM disks under `containers/<id>/` are recreated on each start.
+- `content/`, `volumes/`, `containers/`, `networks/`, `auth.json` — engine state (`make reset` keeps `auth.json`). Container metadata is `containers/<id>.json`; Each container's writable `containers/<id>/rootfs.ext4` survives stop/start and daemon restart and is deleted when the container is removed.
 
 Guest versions are pinned in `Sources/ContainerEngine/RuntimePin.json` (`containerization`, `kata`). `.runtime/` is a packaging cache only (gitignored), not the runtime store.
 

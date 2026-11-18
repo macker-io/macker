@@ -78,6 +78,23 @@ struct ImageOptionsTests {
         }
     }
 
+    @Test func containerKeepsOriginalImageAcrossRetagAndImageCleanup() async throws {
+        try await withEngine { engine in
+            try await RouterTestSupport.importTagged(engine, repo: "pinned", hello: "old")
+            let id = try await engine.createContainer(.init(image: "pinned")).id
+            let original = try await engine.inspectImage(name: "pinned").id
+            try await RouterTestSupport.importTagged(engine, repo: "pinned", hello: "new")
+            #expect(try await engine.inspectImage(name: "pinned").id != original)
+
+            _ = try await engine.deleteImage(name: original, force: true)
+            _ = try await engine.pruneImages(danglingOnly: false, until: nil)
+            let container = try await engine.inspectContainer(id).container
+            let resolved = try await engine.resolveContainerImage(container)
+            #expect(resolved.digest == original)
+            #expect(try await engine.inspectImage(name: original).layers.count == 1)
+        }
+    }
+
     @Test func invalidHistoryPlatformThrows() async throws {
         try await withEngine { engine in
             try await TemporaryDirectory.with("macker-image-platform") { work in

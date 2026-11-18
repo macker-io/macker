@@ -217,7 +217,7 @@ curl http://127.0.0.1:18080
 # bridge: Mac → container IP (helper required)
 sudo macker helper install
 # restart the daemon, then start the container
-macker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' web
+macker inspect -f '{{.NetworkSettings.Networks.bridge.IPAddress}}' web
 curl http://172.17.0.2
 
 # host: EXPOSE 1:1, not -p

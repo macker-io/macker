@@ -454,34 +454,6 @@ enum Prompt {
     }
 }
 
-enum DockerLog {
-    /// Prints Docker multiplexed log frames, or raw text if the payload is not framed.
-    static func write(_ data: Data, to file: FileHandle = .standardOutput) {
-        var offset = 0
-        let bytes = [UInt8](data)
-        var framed = false
-        while offset + 8 <= bytes.count {
-            let stream = bytes[offset]
-            let size =
-                (Int(bytes[offset + 4]) << 24)
-                | (Int(bytes[offset + 5]) << 16)
-                | (Int(bytes[offset + 6]) << 8)
-                | Int(bytes[offset + 7])
-            guard stream <= 2, bytes[offset + 1] == 0, bytes[offset + 2] == 0, bytes[offset + 3] == 0,
-                size >= 0, offset + 8 + size <= bytes.count
-            else {
-                break
-            }
-            framed = true
-            try? file.write(contentsOf: Data(bytes[(offset + 8)..<(offset + 8 + size)]))
-            offset += 8 + size
-        }
-        if !framed, !data.isEmpty {
-            try? file.write(contentsOf: data)
-        }
-    }
-}
-
 private struct ProgressLine: Decodable {
     var status: String?
     var id: String?

@@ -105,10 +105,10 @@ struct NetworkCreate: ParsableCommand {
     @Option(name: [.customShort("o"), .customLong("opt")], help: "Set driver-specific options (key=value).")
     var opt: [String] = []
 
-    @Option(name: .customLong("ipv4"), help: "Enable or disable IPv4 address assignment.")
+    @Option(name: .customLong("ipv4"), help: "Enable IPv4 address assignment (use --ipv4=false to disable).")
     var ipv4: Bool = true
 
-    @Option(name: .customLong("ipv6"), help: "Enable or disable IPv6 address assignment.")
+    @Option(name: .customLong("ipv6"), help: "Enable IPv6 address assignment (use --ipv6=false to disable).")
     var ipv6: Bool = false
 
     @Option(name: .customLong("ipam-driver"), help: "IP Address Management driver.")

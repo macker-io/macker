@@ -169,7 +169,19 @@ struct ContainerOptionsTests {
             var containers = Dictionary(
                 uniqueKeysWithValues: [alwaysRun, alwaysStopped, alwaysCreated, unlessRun, unlessStopped, onFailure].map { ($0.id, $0) }
             )
+            let runtime = EngineManager.runtimeURL(id: alwaysRun.id, root: dir)
+            let tmpfs = runtime.appendingPathComponent("tmpfs")
+            let disk = runtime.appendingPathComponent("rootfs.ext4")
+            let baseline = runtime.appendingPathComponent("baseline.json")
+            let marker = Data("preserved".utf8)
+            try FileManager.default.createDirectory(at: tmpfs, withIntermediateDirectories: true)
+            try marker.write(to: disk)
+            try marker.write(to: baseline)
+
             let restart = EngineManager.restoreContainers(&containers, root: dir)
+            #expect(try Data(contentsOf: disk) == marker)
+            #expect(try Data(contentsOf: baseline) == marker)
+            #expect(!FileManager.default.fileExists(atPath: tmpfs.path))
             #expect(Set(restart) == Set([alwaysRun.id, alwaysStopped.id, unlessRun.id]))
             #expect(containers[alwaysRun.id]?.state == "exited")
             #expect(containers[unlessRun.id]?.exitCode == 255)

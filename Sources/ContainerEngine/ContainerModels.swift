@@ -196,7 +196,6 @@ public struct EngineContainer: Sendable, Codable {
     public var startedAt: Date?
     public var finishedAt: Date?
     public var exitCode: Int
-    public var logs: String = ""
     public var autoRemove: Bool
     public var memory: Int64
     public var nanoCpus: Int64
@@ -232,7 +231,6 @@ public struct EngineContainer: Sendable, Codable {
         startedAt: Date?,
         finishedAt: Date?,
         exitCode: Int,
-        logs: String = "",
         autoRemove: Bool,
         memory: Int64,
         nanoCpus: Int64,
@@ -261,7 +259,6 @@ public struct EngineContainer: Sendable, Codable {
         self.startedAt = startedAt
         self.finishedAt = finishedAt
         self.exitCode = exitCode
-        self.logs = logs
         self.autoRemove = autoRemove
         self.memory = memory
         self.nanoCpus = nanoCpus

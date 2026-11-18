@@ -52,6 +52,14 @@ struct DaemonApp {
             exit(1)
         }
 
+        do {
+            try await engine.retainRestoredContainerImages()
+        } catch {
+            logger.error("failed to retain container images: \(error.localizedDescription)")
+            instanceLock.release()
+            exit(1)
+        }
+
         let server = SocketServer(socketPath: socketPath, engine: engine, logger: logger)
         let signals = SignalWatcher()
 

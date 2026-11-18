@@ -82,7 +82,7 @@ extension EngineManager {
         {
             return entries
         }
-        return try await unpackImageBaseline(container.image)
+        return try await unpackImageBaseline(container)
     }
 
     func withExtractedRootfs<T>(_ container: EngineContainer, _ body: (URL) async throws -> T) async throws -> T {
@@ -118,8 +118,8 @@ extension EngineManager {
         )
     }
 
-    private func unpackImageBaseline(_ imageName: String) async throws -> [String: FSEntry] {
-        let image = try await resolveImage(imageName)
+    private func unpackImageBaseline(_ container: EngineContainer) async throws -> [String: FSEntry] {
+        let image = try await resolveContainerImage(container)
         return try await withScratch("macker-image-baseline") { work in
             let dest = work.appendingPathComponent("rootfs.ext4")
             _ = try await EXT4Unpacker(capacityInBytes: Self.defaultRootfsBytes).unpack(image, for: .current, at: dest)

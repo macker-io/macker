@@ -24,7 +24,7 @@ public enum DockerGlobalFlags {
         while index < arguments.count {
             let arg = arguments[index]
             if arg == "--" || !arg.hasPrefix("-") || arg == "-" {
-                kept.append(contentsOf: rewriteHelpShortFlag(Array(arguments[index...])))
+                kept.append(contentsOf: rewriteNetworkBooleans(rewriteHelpShortFlag(Array(arguments[index...]))))
                 break
             }
             if arg == "--help" || arg == "--version" || arg == "-v" {
@@ -93,6 +93,33 @@ public enum DockerGlobalFlags {
             out.append(arg == "-h" ? "--help" : arg)
         }
         return out
+    }
+
+    /// Docker boolean options can omit the value. Keep the older spaced form too.
+    static func rewriteNetworkBooleans(_ args: [String]) -> [String] {
+        guard args.starts(with: ["network", "create"]) else { return args }
+        var result = Array(args.prefix(2))
+        var index = 2
+        while index < args.count {
+            let flag = args[index]
+            if flag == "--" {
+                result.append(contentsOf: args[index...])
+                break
+            }
+            if flag == "--ipv4" || flag == "--ipv6" {
+                let next = index + 1
+                if next < args.count - 1, ["true", "false"].contains(args[next]) {
+                    result.append("\(flag)=\(args[next])")
+                    index += 2
+                    continue
+                }
+                result.append("\(flag)=true")
+            } else {
+                result.append(flag)
+            }
+            index += 1
+        }
+        return result
     }
 
     /// `--host`, then `MACKER_HOST` / `DOCKER_HOST`, then the selected context, then the default socket.
