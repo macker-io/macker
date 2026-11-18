@@ -9,6 +9,8 @@ public struct EngineNetwork: Sendable, Codable, Equatable {
     public var labels: [String: String]
     public var subnet: String
     public var gateway: String
+    public var subnet6: String
+    public var gateway6: String
     public var internalNetwork: Bool
     public var builtin: Bool
     public var options: [String: String]
@@ -28,6 +30,8 @@ public struct EngineNetwork: Sendable, Codable, Equatable {
         labels: [String: String],
         subnet: String,
         gateway: String,
+        subnet6: String = "",
+        gateway6: String = "",
         internalNetwork: Bool,
         builtin: Bool,
         options: [String: String] = [:],
@@ -46,6 +50,8 @@ public struct EngineNetwork: Sendable, Codable, Equatable {
         self.labels = labels
         self.subnet = subnet
         self.gateway = gateway
+        self.subnet6 = subnet6
+        self.gateway6 = gateway6
         self.internalNetwork = internalNetwork
         self.builtin = builtin
         self.options = options
@@ -67,6 +73,8 @@ public struct EngineNetwork: Sendable, Codable, Equatable {
         labels = try container.decode([String: String].self, forKey: .labels)
         subnet = try container.decode(String.self, forKey: .subnet)
         gateway = try container.decode(String.self, forKey: .gateway)
+        subnet6 = try container.decodeIfPresent(String.self, forKey: .subnet6) ?? ""
+        gateway6 = try container.decodeIfPresent(String.self, forKey: .gateway6) ?? ""
         internalNetwork = try container.decode(Bool.self, forKey: .internalNetwork)
         builtin = try container.decode(Bool.self, forKey: .builtin)
         options = try container.decodeIfPresent([String: String].self, forKey: .options) ?? [:]
@@ -85,6 +93,9 @@ public struct EngineEndpoint: Sendable, Codable, Equatable {
     public var ipv4Address: String
     public var ipv4Prefix: Int
     public var gateway: String
+    public var ipv6Address: String
+    public var ipv6Prefix: Int
+    public var ipv6Gateway: String
     public var macAddress: String
     public var aliases: [String]
     public var driverOpts: [String: String]
@@ -97,6 +108,9 @@ public struct EngineEndpoint: Sendable, Codable, Equatable {
         ipv4Address: String,
         ipv4Prefix: Int,
         gateway: String,
+        ipv6Address: String = "",
+        ipv6Prefix: Int = 0,
+        ipv6Gateway: String = "",
         macAddress: String,
         aliases: [String],
         driverOpts: [String: String] = [:],
@@ -108,6 +122,9 @@ public struct EngineEndpoint: Sendable, Codable, Equatable {
         self.ipv4Address = ipv4Address
         self.ipv4Prefix = ipv4Prefix
         self.gateway = gateway
+        self.ipv6Address = ipv6Address
+        self.ipv6Prefix = ipv6Prefix
+        self.ipv6Gateway = ipv6Gateway
         self.macAddress = macAddress
         self.aliases = aliases
         self.driverOpts = driverOpts
@@ -122,6 +139,9 @@ public struct EngineEndpoint: Sendable, Codable, Equatable {
         ipv4Address = try container.decode(String.self, forKey: .ipv4Address)
         ipv4Prefix = try container.decode(Int.self, forKey: .ipv4Prefix)
         gateway = try container.decode(String.self, forKey: .gateway)
+        ipv6Address = try container.decodeIfPresent(String.self, forKey: .ipv6Address) ?? ""
+        ipv6Prefix = try container.decodeIfPresent(Int.self, forKey: .ipv6Prefix) ?? 0
+        ipv6Gateway = try container.decodeIfPresent(String.self, forKey: .ipv6Gateway) ?? ""
         macAddress = try container.decode(String.self, forKey: .macAddress)
         aliases = try container.decode([String].self, forKey: .aliases)
         driverOpts = try container.decodeIfPresent([String: String].self, forKey: .driverOpts) ?? [:]
@@ -134,6 +154,7 @@ public struct EngineEndpointRequest: Sendable {
     public var network: String
     public var aliases: [String]
     public var ipv4: String?
+    public var ipv6: String?
     public var macAddress: String?
     public var driverOpts: [String: String]
     public var gwPriority: Int
@@ -143,6 +164,7 @@ public struct EngineEndpointRequest: Sendable {
         network: String,
         aliases: [String] = [],
         ipv4: String? = nil,
+        ipv6: String? = nil,
         macAddress: String? = nil,
         driverOpts: [String: String] = [:],
         gwPriority: Int = 0,
@@ -151,6 +173,7 @@ public struct EngineEndpointRequest: Sendable {
         self.network = network
         self.aliases = aliases
         self.ipv4 = ipv4
+        self.ipv6 = ipv6
         self.macAddress = macAddress
         self.driverOpts = driverOpts
         self.gwPriority = gwPriority
@@ -165,6 +188,8 @@ public struct EngineNetworkCreateSpec: Sendable {
     public var options: [String: String]
     public var subnet: String?
     public var gateway: String?
+    public var subnet6: String?
+    public var gateway6: String?
     public var ipRange: String?
     public var auxiliaryAddresses: [String: String]
     public var ipamDriver: String
@@ -180,6 +205,8 @@ public struct EngineNetworkCreateSpec: Sendable {
         options: [String: String] = [:],
         subnet: String? = nil,
         gateway: String? = nil,
+        subnet6: String? = nil,
+        gateway6: String? = nil,
         ipRange: String? = nil,
         auxiliaryAddresses: [String: String] = [:],
         ipamDriver: String = "default",
@@ -194,6 +221,8 @@ public struct EngineNetworkCreateSpec: Sendable {
         self.options = options
         self.subnet = subnet
         self.gateway = gateway
+        self.subnet6 = subnet6
+        self.gateway6 = gateway6
         self.ipRange = ipRange
         self.auxiliaryAddresses = auxiliaryAddresses
         self.ipamDriver = ipamDriver
@@ -210,6 +239,23 @@ public struct EngineNetworkContainer: Sendable {
     public var endpointID: String
     public var macAddress: String
     public var ipv4Address: String
+    public var ipv6Address: String
+
+    public init(
+        id: String,
+        name: String,
+        endpointID: String,
+        macAddress: String,
+        ipv4Address: String,
+        ipv6Address: String = ""
+    ) {
+        self.id = id
+        self.name = name
+        self.endpointID = endpointID
+        self.macAddress = macAddress
+        self.ipv4Address = ipv4Address
+        self.ipv6Address = ipv6Address
+    }
 }
 
 public struct EngineNetworkInspect: Sendable {
@@ -249,6 +295,7 @@ public struct EngineNetworkConnectSpec: Sendable {
             network: network,
             aliases: aliases,
             ipv4: ipv4,
+            ipv6: ipv6,
             driverOpts: driverOpts,
             gwPriority: gwPriority,
             linkLocalIPs: linkLocalIPs

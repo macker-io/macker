@@ -81,17 +81,26 @@ public struct HelperRequest: Codable, Sendable, Equatable {
                 address: try HelperNetText.requireIPv4(address, field: "address"),
                 peer: try HelperNetText.requireIPv4(peer, field: "peer"),
                 prefix: try HelperNetText.requirePrefix(prefix),
-                routes: try (self.routes ?? []).map { try HelperNetText.requireCIDR($0) }
+                routes: try (self.routes ?? []).map { try HelperNetText.requireAnyCIDR($0) }
             )
         case .addRoute:
             return .addRoute(
                 interface: try HelperNetText.requireUtun(interface),
-                subnet: try HelperNetText.requireCIDR(subnet)
+                subnet: try HelperNetText.requireAnyCIDR(subnet)
             )
         case .addAddress:
+            let addr = try HelperNetText.requireIP(address, field: "address")
+            if HelperNetText.isIPv6(addr) {
+                return .addAddress(
+                    interface: try HelperNetText.requireUtun(interface),
+                    address: addr,
+                    peer: addr,
+                    prefix: try HelperNetText.requirePrefix6(prefix)
+                )
+            }
             return .addAddress(
                 interface: try HelperNetText.requireUtun(interface),
-                address: try HelperNetText.requireIPv4(address, field: "address"),
+                address: addr,
                 peer: try HelperNetText.requireIPv4(peer, field: "peer"),
                 prefix: try HelperNetText.requirePrefix(prefix)
             )
@@ -146,12 +155,25 @@ public enum HelperNetText: Sendable {
         return value.withCString { inet_pton(AF_INET, $0, &addr) == 1 }
     }
 
+    public static func isIPv6(_ value: String) -> Bool {
+        var addr = in6_addr()
+        return value.withCString { inet_pton(AF_INET6, $0, &addr) == 1 }
+    }
+
     public static func isIPv4CIDR(_ value: String) -> Bool {
         let parts = value.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)
         guard parts.count == 2, let prefix = Int(parts[1]), (0...32).contains(prefix) else {
             return false
         }
         return isIPv4(String(parts[0]))
+    }
+
+    public static func isIPv6CIDR(_ value: String) -> Bool {
+        let parts = value.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)
+        guard parts.count == 2, let prefix = Int(parts[1]), (0...128).contains(prefix) else {
+            return false
+        }
+        return isIPv6(String(parts[0]))
     }
 
     public static func netmask(prefix: Int) -> String {
@@ -165,6 +187,13 @@ public enum HelperNetText: Sendable {
             throw HelperError.invalidRequest("interface must be utunN")
         }
         return name
+    }
+
+    static func requireIP(_ value: String?, field: String) throws -> String {
+        guard let value, isIPv4(value) || isIPv6(value) else {
+            throw HelperError.invalidRequest("\(field) must be an IP address")
+        }
+        return value
     }
 
     static func requireIPv4(_ value: String?, field: String) throws -> String {
@@ -181,9 +210,23 @@ public enum HelperNetText: Sendable {
         return prefix
     }
 
+    static func requirePrefix6(_ prefix: Int?) throws -> Int {
+        guard let prefix, (0...128).contains(prefix) else {
+            throw HelperError.invalidRequest("prefix must be 0...128")
+        }
+        return prefix
+    }
+
     static func requireCIDR(_ value: String?) throws -> String {
         guard let value, isIPv4CIDR(value) else {
             throw HelperError.invalidRequest("subnet must be IPv4 CIDR")
+        }
+        return value
+    }
+
+    static func requireAnyCIDR(_ value: String?) throws -> String {
+        guard let value, isIPv4CIDR(value) || isIPv6CIDR(value) else {
+            throw HelperError.invalidRequest("subnet must be IPv4 or IPv6 CIDR")
         }
         return value
     }

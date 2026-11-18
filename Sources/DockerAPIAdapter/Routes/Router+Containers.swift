@@ -29,6 +29,40 @@ extension Router {
 
     private static let reservedContainerNames: Set<String> = ["json", "create", "prune"]
 
+    struct CheckpointRoute: Equatable {
+        var id: String
+        var name: String?
+    }
+
+    /// `GET|POST /containers/{id}/checkpoints` and `DELETE /containers/{id}/checkpoints/{name}`.
+    static func matchCheckpoint(method: String, path: String) -> CheckpointRoute? {
+        guard path.hasPrefix("/containers/") else { return nil }
+        let rest = String(path.dropFirst("/containers/".count))
+        guard let marker = rest.range(of: "/checkpoints") else { return nil }
+        let rawID = String(rest[..<marker.lowerBound])
+        let id = rawID.removingPercentEncoding ?? rawID
+        guard !id.isEmpty, !id.contains("/") else { return nil }
+        let after = rest[marker.upperBound...]
+        if after.isEmpty {
+            guard method == "GET" || method == "POST" else { return nil }
+            return CheckpointRoute(id: id, name: nil)
+        }
+        guard method == "DELETE", after.hasPrefix("/") else { return nil }
+        let rawName = String(after.dropFirst())
+        let name = rawName.removingPercentEncoding ?? rawName
+        guard !name.isEmpty, !name.contains("/") else { return nil }
+        return CheckpointRoute(id: id, name: name)
+    }
+
+    func checkpointResponse(_ route: CheckpointRoute) async -> HTTPResponse {
+        do {
+            _ = try await engine.inspectContainer(route.id)
+        } catch {
+            return Self.engineError(error)
+        }
+        return Self.jsonError(status: 501, message: "checkpoint is not supported on this runtime")
+    }
+
     static func matchNamedContainer(method: String, path: String) -> NamedContainerRoute? {
         guard path.hasPrefix("/containers/") else { return nil }
         let rest = String(path.dropFirst("/containers/".count))
@@ -192,7 +226,7 @@ extension Router {
                 volumeRequests: Self.volumeRequests(from: body),
                 portBindings: try Self.portBindings(from: body),
                 exposedPorts: try Self.exposedPorts(from: body),
-                endpointRequests: try Self.endpointRequests(from: body, networkMode: networkMode),
+                endpointRequests: Self.endpointRequests(from: body, networkMode: networkMode),
                 extraHosts: body.HostConfig?.ExtraHosts ?? [],
                 dns: body.HostConfig?.Dns ?? [],
                 dnsSearch: body.HostConfig?.DnsSearch ?? [],
@@ -217,8 +251,11 @@ extension Router {
                     )
                 },
                 useInit: body.HostConfig?.Init ?? false,
+                sysctls: body.HostConfig?.Sysctls ?? [:],
                 capAdd: body.HostConfig?.CapAdd ?? [],
-                capDrop: body.HostConfig?.CapDrop ?? []
+                capDrop: body.HostConfig?.CapDrop ?? [],
+                securityOpt: body.HostConfig?.SecurityOpt ?? [],
+                ulimits: try (body.HostConfig?.Ulimits ?? []).map(Self.ulimit)
             )
             if let driver = body.HostConfig?.VolumeDriver, !driver.isEmpty, driver != "local" {
                 return Self.jsonError(status: 400, message: "volume driver \"\(driver)\" is not supported")
@@ -229,10 +266,11 @@ extension Router {
 
         do {
             let result = try await engine.createContainer(spec)
+            let warnings = Self.unsupportedCreateWarnings(request.body) + result.warnings
             return HTTPResponse(
                 status: 201,
                 headers: [("Content-Type", "application/json")],
-                body: .buffer(JSONBody.encode(DockerCreateContainerResponse(Id: result.id, Warnings: result.warnings)))
+                body: .buffer(JSONBody.encode(DockerCreateContainerResponse(Id: result.id, Warnings: warnings)))
             )
         } catch {
             return Self.engineError(error)
@@ -293,31 +331,24 @@ extension Router {
         }
 
         let timestamps = Self.queryFlag(request.query["timestamps"])
-        let follow = Self.queryFlag(request.query["follow"])
-        let details = Self.queryFlag(request.query["details"])
         let tail = request.query["tail"]
         let since = Self.parseTimestamp(request.query["since"])
         let until = Self.parseTimestamp(request.query["until"])
-
-        _ = details // `--details` adds log attributes; Macker records none.
+        // Decide before the disk scan: if the deadline passes during replay,
+        // still drain live records that arrived before it.
+        let follow = Self.queryFlag(request.query["follow"]) && (until.map { $0 > Date() } ?? true)
 
         do {
-            let (entries, tty, live) = try await engine.containerLogs(id, follow: follow)
-            var payload = Data()
-            for entry in Self.selectLogEntries(entries, tail: tail, since: since, until: until) {
-                payload += Self.framedIOChunk(
-                    EngineIOChunk(data: Data(entry.text.utf8), stdout: entry.stdout, time: entry.time),
-                    tty: tty,
-                    stdout: stdout,
-                    stderr: stderr,
-                    timestamps: timestamps
-                )
+            let count = tail.flatMap(Int.init).flatMap { $0 >= 0 ? $0 : nil } ?? Int.max
+            let (history, tty, live) = try await engine.tailContainerLogs(
+                id, count: count, follow: follow, stdout: stdout, stderr: stderr, since: since, until: until
+            )
+            let payload = history.reduce(into: Data()) { result, chunk in
+                result.append(Self.framedIOChunk(chunk, tty: tty, stdout: stdout, stderr: stderr, timestamps: timestamps))
             }
             let headers = [("Content-Type", Self.streamContentType(tty: tty, version: request.apiVersion))]
 
-            // `until` in the past ends a follow immediately, like Docker.
-            guard follow, let session = live, until.map({ $0 > Date() }) ?? true else {
-                await live?.close()
+            guard let session = live else {
                 var buffer = ByteBuffer()
                 buffer.writeBytes(payload)
                 return HTTPResponse(status: 200, headers: headers, body: .buffer(buffer))
@@ -325,9 +356,20 @@ extension Router {
 
             let (stream, continuation) = AsyncStream<ByteBuffer>.makeStream()
             Task {
+                // Close the subscription at the deadline even if the process is silent.
+                let deadline = until.map { end in
+                    Task {
+                        while end.timeIntervalSinceNow > 0 {
+                            try await Task.sleep(for: .seconds(min(86_400, end.timeIntervalSinceNow)))
+                        }
+                        await session.close()
+                    }
+                }
+                defer { deadline?.cancel() }
                 Self.yieldLog(payload, to: continuation)
                 for await chunk in session.chunks {
-                    if let until, let time = chunk.time, time > until { break }
+                    if let until, let time = chunk.timestamp, time > until { continue }
+                    if let since, let time = chunk.timestamp, time < since { continue }
                     Self.yieldLog(
                         Self.framedIOChunk(chunk, tty: tty, stdout: stdout, stderr: stderr, timestamps: timestamps),
                         to: continuation
@@ -434,7 +476,7 @@ extension Router {
     private func updateContainer(_ id: String, request: HTTPRequest) async -> HTTPResponse {
         let body: DockerUpdateContainerRequest
         if request.body.isEmpty {
-            body = DockerUpdateContainerRequest(Memory: nil, NanoCpus: nil)
+            body = DockerUpdateContainerRequest()
         } else {
             do {
                 body = try JSONDecoder().decode(DockerUpdateContainerRequest.self, from: request.body)
@@ -442,16 +484,44 @@ extension Router {
                 return Self.jsonError(status: 400, message: "invalid update config: \(error.localizedDescription)")
             }
         }
+        let restartPolicy: EngineRestartPolicy?
         do {
-            try await engine.updateContainer(id, memory: body.Memory, nanoCpus: body.NanoCpus)
-            return HTTPResponse(
-                status: 200,
-                headers: [("Content-Type", "application/json")],
-                body: .buffer(JSONBody.encode(DockerUpdateContainerResponse(Warnings: [])))
+            restartPolicy = try Self.updateRestartPolicy(body)
+        } catch {
+            return Self.engineError(error)
+        }
+        do {
+            let runtimeWarnings = try await engine.updateContainer(
+                id,
+                EngineContainerUpdate(
+                    memory: body.appliedMemory,
+                    nanoCpus: body.appliedNanoCpus,
+                    restartPolicy: restartPolicy
+                )
+            )
+            return Self.jsonOK(
+                DockerUpdateContainerResponse(Warnings: body.ignoredResourceWarnings() + runtimeWarnings)
             )
         } catch {
             return Self.engineError(error)
         }
+    }
+
+    /// Empty `RestartPolicy.Name` means "leave unchanged". `on-failure` takes `MaximumRetryCount`.
+    static func updateRestartPolicy(_ body: DockerUpdateContainerRequest) throws -> EngineRestartPolicy? {
+        guard let policy = body.RestartPolicy, let name = policy.Name?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !name.isEmpty
+        else {
+            return nil
+        }
+        if name == "on-failure" || name == "on-failure:" {
+            let count = policy.MaximumRetryCount ?? 0
+            guard count >= 0 else {
+                throw EngineError.invalidArgument("invalid restart policy: on-failure:\(count)")
+            }
+            return try EngineRestartPolicy.parse("on-failure:\(count)")
+        }
+        return try EngineRestartPolicy.parse(name)
     }
 
     private func renameContainer(_ id: String, request: HTTPRequest) async -> HTTPResponse {
@@ -653,22 +723,32 @@ extension Router {
 
     /// `EndpointsConfig` keys are network names; the official CLI keys the endpoint of the
     /// default network as `"default"`, which means whatever `NetworkMode` resolves to.
-    static func endpointRequests(from body: DockerCreateContainerRequest, networkMode: String) throws -> [EngineEndpointRequest] {
-        try (body.NetworkingConfig?.EndpointsConfig ?? [:]).sorted { $0.key < $1.key }.map { key, config in
-            if let ip6 = config.IPAMConfig?.IPv6Address, !ip6.isEmpty {
-                throw EngineError.notImplemented("IPv6 is not implemented")
-            }
+    static func endpointRequests(from body: DockerCreateContainerRequest, networkMode: String) -> [EngineEndpointRequest] {
+        (body.NetworkingConfig?.EndpointsConfig ?? [:]).sorted { $0.key < $1.key }.map { key, config in
             let name = key == "default" ? networkMode : key
             return EngineEndpointRequest(
                 network: name,
                 aliases: Self.endpointAliases(config),
                 ipv4: config.IPAMConfig?.IPv4Address,
+                ipv6: config.IPAMConfig?.IPv6Address,
                 macAddress: config.MacAddress,
                 driverOpts: config.DriverOpts ?? [:],
                 gwPriority: config.GwPriority ?? 0,
                 linkLocalIPs: config.IPAMConfig?.LinkLocalIPs ?? []
             )
         }
+    }
+
+    private static func ulimit(_ item: DockerCreateContainerRequest.HostConfig.Ulimit) throws -> EngineUlimit {
+        // Docker encodes RLIM_INFINITY as signed -1; the OCI runtime uses UInt64.max.
+        let soft = item.Soft ?? 0
+        let hard = item.Hard ?? soft
+        guard !item.Name.isEmpty, soft >= -1, hard >= -1,
+            UInt64(bitPattern: soft) <= UInt64(bitPattern: hard)
+        else {
+            throw EngineError.invalidArgument("invalid ulimit \(item.Name): \(soft):\(hard)")
+        }
+        return EngineUlimit(name: item.Name, soft: UInt64(bitPattern: soft), hard: UInt64(bitPattern: hard))
     }
 
     static func restartPolicy(_ policy: DockerCreateContainerRequest.HostConfig.RestartPolicy?) throws -> EngineRestartPolicy {
@@ -733,25 +813,6 @@ extension Router {
         )
     }
 
-    /// Docker `json-file` reading order: `tail` picks the last N lines, then `since`
-    /// (inclusive) and `until` filter by log time.
-    static func selectLogEntries(
-        _ entries: [EngineLogEntry],
-        tail: String?,
-        since: Date? = nil,
-        until: Date? = nil
-    ) -> [EngineLogEntry] {
-        var selected = entries
-        if let tail, tail != "all", let count = Int(tail), count >= 0 {
-            selected = Array(selected.suffix(count))
-        }
-        return selected.filter { entry in
-            if let since, entry.time < since { return false }
-            if let until, entry.time > until { return false }
-            return true
-        }
-    }
-
     /// Non-TTY stdio is multiplexed (8-byte stream headers); API 1.42+ says so in the
     /// Content-Type.
     static func streamContentType(tty: Bool, version: DockerAPIVersion) -> String {
@@ -780,8 +841,8 @@ extension Router {
             if !chunk.stdout && !stderr { return Data() }
         }
         var data = chunk.data
-        if timestamps {
-            data = Data("\(ISO8601.string(from: chunk.time ?? Date())) ".utf8) + data
+        if timestamps, chunk.startsLogLine, let time = chunk.timestamp {
+            data = Data("\(ISO8601.string(from: time)) ".utf8) + data
         }
         return dockerLogPayload(data: data, tty: tty, stdout: chunk.stdout)
     }

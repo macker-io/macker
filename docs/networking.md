@@ -12,7 +12,7 @@ Container networking (`bridge` / `host`) requires macOS 26+.
 | `host` | Apple **vmnet NAT** | image `EXPOSE` mapped 1:1 on the Mac (`-p` ignored) | vmnet NAT |
 | `none` | no NIC | unreachable | none |
 
-`macvlan` / `ipvlan` / `--net=container:` / IPv6 are unimplemented.
+`macvlan` / `ipvlan` / `--net=container:` are unimplemented. `bridge` supports dual-stack IPv6 when `--ipv6` is enabled on the network (NDP NS/NA + RS/RA, same-net L3, AAAA DNS, outbound TCP/UDP/ICMPv6, `utun` `-inet6` host routes, and bracketed `-p [::1]:hostPort:containerPort`). IPv6-only (`--ipv4=false`) and `host`-mode IPv6 are not supported.
 
 ```mermaid
 flowchart TB
@@ -84,7 +84,7 @@ flowchart LR
 ### Where each flow goes
 
 **Same network (container → container)**  
-`BridgeDataplane` checks whether both ends share a Docker network. If they do, it L3-forwards onto the peer's virtio socketpair. ARP, ping to the gateway, and embedded DNS stay in the dataplane (records published by `NetworkGateway`). Traffic does not go through SwiftTCP or utun. `--internal` allows only this path.
+`BridgeDataplane` checks whether both ends share a Docker network. If they do, it L3-forwards onto the peer's virtio socketpair (both IPv4 and IPv6). ARP, NDP (NS/NA and RS/RA), ping/ping6 to the gateway, and embedded DNS (A and AAAA) stay in the dataplane (records published by `NetworkGateway`). Traffic does not go through SwiftTCP or utun. `--internal` allows only this path.
 
 **Outbound (container → example.com)**  
 Destination is off-link and not a network gateway: TCP/UDP is handed to in-process **SwiftTCP** (guest session terminated, payload on a Mac socket). ICMP echo (`ping 8.8.8.8`) goes out a Mac ICMP datagram socket. Other ICMP types are dropped. Pinging the gateway stays in the dataplane.
@@ -217,7 +217,7 @@ curl http://127.0.0.1:18080
 # bridge: Mac → container IP (helper required)
 sudo macker helper install
 # restart the daemon, then start the container
-macker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' web
+macker inspect -f '{{.NetworkSettings.Networks.bridge.IPAddress}}' web
 curl http://172.17.0.2
 
 # host: EXPOSE 1:1, not -p

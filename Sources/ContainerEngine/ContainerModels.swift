@@ -93,9 +93,11 @@ public struct EngineContainerCreateSpec: Sendable {
     public var healthcheck: EngineHealthcheck?
     /// Run a minimal init as PID 1 that forwards signals and reaps zombies.
     public var useInit: Bool
-    /// Docker `--cap-add` / `--cap-drop` names (`NET_ADMIN`, `CAP_NET_ADMIN`, `ALL`).
+    public var sysctls: [String: String]
     public var capAdd: [String]
     public var capDrop: [String]
+    public var securityOpt: [String]
+    public var ulimits: [EngineUlimit]
     /// Daemon-owned helper container; not settable through the Docker API.
     var system = false
 
@@ -135,8 +137,11 @@ public struct EngineContainerCreateSpec: Sendable {
         volumesFrom: [String] = [],
         healthcheck: EngineHealthcheck? = nil,
         useInit: Bool = false,
+        sysctls: [String: String] = [:],
         capAdd: [String] = [],
-        capDrop: [String] = []
+        capDrop: [String] = [],
+        securityOpt: [String] = [],
+        ulimits: [EngineUlimit] = []
     ) {
         self.name = name
         self.image = image
@@ -173,22 +178,11 @@ public struct EngineContainerCreateSpec: Sendable {
         self.volumesFrom = volumesFrom
         self.healthcheck = healthcheck
         self.useInit = useInit
+        self.sysctls = sysctls
         self.capAdd = capAdd
         self.capDrop = capDrop
-    }
-}
-
-/// One line (or a partial line flushed at exit) of container output, like a Docker
-/// `json-file` log record.
-public struct EngineLogEntry: Sendable, Equatable {
-    public var time: Date
-    public var stdout: Bool
-    public var text: String
-
-    public init(time: Date, stdout: Bool, text: String) {
-        self.time = time
-        self.stdout = stdout
-        self.text = text
+        self.securityOpt = securityOpt
+        self.ulimits = ulimits
     }
 }
 
@@ -219,8 +213,6 @@ public struct EngineContainer: Sendable, Codable {
     public var startedAt: Date?
     public var finishedAt: Date?
     public var exitCode: Int
-    /// In-memory copy of `{id}.log`; not part of the JSON record.
-    public var logs: [EngineLogEntry] = []
     public var autoRemove: Bool
     public var memory: Int64
     public var nanoCpus: Int64
@@ -257,7 +249,6 @@ public struct EngineContainer: Sendable, Codable {
         startedAt: Date?,
         finishedAt: Date?,
         exitCode: Int,
-        logs: [EngineLogEntry] = [],
         autoRemove: Bool,
         memory: Int64,
         nanoCpus: Int64,
@@ -287,7 +278,6 @@ public struct EngineContainer: Sendable, Codable {
         self.startedAt = startedAt
         self.finishedAt = finishedAt
         self.exitCode = exitCode
-        self.logs = logs
         self.autoRemove = autoRemove
         self.memory = memory
         self.nanoCpus = nanoCpus

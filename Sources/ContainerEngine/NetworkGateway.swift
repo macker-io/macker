@@ -26,6 +26,8 @@ actor NetworkGateway {
         var networkName: String
         var ip: IPv4Address
         var gateway: IPv4Address
+        var ip6: IPv6Address?
+        var gateway6: IPv6Address?
         var aliases: [String]
         var internalNetwork: Bool
     }
@@ -34,6 +36,7 @@ actor NetworkGateway {
     private var dnsUpstreams: [String: [String]] = [:]
 
     private var ipam: [String: NetworkIPAM] = [:]
+    private var ipam6: [String: NetworkIPAMv6] = [:]
     private var nets: [String: EngineNetwork] = [:]
     private(set) var records: [Record] = []
     private(set) var links: [String: FileHandleLink] = [:]
@@ -56,10 +59,22 @@ actor NetworkGateway {
         if ipam[network.id] == nil, let table = try? NetworkIPAM(network: network) {
             ipam[network.id] = table
         }
+        if network.enableIPv6, !network.subnet6.isEmpty, !network.gateway6.isEmpty,
+            ipam6[network.id] == nil,
+            let table6 = try? NetworkIPAMv6(subnet: network.subnet6, gateway: network.gateway6)
+        {
+            ipam6[network.id] = table6
+        }
         if utunReady {
             addHostRoute(network.subnet)
             if let gateway = Self.parseGateway(network) {
                 addHostAddress(gateway.description)
+            }
+            if network.enableIPv6, !network.subnet6.isEmpty {
+                addHostRoute(network.subnet6)
+                if let gateway6 = Self.parseGateway6(network) {
+                    addHostAddress(gateway6.description, prefix: 64)
+                }
             }
         }
         publishDataplane()
@@ -67,6 +82,7 @@ actor NetworkGateway {
 
     func unregisterNetwork(_ id: String) {
         ipam[id] = nil
+        ipam6[id] = nil
         nets[id] = nil
         publishDataplane()
     }
@@ -92,6 +108,24 @@ actor NetworkGateway {
 
     func release(networkID: String, key: String) {
         ipam[networkID]?.release(id: key)
+        ipam6[networkID]?.release(id: key)
+    }
+
+    func allocate6(_ networkID: String, key: String) throws -> IPv6Address {
+        guard var table = ipam6[networkID] else {
+            throw EngineError.invalidArgument("no IPv6 IPAM for network")
+        }
+        let ip = try table.allocate(id: key)
+        ipam6[networkID] = table
+        return ip
+    }
+
+    func reserve6(_ networkID: String, key: String, ip: IPv6Address) throws {
+        guard var table = ipam6[networkID] else {
+            throw EngineError.invalidArgument("no IPv6 IPAM for network")
+        }
+        try table.reserve(id: key, ip: ip)
+        ipam6[networkID] = table
     }
 
     // MARK: - Endpoints
@@ -102,6 +136,7 @@ actor NetworkGateway {
         hostname: String,
         network: EngineNetwork,
         ip: IPv4Address,
+        ip6: IPv6Address? = nil,
         aliases: [String]
     ) {
         records.removeAll { $0.containerID == containerID && $0.networkID == network.id }
@@ -114,6 +149,8 @@ actor NetworkGateway {
                 networkName: network.name,
                 ip: ip,
                 gateway: Self.parseGateway(network) ?? Self.defaultGatewayIP,
+                ip6: ip6,
+                gateway6: Self.parseGateway6(network),
                 aliases: aliases,
                 internalNetwork: network.internalNetwork
             )
@@ -157,7 +194,13 @@ actor NetworkGateway {
     }
 
     /// Opens the guest's single virtio-net link. Extra bridge networks reuse it with another `/32`.
-    func openLink(containerID: String, primary: CIDRv4, gateway: IPv4Address) throws -> any Interface {
+    func openLink(
+        containerID: String,
+        primary: CIDRv4,
+        gateway: IPv4Address,
+        ipv6: CIDRv6? = nil,
+        ipv6Gateway: IPv6Address? = nil
+    ) throws -> any Interface {
         if let existing = links[containerID] {
             return existing.interface
         }
@@ -165,6 +208,8 @@ actor NetworkGateway {
             containerID: containerID,
             ipv4: primary,
             gateway: gateway,
+            ipv6: ipv6,
+            ipv6Gateway: ipv6Gateway,
             mac: try MACAddress(Self.macBytes(for: primary.address))
         )
         links[containerID] = link
@@ -235,7 +280,10 @@ actor NetworkGateway {
         let onGuest: @Sendable (IPv4Address, Data) -> Void = { guestIP, packet in
             dataplane.deliver(packet, toIP: guestIP)
         }
-        forwarder = GatewaySwiftTCP(onGuest: onGuest)
+        let onGuest6: @Sendable (IPv6Address, Data) -> Void = { guestIP, packet in
+            dataplane.deliver6(packet, toIP: guestIP)
+        }
+        forwarder = GatewaySwiftTCP(onGuest: onGuest, onGuest6: onGuest6)
         publishDataplane()
     }
 
@@ -265,7 +313,7 @@ actor NetworkGateway {
 
     private func applyHostNet(bridges: [EngineNetwork]) throws {
         let gateways = bridges.compactMap { Self.parseGateway($0)?.description }
-        let routes = bridges.map(\.subnet)
+        let routes = bridges.map(\.subnet) + bridges.compactMap { $0.enableIPv6 && !$0.subnet6.isEmpty ? $0.subnet6 : nil }
         guard let address = gateways.first else {
             throw EngineError.runtimeUnavailable("no bridge gateway for utun")
         }
@@ -290,6 +338,9 @@ actor NetworkGateway {
         for extra in gateways.dropFirst() {
             addHostAddress(extra)
         }
+        for bridge in bridges where bridge.enableIPv6 && !bridge.gateway6.isEmpty {
+            addHostAddress(bridge.gateway6, prefix: 64)
+        }
     }
 
     private func addHostRoute(_ subnet: String) {
@@ -304,14 +355,14 @@ actor NetworkGateway {
         }
     }
 
-    private func addHostAddress(_ address: String) {
+    private func addHostAddress(_ address: String, prefix: Int = 32) {
         guard hostGateways.insert(address).inserted else { return }
         do {
             try HelperClient.addAddress(
                 interface: utun.name,
                 address: address,
                 peer: address,
-                prefix: 32
+                prefix: prefix
             )
         } catch {
             if geteuid() == 0 {
@@ -319,7 +370,7 @@ actor NetworkGateway {
                     interface: utun.name,
                     address: address,
                     peer: address,
-                    prefix: 32
+                    prefix: prefix
                 )
             } else {
                 hostGateways.remove(address)
@@ -354,23 +405,35 @@ actor NetworkGateway {
 
     private func publishDataplane() {
         let gateways = gatewayIPs()
+        let gateways6 = gatewayIPv6s()
         dataplane.update(
             records: records,
             dnsUpstreams: dnsUpstreams,
             links: links,
             forwarder: forwarder,
-            gateways: gateways
+            gateways: gateways,
+            gateways6: gateways6
         )
         (forwarder as? GatewaySwiftTCP)?.setGateways(gateways)
+        (forwarder as? GatewaySwiftTCP)?.setGateways6(gateways6)
     }
 
     private func gatewayIPs() -> Set<UInt32> {
         Set(nets.values.compactMap { Self.parseGateway($0)?.value })
     }
 
+    private func gatewayIPv6s() -> Set<IPv6Key> {
+        Set(nets.values.compactMap { Self.parseGateway6($0).map(IPv6Key.init) })
+    }
+
     static func parseGateway(_ network: EngineNetwork) -> IPv4Address? {
         guard !network.gateway.isEmpty else { return nil }
         return try? IPv4Address(network.gateway)
+    }
+
+    static func parseGateway6(_ network: EngineNetwork) -> IPv6Address? {
+        guard !network.gateway6.isEmpty else { return nil }
+        return try? IPv6Address(network.gateway6)
     }
 
     // MARK: - Helpers

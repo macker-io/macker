@@ -1,7 +1,6 @@
 import Containerization
 import Foundation
 
-import struct ContainerizationOS.CapabilityName
 import struct ContainerizationOS.Terminal
 
 extension EngineManager {
@@ -72,7 +71,7 @@ extension EngineManager {
         var started: LinuxProcess?
         do {
             let process = try await linux.exec(execConfig.id) { config in
-                Self.configure(&config, exec: execConfig, container: container, stdin: stdinPipe, stdout: stdoutSink, stderr: stderrSink)
+                try Self.configure(&config, exec: execConfig, container: container, stdin: stdinPipe, stdout: stdoutSink, stderr: stderrSink)
             }
             started = process
             try await process.start()
@@ -260,15 +259,6 @@ extension EngineManager {
         return "unable to start exec process: \(raw)"
     }
 
-    static func containerCapabilities(_ container: EngineContainer, privilegedExec: Bool = false) -> [CapabilityName] {
-        // Validated at create; a record that no longer resolves falls back to the defaults.
-        (try? GuestCapabilities.resolve(
-            privileged: container.run.privileged || privilegedExec,
-            add: container.run.capAdd ?? [],
-            drop: container.run.capDrop ?? []
-        )) ?? GuestCapabilities.defaults
-    }
-
     private static func configure(
         _ config: inout LinuxProcessConfiguration,
         exec: EngineExec,
@@ -276,7 +266,7 @@ extension EngineManager {
         stdin: ProcessStdin?,
         stdout: ProcessLogSink,
         stderr: ProcessLogSink
-    ) {
+    ) throws {
         config.arguments = exec.cmd
         config.environmentVariables = mergedEnvironment(container.env, extra: exec.env, tty: exec.tty)
         if !exec.workingDir.isEmpty {
@@ -287,7 +277,7 @@ extension EngineManager {
         }
         config.terminal = exec.tty
         // Docker: an exec gets the container's capability set; `exec --privileged` gets all.
-        config.capabilities = .init(capabilities: Self.containerCapabilities(container, privilegedExec: exec.privileged))
+        try Self.applyProcessSecurity(&config, run: container.run, privilegedExec: exec.privileged)
         if let stdin {
             config.stdin = stdin
         }

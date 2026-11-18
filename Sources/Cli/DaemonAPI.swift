@@ -14,10 +14,12 @@ enum Invocation {
 enum DaemonAPI {
     static let apiVersion = "1.41"
     static let clientVersion = ProductVersion.current
-    static var socket: String { DaemonPaths.socketPath() }
+    static func socket() throws -> String {
+        try DockerGlobalFlags.socketPath()
+    }
 
     static func get(_ path: String, timeoutSeconds: Int? = 5) throws -> UnixHTTPClient.Response {
-        try UnixHTTPClient.request(method: "GET", path: prefixed(path), socketPath: socket, timeoutSeconds: timeoutSeconds)
+        try UnixHTTPClient.request(method: "GET", path: prefixed(path), socketPath: try socket(), timeoutSeconds: timeoutSeconds)
     }
 
     static func post(
@@ -29,7 +31,7 @@ enum DaemonAPI {
         try UnixHTTPClient.request(
             method: "POST",
             path: prefixed(path),
-            socketPath: socket,
+            socketPath: try socket(),
             body: body,
             contentType: contentType,
             timeoutSeconds: timeoutSeconds
@@ -37,11 +39,11 @@ enum DaemonAPI {
     }
 
     static func delete(_ path: String) throws -> UnixHTTPClient.Response {
-        try UnixHTTPClient.request(method: "DELETE", path: prefixed(path), socketPath: socket)
+        try UnixHTTPClient.request(method: "DELETE", path: prefixed(path), socketPath: try socket())
     }
 
     static func head(_ path: String, timeoutSeconds: Int? = 5) throws -> UnixHTTPClient.Response {
-        try UnixHTTPClient.request(method: "HEAD", path: prefixed(path), socketPath: socket, timeoutSeconds: timeoutSeconds)
+        try UnixHTTPClient.request(method: "HEAD", path: prefixed(path), socketPath: try socket(), timeoutSeconds: timeoutSeconds)
     }
 
     static func put(
@@ -53,7 +55,7 @@ enum DaemonAPI {
         try UnixHTTPClient.request(
             method: "PUT",
             path: prefixed(path),
-            socketPath: socket,
+            socketPath: try socket(),
             body: body,
             contentType: contentType,
             timeoutSeconds: timeoutSeconds
@@ -87,7 +89,7 @@ enum DaemonAPI {
         try UnixHTTPClient.streamLines(
             method: method,
             path: prefixed(path),
-            socketPath: socket,
+            socketPath: try socket(),
             bodyFile: bodyFile,
             contentType: contentType,
             timeoutSeconds: timeoutSeconds,
@@ -104,7 +106,7 @@ enum DaemonAPI {
         try UnixHTTPClient.streamBytes(
             method: method,
             path: prefixed(path),
-            socketPath: socket,
+            socketPath: try socket(),
             timeoutSeconds: timeoutSeconds,
             onBytes: onBytes
         )
@@ -131,7 +133,7 @@ enum DaemonAPI {
         try UnixHTTPClient.hijack(
             method: method,
             path: prefixed(path),
-            socketPath: socket,
+            socketPath: try socket(),
             body: body,
             stdin: stdin,
             tty: tty,
@@ -449,34 +451,6 @@ enum Prompt {
             }
         }
         return readLine() ?? ""
-    }
-}
-
-enum DockerLog {
-    /// Prints Docker multiplexed log frames, or raw text if the payload is not framed.
-    static func write(_ data: Data, to file: FileHandle = .standardOutput) {
-        var offset = 0
-        let bytes = [UInt8](data)
-        var framed = false
-        while offset + 8 <= bytes.count {
-            let stream = bytes[offset]
-            let size =
-                (Int(bytes[offset + 4]) << 24)
-                | (Int(bytes[offset + 5]) << 16)
-                | (Int(bytes[offset + 6]) << 8)
-                | Int(bytes[offset + 7])
-            guard stream <= 2, bytes[offset + 1] == 0, bytes[offset + 2] == 0, bytes[offset + 3] == 0,
-                size >= 0, offset + 8 + size <= bytes.count
-            else {
-                break
-            }
-            framed = true
-            try? file.write(contentsOf: Data(bytes[(offset + 8)..<(offset + 8 + size)]))
-            offset += 8 + size
-        }
-        if !framed, !data.isEmpty {
-            try? file.write(contentsOf: data)
-        }
     }
 }
 

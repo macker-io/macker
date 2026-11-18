@@ -100,6 +100,18 @@ public struct Router: Sendable {
             if let route = Self.matchNamedImage(method: method, path: path) {
                 return await handleNamedImage(route, request: request)
             }
+            if let checkpoint = Self.matchCheckpoint(method: method, path: path) {
+                return await checkpointResponse(checkpoint)
+            }
+            if let plugin = Self.pluginResponse(method: method, path: path, query: request.query) {
+                return plugin
+            }
+            if let swarm = Self.swarmResponse(method: method, path: path) {
+                return swarm
+            }
+            if method == "GET", let name = Self.distributionName(path) {
+                return await distributionInspect(name, request: request)
+            }
             return Self.jsonError(status: 404, message: "page not found")
         }
     }

@@ -96,13 +96,27 @@ extension EngineManager {
     }
 
     public func createContainer(_ spec: EngineContainerCreateSpec) async throws -> EngineContainerCreateResult {
-        let image = try await inspectImage(name: spec.image)
+        // Reject invalid host settings before creating mounts, volumes, or network leases.
+        try Self.validateResources(memory: spec.memory, nanoCpus: spec.nanoCpus)
+        _ = try GuestCapabilities.resolve(privileged: spec.privileged, add: spec.capAdd, drop: spec.capDrop)
+        _ = try Self.rlimits(spec.ulimits)
+        if let invalid = spec.securityOpt.first(where: { !EngineContainerRunConfig.supportedSecurityOptions.contains($0) }) {
+            throw EngineError.invalidArgument("unsupported security option: \(invalid)")
+        }
+        let source = try await resolveImage(spec.image)
+        try await retainImage(source)
+        let image = try await inspectImage(name: source.digest)
         let name = try uniqueName(spec.name)
         let id = Self.makeContainerID()
-        let entrypoint = spec.entrypoint ?? image.entrypoint
+        // Docker CLI sends [""] for an explicit --entrypoint="" reset.
+        let entrypoint = spec.entrypoint == [""] ? [] : (spec.entrypoint ?? image.entrypoint)
         // Docker drops the image CMD when the entrypoint is overridden.
         let cmd = spec.cmd ?? (spec.entrypoint == nil ? image.cmd : [])
         let command = entrypoint + cmd
+        if command.isEmpty, spec.entrypoint != nil {
+            // Do not let the VM layer re-inherit an image command explicitly cleared by the caller.
+            throw EngineError.invalidArgument("No command specified")
+        }
         let env = image.env + spec.env
         let now = Date()
         let tmpfsRoot = Self.runtimeURL(id: id, root: containerRoot).appendingPathComponent("tmpfs", isDirectory: true)
@@ -121,8 +135,6 @@ extension EngineManager {
         if spec.autoRemove, spec.restartPolicy.name != "no" {
             throw EngineError.invalidArgument("Conflicting options: --restart and --rm")
         }
-        try Self.validateResources(memory: spec.memory, nanoCpus: spec.nanoCpus)
-        _ = try GuestCapabilities.resolve(privileged: spec.privileged, add: spec.capAdd, drop: spec.capDrop)
         for extra in spec.extraHosts {
             _ = try EngineExtraHost.parse(extra)
         }
@@ -142,7 +154,6 @@ extension EngineManager {
             startedAt: nil,
             finishedAt: nil,
             exitCode: 0,
-            logs: [],
             autoRemove: spec.autoRemove,
             memory: spec.memory,
             nanoCpus: spec.nanoCpus,
@@ -168,11 +179,14 @@ extension EngineManager {
                 groupAdd: spec.groupAdd,
                 publishAllPorts: spec.publishAllPorts,
                 healthcheck: EngineHealthcheck.inherit(spec.healthcheck, image: image.healthcheck),
-                useInit: spec.useInit ? true : nil,
+                useInit: spec.useInit,
+                sysctls: spec.sysctls,
+                capAdd: spec.capAdd,
+                capDrop: spec.capDrop,
+                securityOpt: spec.securityOpt,
+                ulimits: spec.ulimits,
                 entrypoint: entrypoint,
                 cmd: cmd,
-                capAdd: spec.capAdd.isEmpty ? nil : spec.capAdd,
-                capDrop: spec.capDrop.isEmpty ? nil : spec.capDrop,
                 system: spec.system ? true : nil
             )
         )
@@ -244,7 +258,7 @@ extension EngineManager {
             // an AutoRemove container (`docker run --rm` waits for `removed`).
             finishAttachSubscribers(container.id)
             if container.autoRemove {
-                try? await deleteContainer(container.id, force: true, removeAnonymousVolumes: true)
+                try? await removeContainer(container, force: true, removeAnonymousVolumes: true)
             }
             throw error
         }
@@ -304,19 +318,18 @@ extension EngineManager {
             container.state = "running"
             saveContainer(container)
         }
-        // Docker: SIGKILL, or the container's own stop signal, is a manual stop.
-        let stopSignal = container.run.stopSignal.isEmpty ? nil : Self.parsedKillSignal(container.run.stopSignal)
-        if parsed == .kill || stopSignal == nil || stopSignal == parsed {
-            manualStops.insert(container.id)
+        let suppressRestart = Self.killSuppressesRestart(parsed, stopSignal: container.run.stopSignal)
+        let marked = suppressRestart && manuallySignaledForExit.insert(container.id).inserted
+        // Register before delivery: the guest may exit before kill() returns.
+        let exited = parsed == .kill ? waitStream(container.id, condition: .notRunning) : nil
+        do {
+            try await linux.kill(parsed)
+        } catch {
+            if marked { manuallySignaledForExit.remove(container.id) }
+            throw error
         }
         await publish(containerEvent("kill", container, extra: ["signal": "\(parsed.rawValue)"]))
-        guard parsed == .kill else {
-            try await linux.kill(parsed)
-            return
-        }
-        let exited = waitStream(container.id, condition: .notRunning)
-        try? await linux.kill(.kill)
-        if await Self.first(of: exited, timeoutSeconds: 10) == nil {
+        if let exited, await Self.first(of: exited, timeoutSeconds: 10) == nil {
             // The guest did not report the exit; tear the VM down ourselves.
             let code = await stopVM(container.id, timeoutSeconds: 1, signal: .kill)
             await handleVMExit(id: container.id, code: code, action: "kill")
@@ -376,7 +389,7 @@ extension EngineManager {
 
     func waitStream(_ id: String, condition: EngineWaitCondition) -> AsyncStream<Int> {
         let (stream, continuation) = AsyncStream<Int>.makeStream()
-        if condition == .notRunning, let container = containers[id], !container.isActive {
+        if condition == .notRunning, let container = containers[id], !container.isActive, container.state != "restarting" {
             continuation.yield(container.exitCode)
             continuation.finish()
             return stream
@@ -415,6 +428,13 @@ extension EngineManager {
 
     public func deleteContainer(_ idOrName: String, force: Bool, removeAnonymousVolumes: Bool) async throws {
         let container = try resolveContainer(idOrName)
+        guard startTasks[container.id] == nil else {
+            throw EngineError.conflict("container \(container.id) is starting")
+        }
+        try await removeContainer(container, force: force, removeAnonymousVolumes: removeAnonymousVolumes)
+    }
+
+    private func removeContainer(_ container: EngineContainer, force: Bool, removeAnonymousVolumes: Bool) async throws {
         if container.isActive {
             guard force else {
                 throw EngineError.conflict("cannot remove running container \(container.id): stop or use force")
@@ -446,6 +466,7 @@ extension EngineManager {
         var space: Int64 = 0
         for item in unused {
             let id = item.id
+            guard startTasks[id] == nil else { continue }
             space += containerDiskSize(id)
             let record = containers[id]
             finishAttachSubscribers(id)
@@ -463,37 +484,37 @@ extension EngineManager {
         return (deleted, space)
     }
 
-    /// Logged lines so far and, when following a running container, a live session that
-    /// yields later lines (each chunk one ``EngineLogEntry``, with `time`).
-    public func containerLogs(_ idOrName: String, follow: Bool = false) async throws -> (entries: [EngineLogEntry], tty: Bool, live: EngineIOSession?) {
-        let container = try resolveContainer(idOrName)
-        let entries = container.logs
-        let tty = container.tty
-        let live: EngineIOSession?
-        if follow, container.isActive {
-            live = subscribeAttach(
-                containerID: container.id,
-                tty: tty,
-                stdin: false,
-                kind: .logs
-            )
-        } else {
-            live = nil
-        }
-        return (entries, tty, live)
-    }
-
-    public func updateContainer(_ idOrName: String, memory: Int64?, nanoCpus: Int64?) async throws {
+    public func updateContainer(_ idOrName: String, _ update: EngineContainerUpdate) async throws -> [String] {
         var container = try resolveContainer(idOrName)
-        try Self.validateResources(memory: memory ?? 0, nanoCpus: nanoCpus ?? 0)
-        if let memory {
-            container.memory = memory
+        if container.state == "dead" || container.state == "removing" {
+            throw EngineError.conflict(
+                "Cannot update container \(container.id): container is marked for removal and cannot be \"update\""
+            )
         }
-        if let nanoCpus {
+        if let policy = update.restartPolicy {
+            if container.autoRemove, policy.name != "no" {
+                throw EngineError.conflict(
+                    "Cannot update container \(container.id): Restart policy cannot be updated because AutoRemove is enabled for the container"
+                )
+            }
+            container.run.restartPolicy = policy
+        }
+        try Self.validateResources(memory: update.memory ?? 0, nanoCpus: update.nanoCpus ?? 0)
+        var resized = false
+        if let memory = update.memory, memory != container.memory {
+            container.memory = memory
+            resized = true
+        }
+        if let nanoCpus = update.nanoCpus, nanoCpus != container.nanoCpus {
             container.nanoCpus = nanoCpus
+            resized = true
         }
         saveContainer(container)
         await publish(containerEvent("update", container))
+        if resized, container.isActive {
+            return ["memory and CPU limits apply on the next start; a running MicroVM is not resized"]
+        }
+        return []
     }
 
     public func containerTop(_ idOrName: String, psArgs: String? = nil) async throws -> EngineContainerTop {
@@ -587,9 +608,7 @@ extension EngineManager {
         cancelHealthMonitor(container.id)
         let id = container.id
         flushLogLines(id)
-        container.logs = containers[id]?.logs ?? container.logs
-        let userStop = manualStops.remove(id) != nil
-        let action = userStop && action == "die" ? "kill" : action
+        let manuallyStopped = manuallySignaledForExit.remove(id) != nil
         await publish(containerEvent("die", container, extra: ["exitCode": "\(exitCode)"]))
         if action == "stop" {
             await publish(containerEvent("stop", container))
@@ -608,7 +627,7 @@ extension EngineManager {
         container.state = "exited"
         container.exitCode = exitCode
         container.finishedAt = Date()
-        let restart = container.run.restartPolicy.shouldRestart(
+        let restart = !manuallyStopped && container.run.restartPolicy.shouldRestart(
             exitCode: exitCode,
             action: action,
             restartCount: container.run.restartCount
@@ -700,7 +719,7 @@ extension EngineManager {
         cancelHealthMonitor(id)
         pendingLogLines[id] = nil
         outputSinks[id] = nil
-        manualStops.remove(id)
+        manuallySignaledForExit.remove(id)
         await stopPortPublishers(id)
         await releaseInterfaces(id, keepAddresses: false)
         containers[id] = nil
@@ -724,22 +743,9 @@ extension EngineManager {
         var loaded: [String: EngineContainer] = [:]
         for file in items where file.pathExtension == "json" {
             guard let data = try? Data(contentsOf: file),
-                var container = try? decoder.decode(EngineContainer.self, from: data)
+                let container = try? decoder.decode(EngineContainer.self, from: data)
             else {
                 continue
-            }
-            let logFile = Self.logURL(id: container.id, root: root)
-            let raw = (try? Data(contentsOf: logFile)) ?? Data()
-            let decoded = ContainerLogFile.decode(raw, fallbackTime: container.finishedAt ?? container.created)
-            container.logs = decoded.entries
-            if decoded.legacy {
-                // Pre-JSON raw text log: cook TTY output once and rewrite in the new format.
-                let text = String(decoding: raw, as: UTF8.self)
-                container.logs = ContainerLogFile.legacyEntries(
-                    container.tty ? TTYSession.cook(text) : text,
-                    time: container.finishedAt ?? container.created
-                )
-                try? ContainerLogFile.encode(container.logs).write(to: logFile, options: .atomic)
             }
             loaded[container.id] = container
         }
@@ -804,7 +810,7 @@ extension EngineManager {
 
     private static func removeContainerFiles(_ id: String, root: URL) {
         let fm = FileManager.default
-        for url in [stateURL(id: id, root: root), logURL(id: id, root: root)] {
+        for url in [stateURL(id: id, root: root), logURL(id: id, root: root), logRecordsURL(id: id, root: root)] {
             if fm.fileExists(atPath: url.path) {
                 try? fm.removeItem(at: url)
             }
@@ -812,33 +818,21 @@ extension EngineManager {
         removeRuntimeDirectory(id, root: root)
     }
 
-    static func removeRuntimeDirectory(_ id: String, root: URL) {
+    /// Clear only per-boot mounts; keep the writable layer, baseline and pending archives.
+    static func resetTransientFiles(_ id: String, root: URL) {
+        let runtime = runtimeURL(id: id, root: root)
+        try? FileManager.default.removeItem(at: runtime.appendingPathComponent("tmpfs", isDirectory: true))
+    }
+
+    private static func removeRuntimeDirectory(_ id: String, root: URL) {
         let path = runtimeURL(id: id, root: root)
         if FileManager.default.fileExists(atPath: path.path) {
             try? FileManager.default.removeItem(at: path)
         }
     }
 
-    func appendLogFile(id: String, entries: [EngineLogEntry]) {
-        guard !entries.isEmpty else { return }
-        let url = Self.logURL(id: id, root: containerRoot)
-        let data = ContainerLogFile.encode(entries)
-        if !FileManager.default.fileExists(atPath: url.path) {
-            FileManager.default.createFile(atPath: url.path, contents: data)
-            return
-        }
-        guard let handle = try? FileHandle(forWritingTo: url) else { return }
-        defer { try? handle.close() }
-        _ = try? handle.seekToEnd()
-        try? handle.write(contentsOf: data)
-    }
-
     private static func stateURL(id: String, root: URL) -> URL {
         root.appendingPathComponent("\(id).json")
-    }
-
-    private static func logURL(id: String, root: URL) -> URL {
-        root.appendingPathComponent("\(id).log")
     }
 
     static func runtimeURL(id: String, root: URL) -> URL {

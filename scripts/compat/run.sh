@@ -220,6 +220,12 @@ case_networks() {
   x d rm -f srv late; x d network rm appnet; rc 0
   x d network ls --format '{{.Name}}'; nout appnet; out bridge
 }
+case_run_static_ipv6() {
+  x d network create --ipv6 --subnet fd42:ab::/64 v6net; rc 0
+  x d run --name v6guest --rm --network v6net --ip6 fd42:ab::42 "$ALPINE" ip -6 addr; rc 0; out 'fd42:ab::42/'
+  x d ps -aq --filter name=v6guest; rc 0; eq ""
+  x d network rm v6net; rc 0
+}
 case_env_stop_health_roundtrip() {
   x d run -d --name h --stop-signal SIGQUIT --stop-timeout 7 --label a=b --restart unless-stopped \
     --health-cmd 'true' --health-interval 1s --health-retries 2 $ALPINE sleep 300; rc 0
@@ -272,7 +278,7 @@ case_commit_export() {
 suite_cli() {
   for c in version_info api_version_policy pull_images run_stdout run_exit_code run_stdin run_config run_tty \
            detached_lifecycle exec logs attach_foreground_signal cp volumes_and_binds networks \
-           env_stop_health_roundtrip unsupported_options_fail_loudly wait_and_events images commit_export; do
+           run_static_ipv6 env_stop_health_roundtrip unsupported_options_fail_loudly wait_and_events images commit_export; do
     run_case "$c"
   done
 }

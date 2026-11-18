@@ -66,9 +66,6 @@ extension EngineManager {
         guard spec.enableIPv4 else {
             throw EngineError.invalidArgument("IPv4 cannot be disabled")
         }
-        if spec.enableIPv6 {
-            throw EngineError.notImplemented("IPv6 is not implemented")
-        }
         let ipamDriver = spec.ipamDriver.isEmpty ? "default" : spec.ipamDriver
         guard ipamDriver == "default" else {
             throw EngineError.invalidArgument("ipam driver \"\(ipamDriver)\" is not supported")
@@ -91,6 +88,18 @@ extension EngineManager {
         let subnet = try spec.subnet.map { try Self.normalizedSubnet($0) } ?? nextSubnet()
         let cidr = try CIDRv4(subnet)
         let gateway = try Self.resolvedGateway(spec.gateway, subnet: cidr)
+        let enableIPv6 = spec.enableIPv6 || spec.subnet6 != nil || spec.gateway6 != nil
+        let subnet6: String
+        let gateway6: String
+        if enableIPv6 {
+            let resolved6 = try spec.subnet6.map { try Self.normalizedSubnet6($0) } ?? nextSubnet6()
+            let cidr6 = try CIDRv6(resolved6)
+            subnet6 = resolved6
+            gateway6 = try Self.resolvedGateway6(spec.gateway6, subnet: cidr6)
+        } else {
+            subnet6 = ""
+            gateway6 = ""
+        }
         let ipRange = try spec.ipRange.map { try Self.normalizedIPRange($0, subnet: cidr) } ?? ""
         let auxiliary = try Self.normalizedAuxiliaryAddresses(spec.auxiliaryAddresses, subnet: cidr)
         let network = EngineNetwork(
@@ -102,6 +111,8 @@ extension EngineManager {
             labels: spec.labels,
             subnet: subnet,
             gateway: gateway,
+            subnet6: subnet6,
+            gateway6: gateway6,
             internalNetwork: spec.internalNetwork,
             builtin: false,
             options: spec.options,
@@ -110,7 +121,7 @@ extension EngineManager {
             ipamDriver: ipamDriver,
             ipamOptions: spec.ipamOptions,
             enableIPv4: true,
-            enableIPv6: false
+            enableIPv6: enableIPv6
         )
         try persistNetwork(network)
         networks[network.id] = network
@@ -157,11 +168,14 @@ extension EngineManager {
             throw EngineError.conflict("container \(container.name) is already connected to \(network.name)")
         }
         try validateAttachment(mode: container.networkMode, extra: network)
-        if let ipv6 = spec.ipv6, !ipv6.isEmpty {
-            throw EngineError.notImplemented("IPv6 is not implemented")
-        }
         if let ipv4 = spec.ipv4, !ipv4.isEmpty, network.driver != "bridge" {
             throw EngineError.invalidArgument("cannot assign a static IP on \(network.driver) networks")
+        }
+        if let ipv6 = spec.ipv6, !ipv6.isEmpty {
+            guard network.driver == "bridge", network.enableIPv6 else {
+                throw EngineError.invalidArgument("IPv6 is not enabled on network \(network.name)")
+            }
+            _ = try parseIPv6(ipv6)
         }
 
         let request = spec.asRequest(network: network.name)
@@ -464,21 +478,45 @@ extension EngineManager {
         record.endpoints[index].ipv4Prefix = 32
         record.endpoints[index].gateway = network.gateway
         record.endpoints[index].networkName = network.name
+
+        var ip6: IPv6Address?
+        var prefix6 = 0
+        var gateway6: IPv6Address?
+        if network.enableIPv6, !network.subnet6.isEmpty, !network.gateway6.isEmpty {
+            if !record.endpoints[index].ipv6Address.isEmpty,
+                let existing6 = try? IPv6Address(record.endpoints[index].ipv6Address)
+            {
+                try await networkGateway.reserve6(network.id, key: key, ip: existing6)
+                ip6 = existing6
+            } else {
+                ip6 = try await allocateBridgeIPv6(networkID: network.id, key: key, requested: nil)
+            }
+            prefix6 = prefixLength6(network.subnet6)
+            gateway6 = try? IPv6Address(network.gateway6)
+            record.endpoints[index].ipv6Address = ip6?.description ?? ""
+            record.endpoints[index].ipv6Prefix = prefix6
+            record.endpoints[index].ipv6Gateway = network.gateway6
+        }
+
         await networkGateway.bind(
             containerID: record.id,
             containerName: record.name,
             hostname: record.hostname,
             network: network,
             ip: ip,
+            ip6: ip6,
             aliases: record.endpoints[index].aliases
         )
         if !openedBridge {
             let cidr = try CIDRv4("\(ip.description)/32")
             let gatewayIP = try parseIPv4(network.gateway)
+            let cidr6 = ip6.flatMap { try? CIDRv6("\($0.description)/\(prefix6)") }
             let iface = try await networkGateway.openLink(
                 containerID: record.id,
                 primary: cidr,
-                gateway: gatewayIP
+                gateway: gatewayIP,
+                ipv6: cidr6,
+                ipv6Gateway: gateway6
             )
             record.endpoints[index].macAddress = iface.macAddress?.description ?? ""
             interfaces.append(iface)
@@ -528,12 +566,22 @@ extension EngineManager {
         let key = NetworkGateway.endpointKey(containerID: container.id, networkID: network.id)
         let ip = try await allocateBridgeIP(networkID: network.id, key: key, requested: request.ipv4)
         try await addGuestBridgeAddress(container.id, ip: ip.description, gateway: network.gateway)
+        var ip6: IPv6Address?
+        var prefix6 = 0
+        if network.enableIPv6, !network.subnet6.isEmpty {
+            ip6 = try await allocateBridgeIPv6(networkID: network.id, key: key, requested: request.ipv6)
+            prefix6 = prefixLength6(network.subnet6)
+            if let ip6 {
+                try await addGuestBridgeIPv6Address(container.id, ip6: ip6.description, prefix: prefix6)
+            }
+        }
         await networkGateway.bind(
             containerID: container.id,
             containerName: container.name,
             hostname: container.hostname,
             network: network,
             ip: ip,
+            ip6: ip6,
             aliases: request.aliases
         )
         let mac = container.endpoints.first(where: { !$0.macAddress.isEmpty })?.macAddress ?? ""
@@ -543,6 +591,9 @@ extension EngineManager {
             ipv4Address: ip.description,
             ipv4Prefix: 32,
             gateway: network.gateway,
+            ipv6Address: ip6?.description ?? "",
+            ipv6Prefix: prefix6,
+            ipv6Gateway: network.gateway6,
             macAddress: mac,
             aliases: request.aliases,
             driverOpts: request.driverOpts,
@@ -634,7 +685,14 @@ extension EngineManager {
             let key = "\(record.id):\(index)"
             let destIP: String
             let destPort: Int
-            if let bridgeTarget, let guestIP = try? IPv4Address(bridgeTarget.ipv4Address) {
+            if let bridgeTarget,
+                binding.hostIP.contains(":"),
+                !bridgeTarget.ipv6Address.isEmpty,
+                await networkGateway.utunReady
+            {
+                destIP = bridgeTarget.ipv6Address
+                destPort = binding.containerPort
+            } else if let bridgeTarget, let guestIP = try? IPv4Address(bridgeTarget.ipv4Address) {
                 let target = try await networkGateway.portPublishTarget(
                     guestIP: guestIP,
                     guestPort: UInt16(binding.containerPort),
@@ -772,12 +830,15 @@ extension EngineManager {
             }
             let prefix = endpoint.ipv4Prefix > 0 ? endpoint.ipv4Prefix : prefixLength(network.subnet)
             let cidr = endpoint.ipv4Address.isEmpty ? "" : "\(endpoint.ipv4Address)/\(prefix)"
+            let prefix6 = endpoint.ipv6Prefix > 0 ? endpoint.ipv6Prefix : prefixLength6(network.subnet6)
+            let cidr6 = endpoint.ipv6Address.isEmpty ? "" : "\(endpoint.ipv6Address)/\(prefix6)"
             return EngineNetworkContainer(
                 id: container.id,
                 name: container.name,
                 endpointID: String(container.id.prefix(12)) + String(network.id.prefix(12)),
                 macAddress: endpoint.macAddress,
-                ipv4Address: cidr
+                ipv4Address: cidr,
+                ipv6Address: cidr6
             )
         }
         return EngineNetworkInspect(network: network, containers: attached.sorted { $0.name < $1.name })
@@ -790,6 +851,9 @@ extension EngineManager {
             ipv4Address: request.ipv4 ?? "",
             ipv4Prefix: prefixLength(network.subnet),
             gateway: network.gateway,
+            ipv6Address: request.ipv6 ?? "",
+            ipv6Prefix: network.enableIPv6 ? prefixLength6(network.subnet6) : 0,
+            ipv6Gateway: network.gateway6,
             macAddress: request.macAddress ?? "",
             aliases: request.aliases,
             driverOpts: request.driverOpts,
@@ -805,6 +869,65 @@ extension EngineManager {
             return ip
         }
         return try await networkGateway.allocate(networkID, key: key)
+    }
+
+    private func allocateBridgeIPv6(networkID: String, key: String, requested: String?) async throws -> IPv6Address {
+        if let requested, !requested.isEmpty {
+            let ip = try parseIPv6(requested)
+            try await networkGateway.reserve6(networkID, key: key, ip: ip)
+            return ip
+        }
+        return try await networkGateway.allocate6(networkID, key: key)
+    }
+
+    private func addGuestBridgeIPv6Address(_ containerID: String, ip6: String, prefix: Int) async throws {
+        _ = try? await runGuest(
+            containerID,
+            command: ["ip", "-6", "addr", "add", "\(ip6)/\(prefix)", "dev", "eth0"],
+            privileged: true
+        )
+    }
+
+    private func parseIPv6(_ raw: String) throws -> IPv6Address {
+        do {
+            return try IPv6Address(raw)
+        } catch {
+            throw EngineError.invalidArgument("invalid IPv6 address \(raw)")
+        }
+    }
+
+    private func prefixLength6(_ subnet: String) -> Int {
+        guard let split = subnet.split(separator: "/").last, let prefix = Int(split), prefix > 0 else { return 64 }
+        return prefix
+    }
+
+    private func nextSubnet6() throws -> String {
+        for index in 1...65_535 {
+            let hex = String(index, radix: 16)
+            let candidate = "fd00:10:0:\(hex)::/64"
+            if networks.values.contains(where: { $0.subnet6 == candidate }) {
+                continue
+            }
+            return candidate
+        }
+        throw EngineError.conflict("no IPv6 ULA subnets left")
+    }
+
+    private static func normalizedSubnet6(_ raw: String) throws -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cidr = try CIDRv6(trimmed)
+        return "\(cidr.lower.description)/\(cidr.prefix.length)"
+    }
+
+    private static func resolvedGateway6(_ raw: String?, subnet: CIDRv6) throws -> String {
+        if let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
+            let ip = try IPv6Address(raw)
+            guard subnet.contains(ip), ip != subnet.lower else {
+                throw EngineError.invalidArgument("gateway \(raw) is outside subnet \(subnet)")
+            }
+            return ip.description
+        }
+        return IPv6Address(subnet.lower.value &+ 1).description
     }
 
     private func parseIPv4(_ raw: String) throws -> IPv4Address {

@@ -84,6 +84,7 @@ extension EngineManager {
                 if !container.user.isEmpty {
                     config.user = .init(username: container.user)
                 }
+                try Self.applyProcessSecurity(&config, run: container.run)
                 config.terminal = false
                 config.stdout = sink
                 config.stderr = sink

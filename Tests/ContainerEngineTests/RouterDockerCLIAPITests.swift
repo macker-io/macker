@@ -78,6 +78,11 @@ struct RouterDockerCLIAPITests {
             body["StopTimeout"] = 7
             var host = body["HostConfig"] as! [String: Any]
             host["Init"] = true
+            host["CapAdd"] = ["NET_ADMIN"]
+            host["CapDrop"] = ["CHOWN"]
+            host["SecurityOpt"] = ["no-new-privileges"]
+            host["Sysctls"] = ["net.ipv4.ip_forward": "1"]
+            host["Ulimits"] = [["Name": "nofile", "Soft": 64, "Hard": -1]]
             host["AutoRemove"] = false
             body["HostConfig"] = host
             let created = await router.handle(try RouterTestSupport.request("POST", "/v1.44/containers/create", body: body))
@@ -95,6 +100,15 @@ struct RouterDockerCLIAPITests {
             let hostConfig = try #require(inspected["HostConfig"] as? [String: Any])
             #expect(hostConfig["StopSignal"] == nil)
             #expect(hostConfig["Init"] as? Bool == true)
+            #expect(hostConfig["CapAdd"] as? [String] == ["NET_ADMIN"])
+            #expect(hostConfig["CapDrop"] as? [String] == ["CHOWN"])
+            #expect(hostConfig["Sysctls"] as? [String: String] == ["net.ipv4.ip_forward": "1"])
+            #expect(hostConfig["SecurityOpt"] as? [String] == ["no-new-privileges"])
+            let limit = try #require((hostConfig["Ulimits"] as? [[String: Any]])?.first)
+            #expect(limit["Name"] as? String == "nofile")
+            #expect(RouterTestSupport.int64(limit["Soft"]) == 64)
+            #expect(RouterTestSupport.int64(limit["Hard"]) == -1)
+            #expect(try RouterTestSupport.jsonObject(created)["Warnings"] as? [String] == [])
             let networks = (inspected["NetworkSettings"] as? [String: Any])?["Networks"] as? [String: Any]
             #expect(networks?.keys.sorted() == ["bridge"])
         }
@@ -107,7 +121,7 @@ struct RouterDockerCLIAPITests {
                 ("PidMode", "host", "HostConfig.PidMode (--pid)"),
                 ("Devices", [["PathOnHost": "/dev/null", "PathInContainer": "/dev/null", "CgroupPermissions": "rwm"]], "HostConfig.Devices (--device)"),
                 ("SecurityOpt", ["seccomp=unconfined"], "HostConfig.SecurityOpt (--security-opt)"),
-                ("Sysctls", ["net.ipv4.ip_forward": "1"], "HostConfig.Sysctls (--sysctl)"),
+                ("SecurityOpt", ["no-new-privileges", "seccomp=unconfined"], "HostConfig.SecurityOpt (--security-opt)"),
                 ("LogConfig", ["Type": "syslog", "Config": [String: String]()], "HostConfig.LogConfig.Type (--log-driver)"),
             ]
             for (field, value, expected) in cases {

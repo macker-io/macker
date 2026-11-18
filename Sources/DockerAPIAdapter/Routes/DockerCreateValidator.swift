@@ -1,3 +1,4 @@
+import ContainerEngine
 import Foundation
 
 /// Rejects `POST /containers/create` settings Macker cannot honor.
@@ -55,7 +56,7 @@ enum DockerCreateValidator {
             if !(host.DeviceCgroupRules ?? []).isEmpty {
                 reject("HostConfig.DeviceCgroupRules", "--device-cgroup-rule", "host devices cannot be passed into a MicroVM")
             }
-            if !(host.SecurityOpt ?? []).isEmpty {
+            if (host.SecurityOpt ?? []).contains(where: { !EngineContainerRunConfig.supportedSecurityOptions.contains($0) }) {
                 reject("HostConfig.SecurityOpt", "--security-opt", "seccomp/AppArmor/SELinux profiles are not applied")
             }
             if host.MaskedPaths != nil || host.ReadonlyPaths != nil {
@@ -66,12 +67,6 @@ enum DockerCreateValidator {
             }
             if !(host.Annotations ?? [:]).isEmpty {
                 reject("HostConfig.Annotations", "--annotation", "runtime annotations are not passed to the MicroVM")
-            }
-            if !(host.Sysctls ?? [:]).isEmpty {
-                reject("HostConfig.Sysctls", "--sysctl", "kernel parameters are not applied")
-            }
-            if !(host.Ulimits ?? []).isEmpty {
-                reject("HostConfig.Ulimits", "--ulimit", "resource limits other than --memory and --cpus are not applied")
             }
             if !(host.GroupAdd ?? []).isEmpty {
                 reject("HostConfig.GroupAdd", "--group-add", "supplementary groups are not applied")

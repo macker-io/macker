@@ -185,7 +185,8 @@ extension EngineManager {
         var lastError = ""
         for _ in 0..<40 {
             guard containers[id]?.state == "running" else {
-                let tail = (containers[id]?.logs.suffix(5).map(\.text).joined(separator: "\n")) ?? ""
+                let replay = try? await tailContainerLogs(id, count: 5, follow: false, stdout: true, stderr: true, since: nil, until: nil)
+                let tail = replay?.history.map { String(decoding: $0.data, as: UTF8.self) }.joined() ?? ""
                 throw EngineError.runtimeUnavailable("buildkitd exited during startup: \(tail)")
             }
             if let result = try? await runGuest(id, command: ["buildctl", "debug", "workers"]), result.code == 0 {
@@ -332,7 +333,7 @@ extension EngineManager {
                 config.arguments = command
                 config.environmentVariables = Self.mergedEnvironment(container.env, tty: false)
                 config.terminal = false
-                config.capabilities = .init(capabilities: Self.containerCapabilities(container))
+                try Self.applyProcessSecurity(&config, run: container.run)
                 config.stdin = local
                 config.stdout = local
                 config.stderr = stderr

@@ -74,7 +74,9 @@ enum UnixHTTPClient {
         defer { reader.close() }
         try reader.send(method: method, path: path, body: nil)
         let head = try reader.readHead()
-        try reader.readBodyStreaming(status: head.statusCode, headers: head.headers, onBytes: onBytes)
+        if head.statusCode < 400 {
+            try reader.readBodyStreaming(status: head.statusCode, headers: head.headers, onBytes: onBytes)
+        }
         return head.statusCode
     }
 

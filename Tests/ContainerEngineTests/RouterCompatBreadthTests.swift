@@ -134,6 +134,27 @@ struct RouterCompatBreadthTests {
         #expect(throws: EngineError.self) { try GuestCapabilities.resolve(privileged: false, add: ["BOGUS"], drop: []) }
     }
 
+    @Test func persistedRunConfigAcceptsBothInitSpellingsAndMissingFields() throws {
+        let decoder = JSONDecoder()
+        let beforeInit = try decoder.decode(EngineContainerRunConfig.self, from: Data("{}".utf8))
+        #expect(beforeInit == EngineContainerRunConfig())
+
+        let legacy = Data(#"{"initProcess":true,"sysctls":{"net.ipv4.ip_forward":"1"},"capAdd":["NET_ADMIN"],"securityOpt":["no-new-privileges"],"ulimits":[{"name":"nofile","soft":64,"hard":128}]}"#.utf8)
+        var run = try decoder.decode(EngineContainerRunConfig.self, from: legacy)
+        #expect(run == EngineContainerRunConfig(
+            useInit: true, sysctls: ["net.ipv4.ip_forward": "1"], capAdd: ["NET_ADMIN"],
+            securityOpt: ["no-new-privileges"], ulimits: [.init(name: "nofile", soft: 64, hard: 128)]
+        ))
+        run.entrypoint = ["/bin/sh", "-c"]
+        run.cmd = ["true"]
+        run.system = true
+        let current = try JSONEncoder().encode(run)
+        let json = try #require(try JSONSerialization.jsonObject(with: current) as? [String: Any])
+        #expect(json["useInit"] as? Bool == true)
+        #expect(json["initProcess"] == nil)
+        #expect(try decoder.decode(EngineContainerRunConfig.self, from: current) == run)
+    }
+
     @Test func restartCountIsReportedAndResetByAUserStart() async throws {
         try await withRouter { router, engine in
             try await RouterTestSupport.importTagged(engine, repo: "alpine")

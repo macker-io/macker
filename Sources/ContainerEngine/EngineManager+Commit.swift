@@ -24,7 +24,7 @@ extension EngineManager {
         root: URL,
         changes: [EngineFSChange]
     ) async throws -> String {
-        let parent = try await resolveImage(container.image)
+        let parent = try await resolveContainerImage(container)
         let platform = await Self.preferredPlatform(for: parent)
         let manifest = try await parent.manifest(for: platform)
         let configBlob = try await parent.getContent(digest: manifest.config.digest)

@@ -59,6 +59,11 @@ struct ImageOptionsTests {
                     )
                 )
                 try await engine.tagImage(name: "multi:v1", repo: "multi", tag: "v2")
+                let container = try await engine.createContainer(.init(image: "multi:v1"))
+                try await engine.deleteContainer(container.id, force: false, removeAnonymousVolumes: false)
+                await #expect(throws: EngineError.self) {
+                    _ = try await engine.deleteImage(name: digest)
+                }
 
                 let untagged = try await engine.deleteImage(name: "multi:v1")
                 #expect(untagged.count == 1)
@@ -71,10 +76,31 @@ struct ImageOptionsTests {
 
                 let removed = try await engine.deleteImage(name: "multi:v2")
                 #expect(removed.contains { $0.deleted == digest })
+                #expect(!removed.contains { $0.untagged == digest })
                 await #expect(throws: EngineError.self) {
                     _ = try await engine.inspectImage(name: "multi:v2")
                 }
+                await #expect(throws: EngineError.self) {
+                    _ = try await engine.inspectImage(name: digest)
+                }
             }
+        }
+    }
+
+    @Test func containerKeepsOriginalImageAcrossRetagAndImageCleanup() async throws {
+        try await withEngine { engine in
+            try await RouterTestSupport.importTagged(engine, repo: "pinned", hello: "old")
+            let id = try await engine.createContainer(.init(image: "pinned")).id
+            let original = try await engine.inspectImage(name: "pinned").id
+            try await RouterTestSupport.importTagged(engine, repo: "pinned", hello: "new")
+            #expect(try await engine.inspectImage(name: "pinned").id != original)
+
+            _ = try await engine.deleteImage(name: original, force: true)
+            _ = try await engine.pruneImages(danglingOnly: false, until: nil)
+            let container = try await engine.inspectContainer(id).container
+            let resolved = try await engine.resolveContainerImage(container)
+            #expect(resolved.digest == original)
+            #expect(try await engine.inspectImage(name: original).layers.count == 1)
         }
     }
 

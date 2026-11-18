@@ -1,4 +1,19 @@
+import ContainerizationExtras
 import Foundation
+
+/// `POST /containers/{id}/update`. Nil fields are left unchanged. `0` is not a value here;
+/// the API layer already treats Docker's zero as "unset".
+public struct EngineContainerUpdate: Sendable {
+    public var memory: Int64?
+    public var nanoCpus: Int64?
+    public var restartPolicy: EngineRestartPolicy?
+
+    public init(memory: Int64? = nil, nanoCpus: Int64? = nil, restartPolicy: EngineRestartPolicy? = nil) {
+        self.memory = memory
+        self.nanoCpus = nanoCpus
+        self.restartPolicy = restartPolicy
+    }
+}
 
 public struct EngineRestartPolicy: Sendable, Codable, Equatable {
     public var name: String
@@ -265,7 +280,25 @@ public struct EngineHealthState: Sendable, Codable, Equatable {
     }
 }
 
+public struct EngineUlimit: Sendable, Codable, Equatable {
+    public var name: String
+    public var soft: UInt64
+    public var hard: UInt64
+
+    public init(name: String, soft: UInt64, hard: UInt64) {
+        self.name = name
+        self.soft = soft
+        self.hard = hard
+    }
+}
+
 public struct EngineContainerRunConfig: Sendable, Codable, Equatable {
+    private enum LegacyCodingKeys: String, CodingKey { case initProcess }
+
+    public static let supportedSecurityOptions: Set<String> = [
+        "no-new-privileges", "no-new-privileges:true", "no-new-privileges=true",
+    ]
+
     public var extraHosts: [String]
     public var dns: [String]
     public var dnsSearch: [String]
@@ -280,15 +313,16 @@ public struct EngineContainerRunConfig: Sendable, Codable, Equatable {
     public var groupAdd: [String]
     public var publishAllPorts: Bool
     public var healthcheck: EngineHealthcheck?
-    /// Optional so records written before these fields existed still decode.
-    public var useInit: Bool?
+    public var useInit: Bool
+    public var sysctls: [String: String]
+    public var capAdd: [String]
+    public var capDrop: [String]
+    public var securityOpt: [String]
+    public var ulimits: [EngineUlimit]
     /// The requested entrypoint and cmd after image defaults (Docker `Config.Entrypoint` /
     /// `Config.Cmd`); `command` on the record is their concatenation.
     public var entrypoint: [String]?
     public var cmd: [String]?
-    /// Optional so records written before these fields existed still decode.
-    public var capAdd: [String]?
-    public var capDrop: [String]?
     /// Daemon-owned helper container (e.g. the BuildKit builder): hidden from listings,
     /// name lookup and events.
     public var system: Bool?
@@ -308,11 +342,14 @@ public struct EngineContainerRunConfig: Sendable, Codable, Equatable {
         groupAdd: [String] = [],
         publishAllPorts: Bool = false,
         healthcheck: EngineHealthcheck? = nil,
-        useInit: Bool? = nil,
+        useInit: Bool = false,
+        sysctls: [String: String] = [:],
+        capAdd: [String] = [],
+        capDrop: [String] = [],
+        securityOpt: [String] = [],
+        ulimits: [EngineUlimit] = [],
         entrypoint: [String]? = nil,
         cmd: [String]? = nil,
-        capAdd: [String]? = nil,
-        capDrop: [String]? = nil,
         system: Bool? = nil
     ) {
         self.extraHosts = extraHosts
@@ -332,9 +369,40 @@ public struct EngineContainerRunConfig: Sendable, Codable, Equatable {
         self.useInit = useInit
         self.entrypoint = entrypoint
         self.cmd = cmd
+        self.system = system
+        self.sysctls = sysctls
         self.capAdd = capAdd
         self.capDrop = capDrop
-        self.system = system
+        self.securityOpt = securityOpt
+        self.ulimits = ulimits
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        extraHosts = try c.decodeIfPresent([String].self, forKey: .extraHosts) ?? []
+        dns = try c.decodeIfPresent([String].self, forKey: .dns) ?? []
+        dnsSearch = try c.decodeIfPresent([String].self, forKey: .dnsSearch) ?? []
+        dnsOptions = try c.decodeIfPresent([String].self, forKey: .dnsOptions) ?? []
+        restartPolicy = try c.decodeIfPresent(EngineRestartPolicy.self, forKey: .restartPolicy) ?? .none
+        restartCount = try c.decodeIfPresent(Int.self, forKey: .restartCount) ?? 0
+        stopSignal = try c.decodeIfPresent(String.self, forKey: .stopSignal) ?? ""
+        stopTimeout = try c.decodeIfPresent(Int.self, forKey: .stopTimeout) ?? 0
+        privileged = try c.decodeIfPresent(Bool.self, forKey: .privileged) ?? false
+        readonlyRootfs = try c.decodeIfPresent(Bool.self, forKey: .readonlyRootfs) ?? false
+        domainname = try c.decodeIfPresent(String.self, forKey: .domainname) ?? ""
+        groupAdd = try c.decodeIfPresent([String].self, forKey: .groupAdd) ?? []
+        publishAllPorts = try c.decodeIfPresent(Bool.self, forKey: .publishAllPorts) ?? false
+        healthcheck = try c.decodeIfPresent(EngineHealthcheck.self, forKey: .healthcheck)
+        let legacy = try decoder.container(keyedBy: LegacyCodingKeys.self)
+        useInit = try c.decodeIfPresent(Bool.self, forKey: .useInit) ?? legacy.decodeIfPresent(Bool.self, forKey: .initProcess) ?? false
+        entrypoint = try c.decodeIfPresent([String].self, forKey: .entrypoint)
+        cmd = try c.decodeIfPresent([String].self, forKey: .cmd)
+        system = try c.decodeIfPresent(Bool.self, forKey: .system)
+        sysctls = try c.decodeIfPresent([String: String].self, forKey: .sysctls) ?? [:]
+        capAdd = try c.decodeIfPresent([String].self, forKey: .capAdd) ?? []
+        capDrop = try c.decodeIfPresent([String].self, forKey: .capDrop) ?? []
+        securityOpt = try c.decodeIfPresent([String].self, forKey: .securityOpt) ?? []
+        ulimits = try c.decodeIfPresent([EngineUlimit].self, forKey: .ulimits) ?? []
     }
 }
 
@@ -415,12 +483,17 @@ public struct EngineNetworkAttachSpec: Sendable, Equatable {
 
     public func asRequest() throws -> EngineEndpointRequest {
         if let ipv6, !ipv6.isEmpty {
-            throw EngineError.notImplemented("IPv6 is not implemented")
+            do {
+                _ = try IPv6Address(ipv6)
+            } catch {
+                throw EngineError.invalidArgument("invalid IPv6 address \(ipv6)")
+            }
         }
         return EngineEndpointRequest(
             network: name,
             aliases: aliases,
             ipv4: ipv4,
+            ipv6: ipv6,
             macAddress: macAddress,
             linkLocalIPs: linkLocalIPs
         )

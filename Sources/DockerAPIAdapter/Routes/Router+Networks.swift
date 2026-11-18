@@ -77,7 +77,9 @@ extension Router {
             }
         }
 
-        let ipam = body.IPAM?.Config?.first
+        let configs = body.IPAM?.Config ?? []
+        let ipam4 = configs.first { ($0.Subnet?.contains(":") ?? false) == false && ($0.Gateway?.contains(":") ?? false) == false }
+        let ipam6 = configs.first { ($0.Subnet?.contains(":") ?? false) || ($0.Gateway?.contains(":") ?? false) }
         do {
             let created = try await engine.createNetwork(
                 EngineNetworkCreateSpec(
@@ -85,10 +87,12 @@ extension Router {
                     driver: body.Driver ?? "bridge",
                     labels: body.Labels ?? [:],
                     options: body.Options ?? [:],
-                    subnet: ipam?.Subnet,
-                    gateway: ipam?.Gateway,
-                    ipRange: ipam?.IPRange,
-                    auxiliaryAddresses: ipam?.AuxiliaryAddresses ?? [:],
+                    subnet: ipam4?.Subnet,
+                    gateway: ipam4?.Gateway,
+                    subnet6: ipam6?.Subnet,
+                    gateway6: ipam6?.Gateway,
+                    ipRange: ipam4?.IPRange,
+                    auxiliaryAddresses: ipam4?.AuxiliaryAddresses ?? [:],
                     ipamDriver: body.IPAM?.Driver ?? "default",
                     ipamOptions: body.IPAM?.Options ?? [:],
                     enableIPv4: body.EnableIPv4 ?? true,

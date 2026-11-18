@@ -21,25 +21,29 @@ extension EngineManager {
 
     /// Places a copy-on-write (or copied) rootfs in the container runtime directory.
     func prepareRootfs(id: String, image: Containerization.Image) async throws -> Mount {
-        let existing = Self.runtimeURL(id: id, root: containerRoot).appendingPathComponent("rootfs.ext4")
-        if FileManager.default.fileExists(atPath: existing.path) {
-            // Restart: keep the container's own writable filesystem.
-            return .block(format: "ext4", source: existing.path, destination: "/", options: [])
-        }
+        let runtime = Self.runtimeURL(id: id, root: containerRoot)
+        let dest = runtime.appendingPathComponent("rootfs.ext4")
+        let mount = Mount.block(format: "ext4", source: dest.path, destination: "/", options: [])
+        if FileManager.default.fileExists(atPath: dest.path) { return mount }
+
         let cacheDir = unpackedCacheDirectory(digest: image.digest)
         let cached = cacheDir.appendingPathComponent("rootfs.ext4")
         let cachedBaseline = cacheDir.appendingPathComponent("baseline.json")
         try FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
 
         if !FileManager.default.fileExists(atPath: cached.path) {
-            let partial = cacheDir.appendingPathComponent("rootfs.ext4.partial")
-            try? FileManager.default.removeItem(at: partial)
+            let partial = cacheDir.appendingPathComponent("rootfs.ext4.\(UUID()).partial")
+            defer { try? FileManager.default.removeItem(at: partial) }
             _ = try await EXT4Unpacker(capacityInBytes: Self.defaultRootfsBytes).unpack(
                 image,
                 for: .current,
                 at: partial
             )
-            try FileManager.default.moveItem(at: partial, to: cached)
+            do {
+                try FileManager.default.moveItem(at: partial, to: cached)
+            } catch where FileManager.default.fileExists(atPath: cached.path) {
+                // Another container finished unpacking the same image first.
+            }
             if let entries = try? FSInventory.walkEXT4(cached),
                 let data = try? JSONEncoder().encode(entries)
             {
@@ -47,16 +51,17 @@ extension EngineManager {
             }
         }
 
-        let runtime = Self.runtimeURL(id: id, root: containerRoot)
         try FileManager.default.createDirectory(at: runtime, withIntermediateDirectories: true)
-        let dest = runtime.appendingPathComponent("rootfs.ext4")
-        try Self.cloneOrCopy(from: cached, to: dest)
+        let pending = runtime.appendingPathComponent("rootfs.ext4.partial")
+        defer { try? FileManager.default.removeItem(at: pending) }
+        try Self.cloneOrCopy(from: cached, to: pending)
+        try FileManager.default.moveItem(at: pending, to: dest)
         if FileManager.default.fileExists(atPath: cachedBaseline.path) {
             let baseline = runtime.appendingPathComponent("baseline.json")
             try? FileManager.default.removeItem(at: baseline)
             try? FileManager.default.copyItem(at: cachedBaseline, to: baseline)
         }
-        return .block(format: "ext4", source: dest.path, destination: "/", options: [])
+        return mount
     }
 
     static func cloneOrCopy(from: URL, to: URL) throws {

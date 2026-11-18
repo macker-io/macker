@@ -113,7 +113,7 @@ curl http://127.0.0.1:18080
 ## Preview limits
 
 - Apple Silicon only, `linux/arm64` images only (no x86_64 emulation). No Swarm, plugins, secrets, or configs.
-- `macvlan` / `ipvlan` / IPv6 are not implemented; `--network container:` cannot be supported (one kernel per container).
+- `bridge` supports dual-stack IPv6 (`macker network create --ipv6 NAME`); IPv6-only and `host`-mode IPv6 are not supported. `macvlan` / `ipvlan` / `--net=container:` are not implemented.
 - Docker flags that need a shared host kernel (host namespaces, host devices, cgroup knobs) are rejected; a few others are approximated (see [docs/cli.md](docs/cli.md)).
 - `buildx` builders created with `--driver docker-container` do not work (their state volume cannot back overlayfs); use the default builder.
 

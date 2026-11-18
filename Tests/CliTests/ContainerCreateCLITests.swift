@@ -45,6 +45,22 @@ struct ContainerCreateCLITests {
         #expect(int64(health["Retries"]) == 2)
     }
 
+    @Test func encodeRuntimeOptionsWithoutReplacingHostConfig() throws {
+        let options = try ContainerCreateOptions.parse([
+            "--sysctl", "net.ipv4.ip_forward=1", "--ulimit", "nofile=64:128",
+            "--security-opt", "no-new-privileges", "--cap-add", "NET_ADMIN", "alpine",
+        ])
+        let encoded = try Create.encodeRequest(options, autoRemove: true)
+        let host = try jsonObject(try jsonObject(encoded.body)["HostConfig"])
+        let limit = try #require((host["Ulimits"] as? [[String: Any]])?.first)
+        #expect(limit["Name"] as? String == "nofile")
+        #expect(int64(limit["Soft"]) == 64 && int64(limit["Hard"]) == 128)
+        #expect(host["Sysctls"] as? [String: String] == ["net.ipv4.ip_forward": "1"])
+        #expect(host["SecurityOpt"] as? [String] == ["no-new-privileges"])
+        #expect(host["CapAdd"] as? [String] == ["NET_ADMIN"])
+        #expect(host["AutoRemove"] as? Bool == true)
+    }
+
     @Test func encodeRequestSetsAutoRemoveWithoutRestart() throws {
         let encoded = try Create.encodeRequest(
             ContainerCreateOptions.parse(["alpine"]),
@@ -54,13 +70,17 @@ struct ContainerCreateCLITests {
         #expect(host["AutoRemove"] as? Bool == true)
     }
 
-    @Test func encodeRequestRejectsIPv6RestartConflictAndBadPull() throws {
-        expectCLIError("IPv6 is not implemented") {
-            _ = try Create.encodeRequest(
-                ContainerCreateOptions.parse(["--ip6", "fe80::1", "alpine"]),
-                autoRemove: false
-            )
-        }
+    @Test func encodeRequestEncodesIPv6AndRejectsConflicts() throws {
+        let encoded = try Create.encodeRequest(
+            ContainerCreateOptions.parse(["--network", "v6net", "--ip6", "fd00:29::42", "alpine"]),
+            autoRemove: false
+        )
+        let root = try jsonObject(encoded.body)
+        let endpoints = try jsonObject(try jsonObject(root["NetworkingConfig"])["EndpointsConfig"])
+        let endpoint = try jsonObject(endpoints["v6net"])
+        let ipam = try jsonObject(endpoint["IPAMConfig"])
+        #expect(ipam["IPv6Address"] as? String == "fd00:29::42")
+
         expectCLIError("Conflicting options: --restart and --rm") {
             _ = try Create.encodeRequest(
                 ContainerCreateOptions.parse(["--restart", "always", "alpine"]),

@@ -46,11 +46,19 @@ final class FileHandleLink: @unchecked Sendable {
     private let queue = DispatchQueue(label: "io.macker.net.link")
     private var rx = [UInt8](repeating: 0, count: rxCapacity)
     private let ethernetHeader: [UInt8]
+    private let ethernetHeaderIPv6: [UInt8]
     private let tx = OSAllocatedUnfairLock(initialState: PacketTxQueue())
     private var writesResumed = false
     private var readsPaused = false
 
-    init(containerID: String, ipv4: CIDRv4, gateway: IPv4Address, mac: MACAddress) throws {
+    init(
+        containerID: String,
+        ipv4: CIDRv4,
+        gateway: IPv4Address,
+        ipv6: CIDRv6? = nil,
+        ipv6Gateway: IPv6Address? = nil,
+        mac: MACAddress
+    ) throws {
         var fds: [Int32] = [0, 0]
         let pair = fds.withUnsafeMutableBufferPointer { buffer in
             socketpair(AF_UNIX, SOCK_DGRAM, 0, buffer.baseAddress)
@@ -69,6 +77,8 @@ final class FileHandleLink: @unchecked Sendable {
         self.interface = FileHandleInterface(
             ipv4Address: ipv4,
             ipv4Gateway: gateway,
+            ipv6Address: ipv6,
+            ipv6Gateway: ipv6Gateway,
             macAddress: mac,
             fileHandle: guestHandle
         )
@@ -79,9 +89,13 @@ final class FileHandleLink: @unchecked Sendable {
             header[index] = dst[index]
             header[6 + index] = src[index]
         }
+        var header6 = header
         header[12] = UInt8(Ethernet.typeIPv4 >> 8)
         header[13] = UInt8(Ethernet.typeIPv4 & 0xff)
+        header6[12] = UInt8(Ethernet.typeIPv6 >> 8)
+        header6[13] = UInt8(Ethernet.typeIPv6 & 0xff)
         self.ethernetHeader = header
+        self.ethernetHeaderIPv6 = header6
     }
 
     func start(_ onFrame: @escaping (UnsafeRawBufferPointer) -> Void) {
@@ -115,13 +129,21 @@ final class FileHandleLink: @unchecked Sendable {
 
     /// Ethernet wrap + send without concatenating into a new `Data` on the success path.
     func sendIPv4(_ packet: UnsafeRawBufferPointer) {
+        sendPacket(packet, header: ethernetHeader)
+    }
+
+    func sendIPv6(_ packet: UnsafeRawBufferPointer) {
+        sendPacket(packet, header: ethernetHeaderIPv6)
+    }
+
+    private func sendPacket(_ packet: UnsafeRawBufferPointer, header: [UInt8]) {
         guard packet.count > 0 else { return }
         if enqueueIfBusy(nil) {
-            enqueue(copyIPv4Frame(packet))
+            enqueue(copyFrame(packet, header: header))
             return
         }
-        if sendIPv4Now(packet) { return }
-        enqueue(copyIPv4Frame(packet))
+        if sendPacketNow(packet, header: header) { return }
+        enqueue(copyFrame(packet, header: header))
     }
 
     func stop() {
@@ -173,10 +195,10 @@ final class FileHandleLink: @unchecked Sendable {
         }
     }
 
-    private func sendIPv4Now(_ packet: UnsafeRawBufferPointer) -> Bool {
+    private func sendPacketNow(_ packet: UnsafeRawBufferPointer, header: [UInt8]) -> Bool {
         guard let payload = packet.baseAddress else { return true }
         let fd = hostHandle.fileDescriptor
-        return ethernetHeader.withUnsafeBytes { eth -> Bool in
+        return header.withUnsafeBytes { eth -> Bool in
             guard let ethBase = eth.baseAddress else { return true }
             var iovs = [
                 iovec(iov_base: UnsafeMutableRawPointer(mutating: ethBase), iov_len: Ethernet.headerLength),
@@ -193,11 +215,11 @@ final class FileHandleLink: @unchecked Sendable {
         }
     }
 
-    private func copyIPv4Frame(_ packet: UnsafeRawBufferPointer) -> Data {
+    private func copyFrame(_ packet: UnsafeRawBufferPointer, header: [UInt8]) -> Data {
         var frame = Data(count: Ethernet.headerLength + packet.count)
         frame.withUnsafeMutableBytes { dest in
             guard let base = dest.baseAddress else { return }
-            ethernetHeader.withUnsafeBytes { eth in
+            header.withUnsafeBytes { eth in
                 if let ethBase = eth.baseAddress {
                     base.copyMemory(from: ethBase, byteCount: Ethernet.headerLength)
                 }
@@ -287,13 +309,24 @@ final class FileHandleLink: @unchecked Sendable {
 struct FileHandleInterface: Interface, VZInterface, @unchecked Sendable {
     let ipv4Address: CIDRv4
     let ipv4Gateway: IPv4Address?
+    let ipv6Address: CIDRv6?
+    let ipv6Gateway: IPv6Address?
     let macAddress: MACAddress?
     let mtu: UInt32 = UInt32(FileHandleLink.virtioMTU)
     private let fileHandle: FileHandle
 
-    init(ipv4Address: CIDRv4, ipv4Gateway: IPv4Address?, macAddress: MACAddress?, fileHandle: FileHandle) {
+    init(
+        ipv4Address: CIDRv4,
+        ipv4Gateway: IPv4Address?,
+        ipv6Address: CIDRv6? = nil,
+        ipv6Gateway: IPv6Address? = nil,
+        macAddress: MACAddress?,
+        fileHandle: FileHandle
+    ) {
         self.ipv4Address = ipv4Address
         self.ipv4Gateway = ipv4Gateway
+        self.ipv6Address = ipv6Address
+        self.ipv6Gateway = ipv6Gateway
         self.macAddress = macAddress
         self.fileHandle = fileHandle
     }

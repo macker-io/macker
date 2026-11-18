@@ -81,21 +81,31 @@ enum GatewayDNS {
     ) -> IPv4Address? {
         let needle = name.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
         guard !needle.isEmpty else { return nil }
-        return match(needle, in: records.filter { visibleNetworks.contains($0.networkID) })
+        return match(needle, in: records.filter { visibleNetworks.contains($0.networkID) })?.ip
     }
 
-    static func match(_ needle: String, in records: [NetworkGateway.Record]) -> IPv4Address? {
+    static func lookup6(
+        name: String,
+        records: [NetworkGateway.Record],
+        visibleNetworks: Set<String>
+    ) -> IPv6Address? {
+        let needle = name.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
+        guard !needle.isEmpty else { return nil }
+        return match(needle, in: records.filter { visibleNetworks.contains($0.networkID) })?.ip6
+    }
+
+    static func match(_ needle: String, in records: [NetworkGateway.Record]) -> NetworkGateway.Record? {
         for record in records {
             let names = [record.containerName, record.hostname, String(record.containerID.prefix(12))]
                 + record.aliases
             for raw in names {
                 let candidate = raw.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
                 if candidate == needle || "\(candidate).\(record.networkName)" == needle {
-                    return record.ip
+                    return record
                 }
             }
             if needle.count >= 12, record.containerID.lowercased().hasPrefix(needle) {
-                return record.ip
+                return record
             }
         }
         return nil
@@ -138,6 +148,47 @@ enum GatewayDNS {
             append16(0)
             appendName(name, to: &out)
             append16(type)
+            append16(1)
+        }
+        return out
+    }
+
+    static func answer6(
+        id: UInt16,
+        name: String,
+        address: IPv6Address?,
+        nxdomain: Bool = false
+    ) -> Data {
+        var out = Data()
+        func append16(_ value: UInt16) {
+            out.append(UInt8(value >> 8))
+            out.append(UInt8(value & 0xff))
+        }
+        append16(id)
+        if let address {
+            append16(0x8400)
+            append16(1)
+            append16(1)
+            append16(0)
+            append16(0)
+            appendName(name, to: &out)
+            append16(typeAAAA)
+            append16(1)
+            out.append(0xc0)
+            out.append(0x0c)
+            append16(typeAAAA)
+            append16(1)
+            out.append(contentsOf: [0, 0, 0, 30])
+            append16(16)
+            out.append(contentsOf: address.rawBytes)
+        } else {
+            append16(nxdomain ? 0x8403 : 0x8400)
+            append16(1)
+            append16(0)
+            append16(0)
+            append16(0)
+            appendName(name, to: &out)
+            append16(typeAAAA)
             append16(1)
         }
         return out

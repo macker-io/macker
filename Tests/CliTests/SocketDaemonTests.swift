@@ -43,6 +43,42 @@ struct SocketDaemonTests {
         }
     }
 
+    @Test func negotiatedAPIHandlesCLICreateOnADualStackNetwork() async throws {
+        try await withSocketServer { socket, engine in
+            try await importAlpine(engine)
+            let ping = try daemonRequest("HEAD", "/_ping", socket: socket)
+            let version = try #require(ping.headers["api-version"])
+            #expect(version == "1.44")
+            let prefix = "/v\(version)"
+
+            let args = DockerGlobalFlags.rewriteNetworkBooleans([
+                "network", "create", "--ipv6", "--subnet", "172.29.0.0/16", "--subnet", "fd00:29::/64", "front",
+            ])
+            let network = try NetworkCreate.parse(Array(args.dropFirst(2)))
+            let net = try UnixHTTPClient.request(
+                method: "POST", path: prefix + "/networks/create", socketPath: socket, body: network.encodedBody()
+            )
+            try #require(net.statusCode == 201)
+
+            let encoded = try Create.encodeRequest(ContainerCreateOptions.parse([
+                "--name", "web", "-h", "frontend", "--network", "front",
+                "--ip", "172.29.0.42", "--ip6", "fd00:29::42", "alpine:latest",
+            ]), autoRemove: false)
+            let created = try UnixHTTPClient.request(
+                method: "POST", path: prefix + encoded.path, socketPath: socket, body: encoded.body
+            )
+            try #require(created.statusCode == 201)
+            let inspected = try daemonRequest("GET", prefix + "/containers/web/json", socket: socket)
+            let body = try jsonObject(inspected.body)
+            #expect(try jsonObject(body["Config"])["Hostname"] as? String == "frontend")
+            let networks = try jsonObject(try jsonObject(body["NetworkSettings"])["Networks"])
+            #expect(networks.keys.sorted() == ["front"])
+            let endpoint = try jsonObject(networks["front"])
+            #expect(endpoint["IPAddress"] as? String == "172.29.0.42")
+            #expect(endpoint["GlobalIPv6Address"] as? String == "fd00:29::42")
+        }
+    }
+
     /// `docker run` blocks on the `wait` response header before it calls `start`; the
     /// header must reach the client while the body is still pending.
     @Test func waitHeaderIsFlushedBeforeTheContainerExits() async throws {

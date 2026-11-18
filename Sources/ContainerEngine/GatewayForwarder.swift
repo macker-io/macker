@@ -11,8 +11,14 @@ protocol GatewayForwarder: Sendable {
     /// IPv4 datagram from virtio (no Ethernet). Established flows skip Swift TCP/UDP parse.
     func ingestIPv4(_ packet: Data)
 
+    /// IPv6 datagram from virtio (no Ethernet).
+    func ingestIPv6(_ packet: Data)
+
     /// Guest → outside ICMP (echo). Other ICMP types may be ignored.
     func handleICMP(_ packet: Data)
+
+    /// Guest → outside ICMPv6 (echo).
+    func handleICMPv6(_ packet: Data)
 
     /// Published-port reply aimed at the gateway. `true` if the packet was consumed.
     func acceptIPv4(_ packet: Data) -> Bool
@@ -24,6 +30,14 @@ protocol GatewayForwarder: Sendable {
         guestIP: IPv4Address,
         guestPort: UInt16,
         gatewayIP: IPv4Address,
+        upstreams: [String]
+    )
+
+    func forwardDNS6(
+        query: Data,
+        guestIP: IPv6Address,
+        guestPort: UInt16,
+        gatewayIP: IPv6Address,
         upstreams: [String]
     )
 
@@ -45,6 +59,16 @@ protocol GatewayForwarder: Sendable {
 }
 
 extension GatewayForwarder {
+    func ingestIPv6(_ packet: Data) {}
+    func handleICMPv6(_ packet: Data) {}
+    func forwardDNS6(
+        query: Data,
+        guestIP: IPv6Address,
+        guestPort: UInt16,
+        gatewayIP: IPv6Address,
+        upstreams: [String]
+    ) {}
+
     /// Tests and callers that already parsed L4 still enter through ``ingestIPv4``.
     func handleUDP(packet: IPv4Packet, datagram: UDPDatagram) {
         _ = datagram

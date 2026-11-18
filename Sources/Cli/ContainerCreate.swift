@@ -8,7 +8,7 @@ struct ContainerCreateOptions: ParsableArguments {
     @Option(help: "Assign a name to the container.")
     var name: String?
 
-    @Option(help: "Container host name.")
+    @Option(name: [.customShort("h"), .long], help: "Container host name.")
     var hostname: String?
 
     @Option(help: "Container NIS domain name.")
@@ -405,9 +405,6 @@ struct Create: ParsableCommand {
 
     static func encodeRequest(_ options: ContainerCreateOptions, autoRemove: Bool, stdinOnce: Bool = false) throws -> EncodedRequest {
         try rejectRestartWithAutoRemove(restart: options.restart, autoRemove: autoRemove)
-        if let ip6 = options.ip6, !ip6.isEmpty {
-            throw CLIError.io("IPv6 is not implemented")
-        }
         try validatePull(options.pull)
         let env = try DaemonAPI.envFile(options.envFile) + options.env
         var labels = try DaemonAPI.labelFile(options.labelFile)
@@ -443,7 +440,7 @@ struct Create: ParsableCommand {
         if let memory = options.memory {
             host.Memory = try DaemonAPI.parseBytes(memory)
         }
-        try Self.forwardUnsupported(options, into: &host)
+        try Self.applyHostOptions(options, into: &host)
         var exposed: [String: CreateBody.Empty] = [:]
         for spec in options.expose {
             let binding = try EnginePortBinding.parseExposed(spec)
@@ -476,16 +473,16 @@ struct Create: ParsableCommand {
         return EncodedRequest(path: path, body: try JSONEncoder().encode(body))
     }
 
-    /// Options the daemon cannot honor are still sent, so it rejects them with one clear
-    /// error instead of the CLI dropping them silently.
-    private static func forwardUnsupported(_ options: ContainerCreateOptions, into host: inout CreateBody.HostConfig) throws {
+    /// Forward both supported and unsupported options so the daemon can apply or reject them.
+    private static func applyHostOptions(_ options: ContainerCreateOptions, into host: inout CreateBody.HostConfig) throws {
         func nonEmpty(_ values: [String]) -> [String]? { values.isEmpty ? nil : values }
         func keyValues(_ values: [String]) -> [String: String]? {
             guard !values.isEmpty else { return nil }
             var map: [String: String] = [:]
             for item in values {
                 let parts = item.split(separator: "=", maxSplits: 1).map(String.init)
-                map[parts[0]] = parts.count == 2 ? parts[1] : ""
+                guard let key = parts.first, !key.isEmpty else { continue }
+                map[key] = parts.count == 2 ? parts[1] : ""
             }
             return map
         }
@@ -510,7 +507,15 @@ struct Create: ParsableCommand {
         host.Sysctls = keyValues(options.sysctl)
         host.StorageOpt = keyValues(options.storageOpt)
         host.Annotations = keyValues(options.annotation)
-        host.Ulimits = options.ulimit.isEmpty ? nil : options.ulimit.map { ["Name": $0] }
+        host.Ulimits = options.ulimit.isEmpty ? nil : try options.ulimit.map { raw in
+            let parts = raw.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2, !parts[0].isEmpty else { throw CLIError.io("invalid --ulimit value \(raw)") }
+            let limits = parts[1].split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+            guard let first = limits.first, let soft = Int64(first), let hard = Int64(limits.last ?? first) else {
+                throw CLIError.io("invalid --ulimit value \(raw)")
+            }
+            return CreateBody.Ulimit(Name: String(parts[0]), Soft: soft, Hard: hard)
+        }
         host.OomKillDisable = options.oomKillDisable ? true : nil
         host.OomScoreAdj = options.oomScoreAdj
         host.PidsLimit = options.pidsLimit
@@ -557,6 +562,9 @@ struct Create: ParsableCommand {
         if let ip = options.ip, specs[0].ipv4 == nil {
             specs[0].ipv4 = ip
         }
+        if let ip6 = options.ip6, specs[0].ipv6 == nil {
+            specs[0].ipv6 = ip6
+        }
         if let mac = options.macAddress, specs[0].macAddress == nil {
             specs[0].macAddress = mac
         }
@@ -571,7 +579,7 @@ struct Create: ParsableCommand {
         for spec in specs {
             endpoints[spec.name] = try Self.endpointConfig(spec)
         }
-        if endpoints.count == 1, specs[0].name == "default", options.ip == nil, options.networkAlias.isEmpty, options.link.isEmpty, options.macAddress == nil, options.linkLocalIP.isEmpty {
+        if specs == [EngineNetworkAttachSpec(name: "default")] {
             return (mode, [:])
         }
         return (mode, endpoints)
@@ -580,10 +588,10 @@ struct Create: ParsableCommand {
     private static func endpointConfig(_ spec: EngineNetworkAttachSpec) throws -> CreateBody.EndpointConfig {
         let request = try spec.asRequest()
         let ipam: CreateBody.IPAMConfig?
-        if request.ipv4 != nil || !spec.linkLocalIPs.isEmpty {
+        if request.ipv4 != nil || request.ipv6 != nil || !spec.linkLocalIPs.isEmpty {
             ipam = .init(
                 IPv4Address: request.ipv4,
-                IPv6Address: nil,
+                IPv6Address: request.ipv6,
                 LinkLocalIPs: spec.linkLocalIPs.isEmpty ? nil : spec.linkLocalIPs
             )
         } else {
@@ -719,7 +727,7 @@ private struct CreateBody: Encodable {
         var Sysctls: [String: String]?
         var StorageOpt: [String: String]?
         var Annotations: [String: String]?
-        var Ulimits: [[String: String]]?
+        var Ulimits: [Ulimit]?
         var OomKillDisable: Bool?
         var OomScoreAdj: Int?
         var PidsLimit: Int64?
@@ -739,6 +747,12 @@ private struct CreateBody: Encodable {
         var BlkioDeviceReadIOps: [[String: String]]?
         var BlkioDeviceWriteIOps: [[String: String]]?
         var LogConfig: LogConfig?
+    }
+
+    struct Ulimit: Encodable {
+        var Name: String
+        var Soft: Int64
+        var Hard: Int64
     }
 
     struct LogConfig: Encodable {

@@ -17,6 +17,10 @@ final class UtunDevice: @unchecked Sendable {
         let family = UInt32(AF_INET).bigEndian
         return withUnsafeBytes(of: family, Array.init)
     }()
+    private static let afInet6Header: [UInt8] = {
+        let family = UInt32(AF_INET6).bigEndian
+        return withUnsafeBytes(of: family, Array.init)
+    }()
 
     private(set) var fd: Int32 = -1
     private(set) var name = ""
@@ -129,8 +133,10 @@ final class UtunDevice: @unchecked Sendable {
 
     private func writeIPNow(_ packet: UnsafeRawBufferPointer) -> Bool {
         guard let payload = packet.baseAddress, packet.count > 0 else { return true }
+        let version = packet[0] >> 4
+        let headerBytes = version == 6 ? Self.afInet6Header : Self.afInetHeader
         let fd = self.fd
-        return Self.afInetHeader.withUnsafeBytes { header -> Bool in
+        return headerBytes.withUnsafeBytes { header -> Bool in
             guard let headerBase = header.baseAddress else { return true }
             var iovs = [
                 iovec(iov_base: UnsafeMutableRawPointer(mutating: headerBase), iov_len: Self.protocolHeader),

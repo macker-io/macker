@@ -47,33 +47,48 @@ public struct EnginePortBinding: Sendable, Codable, Equatable {
             throw EngineError.invalidArgument("invalid publish protocol in \(spec)")
         }
 
-        let parts = rest.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
         let hostIP: String
         let hostPort: Int
         let containerPort: Int
-        switch parts.count {
-        case 1:
-            hostIP = ""
-            hostPort = 0
-            containerPort = try parsePort(parts[0], spec: spec)
-        case 2:
-            hostIP = ""
-            if parts[0].isEmpty {
-                hostPort = 0
-            } else {
-                hostPort = try parsePort(parts[0], spec: spec)
+        if rest.hasPrefix("[") {
+            guard let close = rest.firstIndex(of: "]") else {
+                throw EngineError.invalidArgument("invalid publish spec: \(spec)")
             }
-            containerPort = try parsePort(parts[1], spec: spec)
-        case 3:
-            hostIP = parts[0]
-            if parts[1].isEmpty {
-                hostPort = 0
-            } else {
-                hostPort = try parsePort(parts[1], spec: spec)
+            hostIP = String(rest[rest.index(after: rest.startIndex)..<close])
+            let afterBracket = rest[rest.index(after: close)...]
+            guard afterBracket.hasPrefix(":") else {
+                throw EngineError.invalidArgument("invalid publish spec: \(spec)")
             }
-            containerPort = try parsePort(parts[2], spec: spec)
-        default:
-            throw EngineError.invalidArgument("invalid publish spec: \(spec)")
+            let tail = String(afterBracket.dropFirst())
+            let parts = tail.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+            switch parts.count {
+            case 1:
+                hostPort = 0
+                containerPort = try parsePort(parts[0], spec: spec)
+            case 2:
+                hostPort = parts[0].isEmpty ? 0 : try parsePort(parts[0], spec: spec)
+                containerPort = try parsePort(parts[1], spec: spec)
+            default:
+                throw EngineError.invalidArgument("invalid publish spec: \(spec)")
+            }
+        } else {
+            let parts = rest.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+            switch parts.count {
+            case 1:
+                hostIP = ""
+                hostPort = 0
+                containerPort = try parsePort(parts[0], spec: spec)
+            case 2:
+                hostIP = ""
+                hostPort = parts[0].isEmpty ? 0 : try parsePort(parts[0], spec: spec)
+                containerPort = try parsePort(parts[1], spec: spec)
+            case 3:
+                hostIP = parts[0]
+                hostPort = parts[1].isEmpty ? 0 : try parsePort(parts[1], spec: spec)
+                containerPort = try parsePort(parts[2], spec: spec)
+            default:
+                throw EngineError.invalidArgument("invalid publish spec: \(spec)")
+            }
         }
         return EnginePortBinding(
             hostIP: hostIP,

@@ -23,8 +23,8 @@ public struct DockerImageSummary: Encodable, Sendable {
         self.Size = engine.size
         self.SharedSize = -1
         self.VirtualSize = engine.size
-        self.Labels = [:]
-        self.Containers = 0
+        self.Labels = engine.labels
+        self.Containers = engine.containers
     }
 }
 
@@ -67,6 +67,20 @@ public struct DockerImageInspect: Encodable, Sendable {
         public let WorkingDir: String
         public let Entrypoint: [String]
         public let Labels: [String: String]
+        public let ExposedPorts: [String: EmptyObject]
+        public let Volumes: [String: EmptyObject]
+        public let Shell: [String]
+        public let Healthcheck: Healthcheck?
+
+        public struct EmptyObject: Encodable, Sendable {}
+
+        public struct Healthcheck: Encodable, Sendable {
+            public let Test: [String]
+            public let Interval: Int64
+            public let Timeout: Int64
+            public let StartPeriod: Int64
+            public let Retries: Int
+        }
     }
 
     public struct Metadata: Encodable, Sendable {
@@ -97,7 +111,19 @@ public struct DockerImageInspect: Encodable, Sendable {
             Image: engine.id,
             WorkingDir: engine.workingDir,
             Entrypoint: engine.entrypoint,
-            Labels: engine.labels
+            Labels: engine.labels,
+            ExposedPorts: Dictionary(uniqueKeysWithValues: engine.exposedPorts.map { ($0.dockerKey, ContainerConfig.EmptyObject()) }),
+            Volumes: Dictionary(uniqueKeysWithValues: engine.volumes.map { ($0, ContainerConfig.EmptyObject()) }),
+            Shell: engine.shell,
+            Healthcheck: engine.healthcheck.map {
+                ContainerConfig.Healthcheck(
+                    Test: $0.test,
+                    Interval: $0.intervalNanos,
+                    Timeout: $0.timeoutNanos,
+                    StartPeriod: $0.startPeriodNanos,
+                    Retries: $0.retries
+                )
+            }
         )
         self.Metadata = .init(LastTagTime: engine.created)
     }

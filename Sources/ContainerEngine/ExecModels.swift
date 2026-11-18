@@ -87,13 +87,15 @@ public struct EngineExec: Sendable {
 public struct EngineIOChunk: Sendable {
     public let data: Data
     public let stdout: Bool
-    /// When the bytes were logged. Set for log entries (`logs`, attach `logs=1` replay).
-    public let time: Date?
+    public let timestamp: Date?
+    /// False on subsequent pieces of an overlong live log line.
+    public let startsLogLine: Bool
 
-    public init(data: Data, stdout: Bool, time: Date? = nil) {
+    public init(data: Data, stdout: Bool, timestamp: Date? = nil, startsLogLine: Bool = true) {
         self.data = data
         self.stdout = stdout
-        self.time = time
+        self.timestamp = timestamp
+        self.startsLogLine = startsLogLine
     }
 }
 

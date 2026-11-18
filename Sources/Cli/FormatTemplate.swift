@@ -8,13 +8,13 @@ enum FormatTemplate {
         enum Part {
             case literal(String)
             case field(String)
-            case json
+            case json(String?)
         }
 
         let table: Bool
         let parts: [Part]
 
-        /// `table` mode headers: field names uppercased, literals kept, `{{json .}}` becomes JSON.
+        /// `table` mode headers: field names uppercased, literals kept, `{{json ...}}` becomes JSON.
         var header: String {
             parts.map { part in
                 switch part {
@@ -37,7 +37,7 @@ enum FormatTemplate {
             text = String(text.dropFirst(5))
         }
         if text.trimmingCharacters(in: .whitespaces) == "json" {
-            return Template(table: false, parts: [.json])
+            return Template(table: false, parts: [.json(nil)])
         }
 
         var parts: [Template.Part] = []
@@ -60,7 +60,9 @@ enum FormatTemplate {
                 let inner = text[text.index(index, offsetBy: 2)..<close.lowerBound]
                     .trimmingCharacters(in: .whitespaces)
                 if inner == "json ." || inner == "json(.)" {
-                    parts.append(.json)
+                    parts.append(.json(nil))
+                } else if let path = jsonFieldPath(inner) {
+                    parts.append(.json(path))
                 } else if inner.hasPrefix("."), inner.count > 1, !inner.contains(" ") {
                     parts.append(.field(String(inner.dropFirst())))
                 } else {
@@ -132,10 +134,25 @@ enum FormatTemplate {
                 return text
             case .field(let name):
                 return stringValue(try lookup(name, in: object))
-            case .json:
-                return jsonCompact(object)
+            case .json(let path):
+                let target = try path.map { try lookup($0, in: object) } ?? object
+                return jsonCompact(target)
             }
         }.joined()
+    }
+
+    private static func jsonFieldPath(_ inner: String) -> String? {
+        let trimmed = inner.trimmingCharacters(in: .whitespaces)
+        if trimmed.hasPrefix("json .") {
+            let path = String(trimmed.dropFirst("json .".count)).trimmingCharacters(in: .whitespaces)
+            return !path.isEmpty && !path.contains(" ") ? path : nil
+        }
+        if trimmed.hasPrefix("json(."), trimmed.hasSuffix(")") {
+            let path = String(trimmed.dropFirst("json(.".count).dropLast())
+                .trimmingCharacters(in: .whitespaces)
+            return !path.isEmpty && !path.contains(" ") ? path : nil
+        }
+        return nil
     }
 
     static func lookup(_ path: String, in object: Any) throws -> Any {
@@ -194,7 +211,7 @@ enum FormatTemplate {
             return number.stringValue
         }
         guard JSONSerialization.isValidJSONObject(value),
-            let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]),
+            let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes]),
             let text = String(data: data, encoding: .utf8)
         else { return "" }
         return text
@@ -210,8 +227,12 @@ enum FormatTemplate {
                     throw CLIError.io("unknown field \"\(name)\" in --format")
                 }
                 return value
-            case .json:
-                return jsonLine(row)
+            case .json(let path):
+                guard let path else { return jsonLine(row) }
+                guard let value = row.first(where: { $0.0.caseInsensitiveCompare(path) == .orderedSame })?.1 else {
+                    throw CLIError.io("unknown field \"\(path)\" in --format")
+                }
+                return jsonCompact(value)
             }
         }.joined()
     }

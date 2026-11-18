@@ -94,11 +94,7 @@ extension EngineManager {
         includeCurrentLine: Bool
     ) -> [EngineIOChunk] {
         var chunks: [EngineIOChunk] = []
-        if includeLogs {
-            chunks += container.logs.map {
-                EngineIOChunk(data: Data($0.text.utf8), stdout: $0.stdout, time: $0.time)
-            }
-        }
+        if includeLogs { chunks = logHistory(container) }
         if includeCurrentLine, container.tty, let line = ttySessions[container.id]?.currentLine, !line.isEmpty {
             chunks.append(EngineIOChunk(data: line, stdout: true))
         }

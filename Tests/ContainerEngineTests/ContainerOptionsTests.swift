@@ -4,47 +4,14 @@ import Testing
 @testable import DockerAPIAdapter
 
 struct ContainerOptionsTests {
-    @Test func logSelectionHonorsTailSinceUntil() {
-        let older = EngineLogEntry(time: Date(timeIntervalSince1970: 1_577_836_800), stdout: true, text: "hello\n")
-        let newer = EngineLogEntry(time: Date(timeIntervalSince1970: 1_577_836_810), stdout: false, text: "world\n")
-        let entries = [older, newer]
-        let since = Date(timeIntervalSince1970: 1_577_836_805)
-        let until = Date(timeIntervalSince1970: 1_577_836_820)
-
-        #expect(Router.selectLogEntries(entries, tail: "1") == [newer])
-        #expect(Router.selectLogEntries(entries, tail: "all") == entries)
-        #expect(Router.selectLogEntries(entries, tail: nil, since: since) == [newer])
-        #expect(Router.selectLogEntries(entries, tail: nil, until: since) == [older])
-        #expect(Router.selectLogEntries(entries, tail: nil, since: since, until: until) == [newer])
-    }
-
     @Test func logChunksKeepStreamAndPrefixLogTime() {
         let time = Date(timeIntervalSince1970: 1_577_836_800)
-        let err = EngineIOChunk(data: Data("oops\n".utf8), stdout: false, time: time)
+        let err = EngineIOChunk(data: Data("oops\n".utf8), stdout: false, timestamp: time)
         let framed = Router.framedIOChunk(err, tty: false, stdout: true, stderr: true, timestamps: true)
         #expect(framed.first == 2)
         let payload = String(decoding: framed.dropFirst(8), as: UTF8.self)
         #expect(payload == "\(ISO8601.string(from: time)) oops\n")
         #expect(Router.framedIOChunk(err, tty: false, stdout: true, stderr: false).isEmpty)
-    }
-
-    @Test func logFileRoundTripsStreamsAndTimes() {
-        let time = Date(timeIntervalSince1970: 1_577_836_800.25)
-        let entries = [
-            EngineLogEntry(time: time, stdout: true, text: "o1\n"),
-            EngineLogEntry(time: time, stdout: false, text: "e1\n"),
-        ]
-        let decoded = ContainerLogFile.decode(ContainerLogFile.encode(entries), fallbackTime: Date())
-        #expect(decoded.legacy == false)
-        #expect(decoded.entries == entries)
-
-        let legacy = ContainerLogFile.decode(Data("a\nb".utf8), fallbackTime: time)
-        #expect(legacy.legacy)
-        #expect(legacy.entries.map(\.text) == ["a\n", "b"])
-
-        var pending = ""
-        #expect(ContainerLogFile.splitLines("x\ny", pending: &pending) == ["x\n"])
-        #expect(pending == "y")
     }
 
     @Test func listFiltersByNameStatusLabelAndUntil() async throws {
@@ -139,6 +106,19 @@ struct ContainerOptionsTests {
         }
     }
 
+    @Test func failedBootRemovesAutoRemoveContainerAndFinishesWaiters() async throws {
+        // The pinned image is missing, so the boot fails without launching a VM.
+        let id = String(repeating: "a", count: 64)
+        var container = stubContainer(id: id, name: "auto", state: "created")
+        container.autoRemove = true
+        try await withSeededEngine([container]) { engine in
+            let removed = try await engine.waitContainer(id, condition: .removed)
+            await #expect(throws: EngineError.self) { _ = try await engine.startContainer(id) }
+            #expect(try await engine.listContainers(all: true).isEmpty)
+            #expect(await EngineManager.first(of: removed, timeoutSeconds: 1) == 0)
+        }
+    }
+
     @Test func unknownSinceFilterThrows() async throws {
         try await withSeededEngine([stubContainer(id: String(repeating: "f", count: 64), name: "only")]) { engine in
             do {
@@ -193,7 +173,23 @@ struct ContainerOptionsTests {
             var containers = Dictionary(
                 uniqueKeysWithValues: [alwaysRun, alwaysStopped, alwaysCreated, unlessRun, unlessStopped, onFailure].map { ($0.id, $0) }
             )
+            let runtime = EngineManager.runtimeURL(id: alwaysRun.id, root: dir)
+            let tmpfs = runtime.appendingPathComponent("tmpfs")
+            let disk = runtime.appendingPathComponent("rootfs.ext4")
+            let baseline = runtime.appendingPathComponent("baseline.json")
+            let staged = runtime.appendingPathComponent(EngineManager.pendingArchivesDirectory).appendingPathComponent("copy.tar")
+            let marker = Data("preserved".utf8)
+            try FileManager.default.createDirectory(at: tmpfs, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: staged.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try marker.write(to: staged)
+            try marker.write(to: disk)
+            try marker.write(to: baseline)
+
             let restart = EngineManager.restoreContainers(&containers, root: dir)
+            #expect(try Data(contentsOf: staged) == marker)
+            #expect(try Data(contentsOf: disk) == marker)
+            #expect(try Data(contentsOf: baseline) == marker)
+            #expect(!FileManager.default.fileExists(atPath: tmpfs.path))
             #expect(Set(restart) == Set([alwaysRun.id, alwaysStopped.id, unlessRun.id]))
             #expect(containers[alwaysRun.id]?.state == "exited")
             #expect(containers[unlessRun.id]?.exitCode == 255)
@@ -211,8 +207,10 @@ struct ContainerOptionsTests {
         let request = try spec.asRequest()
         #expect(request.ipv4 == "172.20.0.10")
         #expect(request.macAddress == "aa:bb:cc:dd:ee:ff")
+        let v6Spec = try EngineNetworkAttachSpec.parse("name=front,ip6=fd00::1").asRequest()
+        #expect(v6Spec.ipv6 == "fd00::1")
         #expect(throws: EngineError.self) {
-            _ = try EngineNetworkAttachSpec.parse("name=front,ip6=fe80::1").asRequest()
+            _ = try EngineNetworkAttachSpec.parse("name=front,ip6=not-an-ip").asRequest()
         }
     }
 

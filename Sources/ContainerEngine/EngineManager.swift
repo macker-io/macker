@@ -24,10 +24,7 @@ public actor EngineManager {
     var outputSinks: [String: [ProcessLogSink]] = [:]
     var execSinks: [String: [ProcessLogSink]] = [:]
     /// Output not yet terminated by a newline, per container and stream (`true` = stdout).
-    var pendingLogLines: [String: [Bool: String]] = [:]
-    /// Containers whose next exit was requested by the user (`kill` with the stop signal or
-    /// SIGKILL), so restart policies do not bring them back.
-    var manualStops: Set<String> = []
+    var pendingLogLines: [String: [Bool: EngineIOChunk]] = [:]
     var execs: [String: EngineExec] = [:]
     var execProcesses: [String: LinuxProcess] = [:]
     var execStdin: [String: ProcessStdin] = [:]
@@ -45,6 +42,7 @@ public actor EngineManager {
     var gatewayReady = false
     var containerManager: ContainerManager?
     var vms: [String: LinuxContainer] = [:]
+    var manuallySignaledForExit: Set<String> = []
     var waitTasks: [String: Task<Void, Never>] = [:]
     /// Boots in flight, so a second `start` (API client vs. restart policy) joins the first
     /// instead of booting a second MicroVM for the same container.
@@ -109,6 +107,10 @@ public actor EngineManager {
             return
         }
         await eventBus.publish(event)
+    }
+
+    static func killSuppressesRestart(_ signal: Signal, stopSignal: String) -> Bool {
+        signal == .kill || signal == parsedKillSignal(stopSignal)
     }
 
     static func parsedKillSignal(_ raw: String) -> Signal {

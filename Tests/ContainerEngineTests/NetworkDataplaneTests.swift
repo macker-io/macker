@@ -444,6 +444,169 @@ struct NetworkDataplaneTests {
         #expect(ip.dst == guestIP)
         #expect(TCPSegment.parse(ip.payload)?.flags.contains(.syn) == true)
     }
+
+    @Test func dataplaneHandlesIPv6NDPAndForwarding() throws {
+        var ipam6 = try NetworkIPAMv6(subnet: "fd00:29::/64", gateway: "fd00:29::1")
+        let a6 = try ipam6.allocate(id: "a")
+        let b6 = try ipam6.allocate(id: "b")
+        #expect(a6.description == "fd00:29::2")
+        #expect(b6.description == "fd00:29::3")
+
+        let gw6 = try IPv6Address("fd00:29::1")
+        let srcLink = try FileHandleLink(
+            containerID: "src",
+            ipv4: try CIDRv4("172.29.0.2/32"),
+            gateway: IPv4Address(0xAC1D_0001),
+            ipv6: try CIDRv6("fd00:29::2/64"),
+            ipv6Gateway: gw6,
+            mac: MACAddress(0x0A00_2700_0002)
+        )
+        let dstLink = try FileHandleLink(
+            containerID: "dst",
+            ipv4: try CIDRv4("172.29.0.3/32"),
+            gateway: IPv4Address(0xAC1D_0001),
+            ipv6: try CIDRv6("fd00:29::3/64"),
+            ipv6Gateway: gw6,
+            mac: MACAddress(0x0A00_2700_0003)
+        )
+        let dataplane = BridgeDataplane()
+        dataplane.update(
+            records: [
+                NetworkGateway.Record(
+                    containerID: "src",
+                    containerName: "src",
+                    hostname: "src",
+                    networkID: "net-v6",
+                    networkName: "v6net",
+                    ip: IPv4Address(0xAC1D_0002),
+                    gateway: IPv4Address(0xAC1D_0001),
+                    ip6: a6,
+                    gateway6: gw6,
+                    aliases: [],
+                    internalNetwork: false
+                ),
+                NetworkGateway.Record(
+                    containerID: "dst",
+                    containerName: "dst",
+                    hostname: "dst",
+                    networkID: "net-v6",
+                    networkName: "v6net",
+                    ip: IPv4Address(0xAC1D_0003),
+                    gateway: IPv4Address(0xAC1D_0001),
+                    ip6: b6,
+                    gateway6: gw6,
+                    aliases: [],
+                    internalNetwork: false
+                ),
+            ],
+            dnsUpstreams: [:],
+            links: ["src": srcLink, "dst": dstLink],
+            forwarder: nil,
+            gateways: [0xAC1D_0001],
+            gateways6: [IPv6Key(gw6)]
+        )
+
+        // Same-network IPv6 forwarding
+        let v6Packet = IPv6Packet(
+            hopLimit: 64,
+            nextHeader: Ethernet.protoUDP,
+            src: a6,
+            dst: b6,
+            payload: UDPDatagram(srcPort: 1000, dstPort: 2000, payload: Data("v6".utf8)).encode(src: a6, dst: b6)
+        )
+        let v6Frame = Ethernet.frame(
+            dst: NetworkGateway.gatewayMAC,
+            src: srcLink.guestMAC,
+            type: Ethernet.typeIPv6,
+            payload: v6Packet.encode()
+        )
+        v6Frame.withUnsafeBytes { dataplane.handleFrame(containerID: "src", frame: $0) }
+        let delivered = try #require(dstLink.recvGuest())
+        let parsedEth = try #require(Ethernet.parse(delivered))
+        #expect(parsedEth.type == Ethernet.typeIPv6)
+        let parsedV6 = try #require(IPv6Packet.parse(parsedEth.payload))
+        #expect(parsedV6.src == a6)
+        #expect(parsedV6.dst == b6)
+
+        // NDP NS for gateway -> NA reply
+        var ns = Data(count: 24)
+        ns[0] = NDP.typeNeighborSolicitation
+        let targetBytes = gw6.rawBytes
+        for i in 0..<16 { ns[8 + i] = targetBytes[i] }
+        let nsPacket = IPv6Packet(
+            hopLimit: 255,
+            nextHeader: Ethernet.protoICMPv6,
+            src: a6,
+            dst: gw6,
+            payload: ns
+        )
+        let nsFrame = Ethernet.frame(
+            dst: NetworkGateway.gatewayMAC,
+            src: srcLink.guestMAC,
+            type: Ethernet.typeIPv6,
+            payload: nsPacket.encode()
+        )
+        nsFrame.withUnsafeBytes { dataplane.handleFrame(containerID: "src", frame: $0) }
+        let naRaw = try #require(srcLink.recvGuest())
+        let naEth = try #require(Ethernet.parse(naRaw))
+        #expect(naEth.type == Ethernet.typeIPv6)
+        let naV6 = try #require(IPv6Packet.parse(naEth.payload))
+        #expect(naV6.nextHeader == Ethernet.protoICMPv6)
+        #expect(naV6.payload[0] == NDP.typeNeighborAdvertisement)
+
+        // Router Solicitation (133) -> Router Advertisement (134)
+        let rsPayload = Data([NDP.typeRouterSolicitation, 0, 0, 0, 0, 0, 0, 0])
+        let rsPacket = IPv6Packet(
+            hopLimit: 255,
+            nextHeader: Ethernet.protoICMPv6,
+            src: a6,
+            dst: try IPv6Address("ff02::2"),
+            payload: rsPayload
+        )
+        let rsFrame = Ethernet.frame(
+            dst: NetworkGateway.gatewayMAC,
+            src: srcLink.guestMAC,
+            type: Ethernet.typeIPv6,
+            payload: rsPacket.encode()
+        )
+        rsFrame.withUnsafeBytes { dataplane.handleFrame(containerID: "src", frame: $0) }
+        let raRaw = try #require(srcLink.recvGuest())
+        let raEth = try #require(Ethernet.parse(raRaw))
+        let raV6 = try #require(IPv6Packet.parse(raEth.payload))
+        #expect(raV6.payload[0] == NDP.typeRouterAdvertisement)
+
+        // Utun inbound IPv6 packet with zero UDP checksum -> checksum filled + delivered to dstLink
+        let utunUDP = UDPDatagram(srcPort: 5000, dstPort: 80, payload: Data("hello6".utf8))
+        var zeroSumUDP = Data(count: 8 + utunUDP.payload.count)
+        zeroSumUDP[0] = UInt8(5000 >> 8)
+        zeroSumUDP[1] = UInt8(5000 & 0xff)
+        zeroSumUDP[2] = UInt8(80 >> 8)
+        zeroSumUDP[3] = UInt8(80 & 0xff)
+        let udpLen = zeroSumUDP.count
+        zeroSumUDP[4] = UInt8(udpLen >> 8)
+        zeroSumUDP[5] = UInt8(udpLen & 0xff)
+        zeroSumUDP.replaceSubrange(8..<udpLen, with: utunUDP.payload)
+        let utunPkt = IPv6Packet(
+            hopLimit: 64,
+            nextHeader: Ethernet.protoUDP,
+            src: try IPv6Address("fd00:29::1"),
+            dst: b6,
+            payload: zeroSumUDP
+        ).encode()
+        utunPkt.withUnsafeBytes { dataplane.handleUtun($0) }
+        let dstRaw = try #require(dstLink.recvGuest())
+        let dstEth = try #require(Ethernet.parse(dstRaw))
+        let dstV6 = try #require(IPv6Packet.parse(dstEth.payload))
+        #expect(dstV6.dst == b6)
+        #expect(dstV6.payload[6] != 0 || dstV6.payload[7] != 0)
+
+        // Bracketed IPv6 publish spec
+        let binding = try EnginePortBinding.parsePublish("[::1]:8080:80/tcp")
+        #expect(binding.hostIP == "::1")
+        #expect(binding.hostPort == 8080)
+        #expect(binding.containerPort == 80)
+        #expect(binding.psDisplay == "[::1]:8080->80/tcp")
+    }
 }
 
 private func icmpEcho(type: UInt8, src: IPv4Address, dst: IPv4Address) -> IPv4Packet {

@@ -78,7 +78,7 @@ struct RouterVolumeNetworkAPITests {
                     body: ["Name": "v6", "EnableIPv6": true]
                 )
             )
-            #expect(ipv6.status == 501)
+            #expect(ipv6.status == 201)
 
             let macvlan = await router.handle(
                 try RouterTestSupport.request(

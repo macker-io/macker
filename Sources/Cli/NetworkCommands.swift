@@ -6,15 +6,13 @@ struct NetworkGroup: ParsableCommand {
         commandName: "network",
         abstract: "Manage networks.",
         subcommands: [
-            NetworkLs.self, NetworkCreate.self, NetworkInspect.self, NetworkRm.self,
+            NetworkLs.self, NetworkList.self, NetworkCreate.self, NetworkInspect.self, NetworkRm.self,
             NetworkConnect.self, NetworkDisconnect.self, NetworkPrune.self,
         ]
     )
 }
 
-struct NetworkLs: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "ls", abstract: "List networks.")
-
+struct NetworkListOptions: ParsableArguments {
     @Option(name: [.customShort("f"), .long], help: "Filter output (e.g. 'driver=bridge', 'label=key=value').")
     var filter: [String] = []
 
@@ -26,8 +24,22 @@ struct NetworkLs: ParsableCommand {
 
     @Flag(name: .customLong("no-trunc"), help: "Do not truncate output.")
     var noTrunc = false
+}
+
+struct NetworkLs: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "ls", abstract: "List networks.")
+
+    @OptionGroup var options: NetworkListOptions
 
     func run() throws {
+        try Self.list(options)
+    }
+
+    static func list(_ options: NetworkListOptions) throws {
+        let filter = options.filter
+        let format = options.format
+        let quiet = options.quiet
+        let noTrunc = options.noTrunc
         var path = "/networks"
         if !filter.isEmpty {
             path += "?filters=\(DaemonAPI.query(try DaemonAPI.filtersJSON(filter)))"
@@ -66,6 +78,12 @@ struct NetworkLs: ParsableCommand {
     }
 }
 
+struct NetworkList: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "list", abstract: "List networks.", shouldDisplay: false)
+    @OptionGroup var options: NetworkListOptions
+    func run() throws { try NetworkLs.list(options) }
+}
+
 struct NetworkCreate: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "create", abstract: "Create a network.")
 
@@ -75,7 +93,7 @@ struct NetworkCreate: ParsableCommand {
     @Option(help: "Subnet in CIDR format.")
     var subnet: [String] = []
 
-    @Option(help: "IPv4 gateway for the subnet.")
+    @Option(help: "IPv4 or IPv6 gateway for the subnet.")
     var gateway: [String] = []
 
     @Option(name: .customLong("ip-range"), help: "Allocate container IPs from a sub-range.")
@@ -87,10 +105,10 @@ struct NetworkCreate: ParsableCommand {
     @Option(name: [.customShort("o"), .customLong("opt")], help: "Set driver-specific options (key=value).")
     var opt: [String] = []
 
-    @Option(name: .customLong("ipv4"), help: "Enable or disable IPv4 address assignment.")
+    @Option(name: .customLong("ipv4"), help: "Enable IPv4 address assignment (use --ipv4=false to disable).")
     var ipv4: Bool = true
 
-    @Option(name: .customLong("ipv6"), help: "Enable or disable IPv6 address assignment.")
+    @Option(name: .customLong("ipv6"), help: "Enable IPv6 address assignment (use --ipv6=false to disable).")
     var ipv6: Bool = false
 
     @Option(name: .customLong("ipam-driver"), help: "IP Address Management driver.")
@@ -116,23 +134,40 @@ struct NetworkCreate: ParsableCommand {
     }
 
     func encodedBody() throws -> Data {
-        let subnet = try Self.ipv4Value(subnet, what: "subnet")
-        let gateway = try Self.ipv4Value(gateway, what: "gateway")
-        let ipRange = try Self.ipv4Value(ipRange, what: "ip-range")
+        let subnet4 = try Self.singleValue(subnet.filter { !$0.contains(":") }, what: "IPv4 subnet")
+        let subnet6 = try Self.singleValue(subnet.filter { $0.contains(":") }, what: "IPv6 subnet")
+        let gateway4 = try Self.singleValue(gateway.filter { !$0.contains(":") }, what: "IPv4 gateway")
+        let gateway6 = try Self.singleValue(gateway.filter { $0.contains(":") }, what: "IPv6 gateway")
+        guard !ipRange.contains(where: { $0.contains(":") }) else {
+            throw CLIError.io("IPv6 ip-range is not supported")
+        }
+        let ipRange4 = try Self.singleValue(ipRange, what: "IPv4 ip-range")
+        var configs: [NetworkCreateBody.IPAM.Config] = []
+        if subnet4 != nil || gateway4 != nil || ipRange4 != nil || !auxAddress.isEmpty {
+            configs.append(
+                .init(
+                    Subnet: subnet4,
+                    IPRange: ipRange4,
+                    Gateway: gateway4,
+                    AuxiliaryAddresses: NetworkKeyValues.map(auxAddress)
+                )
+            )
+        }
+        if subnet6 != nil || gateway6 != nil {
+            configs.append(
+                .init(
+                    Subnet: subnet6,
+                    IPRange: nil,
+                    Gateway: gateway6,
+                    AuxiliaryAddresses: nil
+                )
+            )
+        }
         var ipam: NetworkCreateBody.IPAM?
-        if subnet != nil || gateway != nil || ipRange != nil || !auxAddress.isEmpty || ipamDriver != "default"
-            || !ipamOpt.isEmpty
-        {
+        if !configs.isEmpty || ipamDriver != "default" || !ipamOpt.isEmpty {
             ipam = .init(
                 Driver: ipamDriver,
-                Config: [
-                    .init(
-                        Subnet: subnet,
-                        IPRange: ipRange,
-                        Gateway: gateway,
-                        AuxiliaryAddresses: NetworkKeyValues.map(auxAddress)
-                    )
-                ],
+                Config: configs,
                 Options: NetworkKeyValues.map(ipamOpt)
             )
         }
@@ -149,12 +184,9 @@ struct NetworkCreate: ParsableCommand {
         return try JSONEncoder().encode(body)
     }
 
-    static func ipv4Value(_ values: [String], what: String) throws -> String? {
-        if values.contains(where: { $0.contains(":") }) {
-            throw CLIError.io("IPv6 \(what) is not supported")
-        }
+    static func singleValue(_ values: [String], what: String) throws -> String? {
         guard values.count <= 1 else {
-            throw CLIError.io("only one IPv4 \(what) is supported")
+            throw CLIError.io("only one \(what) is supported")
         }
         return values.first
     }

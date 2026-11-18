@@ -1,5 +1,5 @@
 import Containerization
-import ContainerizationOCI
+import ContainerizationOS
 import Foundation
 
 extension EngineManager {
@@ -28,7 +28,8 @@ extension EngineManager {
     }
 
     func bootContainer(_ record: EngineContainer) async throws {
-        let image = try await resolveImage(record.image)
+        let image = try await resolveContainerImage(record)
+        try await retainImage(image)
         var manager = try await ensureManager()
         await reclaimContainerRuntime(record.id)
         // tmpfs mounts live in the runtime directory just reset: recreate them empty.
@@ -88,13 +89,13 @@ extension EngineManager {
                     config.process.user = .init(username: prepared.user)
                 }
                 config.process.terminal = prepared.tty
-                config.process.capabilities = .init(capabilities: Self.containerCapabilities(prepared))
+                try Self.applyProcessSecurity(&config.process, run: prepared.run)
                 if prepared.run.privileged {
                     // Privileged inside the guest kernel only: nothing is masked or read-only.
                     config.maskedPaths = []
                     config.readonlyPaths = []
                 }
-                config.useInit = prepared.run.useInit == true
+                config.useInit = prepared.run.useInit
                 if let stdinPipe {
                     config.process.stdin = stdinPipe
                 }
@@ -112,6 +113,9 @@ extension EngineManager {
                 config.memoryInBytes = prepared.memory > 0 ? UInt64(prepared.memory) : Self.defaultMemoryBytes
                 if prepared.memory > 0 {
                     config.memoryOverhead = 0
+                }
+                if !prepared.run.sysctls.isEmpty {
+                    config.sysctl = prepared.run.sysctls
                 }
                 for mount in prepared.mounts where !mount.source.isEmpty && !mount.destination.isEmpty {
                     var options: [String] = []
@@ -178,6 +182,7 @@ extension EngineManager {
             } catch {
                 result = .failure(error)
             }
+            guard !Task.isCancelled else { return }
             await self.finishWatchedVM(id: id, result: result)
         }
     }
@@ -222,10 +227,10 @@ extension EngineManager {
             await sink.drain()
         }
         if var session = ttySessions[id] {
-            let rest = session.finish()
+            let rest = session.finishBytes()
             ttySessions[id] = session
             if !rest.isEmpty {
-                pendingLogLines[id, default: [:]][true, default: ""] += rest
+                bufferLogOutput(id, data: rest, stdout: true)
             }
         }
         flushLogLines(id)
@@ -261,79 +266,74 @@ extension EngineManager {
         guard !data.isEmpty, containers[id] != nil else { return }
         let tty = containers[id]?.tty == true
         let attachData: Data
-        let logText: String
+        let logData: Data
         if tty {
             var session = ttySessions[id] ?? TTYSession()
-            let output = session.ingest(data)
+            let output = session.ingestBytes(data)
             ttySessions[id] = session
             attachData = output.attach
-            logText = output.log
+            logData = output.log
         } else {
             attachData = data
-            logText = String(decoding: data, as: UTF8.self)
+            logData = data
         }
-        var entries: [EngineLogEntry] = []
-        if !logText.isEmpty {
-            let now = Date()
-            var pending = pendingLogLines[id]?[stdout] ?? ""
-            entries = ContainerLogFile.splitLines(logText, pending: &pending).map {
-                EngineLogEntry(time: now, stdout: stdout, text: $0)
-            }
-            pendingLogLines[id, default: [:]][stdout] = pending
-        }
-        recordLogEntries(id, entries)
+        bufferLogOutput(id, data: logData, stdout: stdout)
         guard !attachData.isEmpty, let subscribers = attachSubscribers[id] else { return }
         for subscriber in subscribers.values where subscriber.kind == .attach {
             subscriber.continuation.yield(EngineIOChunk(data: attachData, stdout: stdout))
         }
     }
 
-    /// Emits partial lines still waiting for a newline (at exit).
-    func flushLogLines(_ id: String) {
-        guard let pending = pendingLogLines.removeValue(forKey: id) else { return }
+    /// Only the final, unterminated line is held back. A long partial is
+    /// emitted rather than letting a newline-free writer grow memory without bound.
+    private func bufferLogOutput(_ id: String, data: Data, stdout: Bool) {
+        guard !data.isEmpty else { return }
+        let pending = pendingLogLines[id]?.removeValue(forKey: stdout)
+        var bytes = pending?.data ?? Data()
         let now = Date()
-        let entries = [true, false].compactMap { stdout -> EngineLogEntry? in
-            guard let text = pending[stdout], !text.isEmpty else { return nil }
-            return EngineLogEntry(time: now, stdout: stdout, text: text)
+        var time = pending?.timestamp ?? now
+        var startsLine = pending?.startsLogLine ?? true
+        var start = data.startIndex
+        while let newline = data[start...].firstIndex(of: 0x0a) {
+            let end = data.index(after: newline)
+            bytes.append(data[start..<end])
+            emitLogLine(id, chunk: EngineIOChunk(data: bytes, stdout: stdout, timestamp: time, startsLogLine: startsLine))
+            startsLine = true
+            bytes = Data()
+            time = now
+            start = end
         }
-        recordLogEntries(id, entries)
+        bytes.append(data[start...])
+        guard !bytes.isEmpty else { return }
+        let chunk = EngineIOChunk(data: bytes, stdout: stdout, timestamp: time, startsLogLine: startsLine)
+        if bytes.count >= 16 * 1024 {
+            emitLogLine(id, chunk: chunk, endsLine: false)
+            // Keep just the line's time, not the bytes already persisted and sent.
+            pendingLogLines[id, default: [:]][stdout] = EngineIOChunk(data: Data(), stdout: stdout, timestamp: time, startsLogLine: false)
+        } else {
+            pendingLogLines[id, default: [:]][stdout] = chunk
+        }
     }
 
-    /// Stores complete log lines and fans them out to `logs -f` subscribers.
-    private func recordLogEntries(_ id: String, _ entries: [EngineLogEntry]) {
-        guard !entries.isEmpty, var record = containers[id] else { return }
-        record.logs += entries
-        containers[id] = record
-        appendLogFile(id: id, entries: entries)
+    func flushLogLines(_ id: String) {
+        guard let pending = pendingLogLines.removeValue(forKey: id) else { return }
+        for chunk in pending.values.sorted(by: { ($0.timestamp ?? .distantPast) < ($1.timestamp ?? .distantPast) }) {
+            emitLogLine(id, chunk: chunk)
+        }
+    }
+
+    private func emitLogLine(_ id: String, chunk: EngineIOChunk, endsLine: Bool = true) {
+        guard !chunk.data.isEmpty else { return }
+        appendLogRecord(id: id, chunk: chunk, line: true, endsLine: endsLine)
         for subscriber in (attachSubscribers[id] ?? [:]).values where subscriber.kind == .logs {
-            for entry in entries {
-                subscriber.continuation.yield(EngineIOChunk(data: Data(entry.text.utf8), stdout: entry.stdout, time: entry.time))
-            }
+            subscriber.continuation.yield(chunk)
         }
     }
 
     func reclaimContainerRuntime(_ id: String) async {
         await stopPortPublishers(id)
         await releaseInterfaces(id)
-        resetContainerFiles(id)
-    }
-
-    /// Clears per-boot state (tmpfs backing dirs, sockets) but keeps the container's writable
-    /// root filesystem, so files survive stop/start like Docker's container layer.
-    func resetContainerFiles(_ id: String) {
         Self.resetTransientFiles(id, root: containerRoot)
-    }
-
-    /// Runtime-directory entries that belong to the container, not to one boot.
-    static let persistentRuntimeFiles: Set<String> = ["rootfs.ext4", "baseline.json", pendingArchivesDirectory]
-
-    static func resetTransientFiles(_ id: String, root: URL) {
-        let dir = runtimeURL(id: id, root: root)
-        let fm = FileManager.default
-        guard let items = try? fm.contentsOfDirectory(atPath: dir.path) else { return }
-        for name in items where !persistentRuntimeFiles.contains(name) {
-            try? fm.removeItem(at: dir.appendingPathComponent(name))
-        }
     }
 
     func pauseVM(_ id: String) async throws {
@@ -375,5 +375,33 @@ extension EngineManager {
     private static func cpuCount(nanoCpus: Int64) -> Int {
         guard nanoCpus > 0 else { return 2 }
         return max(1, Int((nanoCpus + 500_000_000) / 1_000_000_000))
+    }
+
+    /// Exec and healthcheck processes get a fresh OCI spec; apply the same guest
+    /// restrictions to them as to PID 1. Privileged exec only widens capabilities.
+    static func applyProcessSecurity(
+        _ process: inout LinuxProcessConfiguration, run: EngineContainerRunConfig, privilegedExec: Bool = false
+    ) throws {
+        process.capabilities = try GuestCapabilities.processCapabilities(
+            privileged: run.privileged || privilegedExec, add: run.capAdd, drop: run.capDrop
+        )
+        if let invalid = run.securityOpt.first(where: { !EngineContainerRunConfig.supportedSecurityOptions.contains($0) }) {
+            throw EngineError.invalidArgument("unsupported security option: \(invalid)")
+        }
+        process.noNewPrivileges = !run.securityOpt.isEmpty
+        if !run.ulimits.isEmpty {
+            process.rlimits = try rlimits(run.ulimits)
+        }
+    }
+
+    static func rlimits(_ items: [EngineUlimit]) throws -> [LinuxRLimit] {
+        try items.map { item in
+            let name = item.name.uppercased()
+            let key = name.hasPrefix("RLIMIT_") ? name : "RLIMIT_\(name)"
+            guard let kind = try? LinuxRLimit.Kind(key), item.soft <= item.hard else {
+                throw EngineError.invalidArgument("invalid ulimit: \(item.name)")
+            }
+            return LinuxRLimit(kind: kind, hard: item.hard, soft: item.soft)
+        }
     }
 }

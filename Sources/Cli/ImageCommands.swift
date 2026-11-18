@@ -495,7 +495,7 @@ struct ImageGroup: ParsableCommand {
         commandName: "image",
         abstract: "Manage images.",
         subcommands: [
-            ImageLs.self, Pull.self, ImageRm.self, Tag.self, Push.self, History.self, ImageInspect.self,
+            ImageLs.self, ImageList.self, Build.self, Pull.self, ImageRm.self, Tag.self, Push.self, History.self, ImageInspect.self,
             ImagePrune.self, Save.self, Load.self, Import.self,
         ]
     )
@@ -506,6 +506,21 @@ struct ImageLs: ParsableCommand {
 
     @OptionGroup var options: ImageListOptions
 
+    func run() throws {
+        try Images.list(
+            all: options.all,
+            quiet: options.quiet,
+            digests: options.digests,
+            noTrunc: options.noTrunc,
+            filters: options.filter,
+            format: options.format
+        )
+    }
+}
+
+struct ImageList: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "list", abstract: "List images.", shouldDisplay: false)
+    @OptionGroup var options: ImageListOptions
     func run() throws {
         try Images.list(
             all: options.all,

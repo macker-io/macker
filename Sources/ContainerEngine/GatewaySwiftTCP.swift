@@ -5,6 +5,7 @@ import os
 import SwiftTCP
 
 typealias GuestIPv4Address = ContainerizationExtras.IPv4Address
+typealias GuestIPv6Address = ContainerizationExtras.IPv6Address
 
 /// Userspace gateway forwarder backed by the SwiftTCP library.
 ///
@@ -40,6 +41,7 @@ final class GatewaySwiftTCP: GatewayForwarder, @unchecked Sendable {
     }
 
     private let onGuest: @Sendable (GuestIPv4Address, Data) -> Void
+    private let onGuest6: @Sendable (GuestIPv6Address, Data) -> Void
     private let sink: GuestSink
     private let host: HostTCPBridge
     private let stack: SwiftStack
@@ -48,6 +50,7 @@ final class GatewaySwiftTCP: GatewayForwarder, @unchecked Sendable {
     private let ingest = OSAllocatedUnfairLock(initialState: IngestState())
     private let lock = OSAllocatedUnfairLock(initialState: ControlState())
     private let gateways = OSAllocatedUnfairLock(initialState: Set<UInt32>())
+    private let gateways6 = OSAllocatedUnfairLock(initialState: Set<IPv6Key>())
 
     private struct ControlState {
         var relays: [LocalRelay] = []
@@ -70,11 +73,13 @@ final class GatewaySwiftTCP: GatewayForwarder, @unchecked Sendable {
 
     init(
         onGuest: @escaping @Sendable (GuestIPv4Address, Data) -> Void,
+        onGuest6: @escaping @Sendable (GuestIPv6Address, Data) -> Void = { _, _ in },
         udpIdleTimeout: TimeInterval = 60
     ) {
         self.onGuest = onGuest
+        self.onGuest6 = onGuest6
         queue.setSpecific(key: Self.queueKey, value: 1)
-        let sink = GuestSink(onGuest: onGuest)
+        let sink = GuestSink(onGuest: onGuest, onGuest6: onGuest6)
         let host = HostTCPBridge()
         let idle = Duration.milliseconds(Int64((udpIdleTimeout * 1000).rounded(.up)))
         let stack = SwiftStack(
@@ -94,11 +99,15 @@ final class GatewaySwiftTCP: GatewayForwarder, @unchecked Sendable {
         self.sink = sink
         self.host = host
         self.stack = stack
-        self.icmp = GatewayICMP(onGuest: onGuest)
+        self.icmp = GatewayICMP(onGuest: onGuest, onGuest6: onGuest6)
     }
 
     func handleICMP(_ packet: Data) {
         icmp.ingest(packet)
+    }
+
+    func handleICMPv6(_ packet: Data) {
+        icmp.ingest6(packet)
     }
 
     deinit {
@@ -109,6 +118,10 @@ final class GatewaySwiftTCP: GatewayForwarder, @unchecked Sendable {
         gateways.withLock { $0 = ips }
     }
 
+    func setGateways6(_ ips: Set<IPv6Key>) {
+        gateways6.withLock { $0 = ips }
+    }
+
     func ingestIPv4(_ packet: Data) {
         if let header = IPv4Peek.tuple(packet),
             header.proto == Ethernet.protoTCP,
@@ -117,6 +130,18 @@ final class GatewaySwiftTCP: GatewayForwarder, @unchecked Sendable {
             !gateways.withLock({ $0.contains(header.dst) })
         {
             host.preconnect(Self.flow(header))
+        }
+        enqueueIngest(packet)
+    }
+
+    func ingestIPv6(_ packet: Data) {
+        if let header = IPv6Peek.tuple(packet),
+            header.nextHeader == Ethernet.protoTCP,
+            header.tcpFlags & ContainerEngine.TCPSegment.Flags.syn.rawValue != 0,
+            header.tcpFlags & ContainerEngine.TCPSegment.Flags.ack.rawValue == 0,
+            !gateways6.withLock({ $0.contains(header.dst) })
+        {
+            host.preconnect(Self.flow6(header))
         }
         enqueueIngest(packet)
     }
@@ -166,6 +191,44 @@ final class GatewaySwiftTCP: GatewayForwarder, @unchecked Sendable {
                 src: gatewayIP, dst: guestIP, payload: payload
             )
             self.onGuest(guestIP, packet.encode())
+            connection.cancel()
+        }
+        connection.start(queue: queue)
+    }
+
+    func forwardDNS6(
+        query: Data,
+        guestIP: GuestIPv6Address,
+        guestPort: UInt16,
+        gatewayIP: GuestIPv6Address,
+        upstreams: [String]
+    ) {
+        let server = upstreams.first ?? GatewayDNS.primaryUpstream
+        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(server), port: 53)
+        let connection = NWConnection(to: endpoint, using: .udp)
+        connection.stateUpdateHandler = { state in
+            if case .ready = state {
+                connection.send(content: query, completion: .contentProcessed { error in
+                    if error != nil { connection.cancel() }
+                })
+            }
+            if case .failed = state { connection.cancel() }
+        }
+        queue.asyncAfter(deadline: .now() + .seconds(5)) {
+            connection.cancel()
+        }
+        connection.receiveMessage { [weak self] data, _, _, _ in
+            guard let self, let data else { connection.cancel(); return }
+            let datagram = UDPDatagram(srcPort: 53, dstPort: guestPort, payload: data)
+            let payload = datagram.encode(src: gatewayIP, dst: guestIP)
+            let packet = IPv6Packet(
+                hopLimit: 64,
+                nextHeader: Ethernet.protoUDP,
+                src: gatewayIP,
+                dst: guestIP,
+                payload: payload
+            )
+            self.onGuest6(guestIP, packet.encode())
             connection.cancel()
         }
         connection.start(queue: queue)
@@ -465,6 +528,15 @@ extension GatewaySwiftTCP {
         )
     }
 
+    private static func flow6(_ header: IPv6Peek.Tuple) -> FlowKey {
+        FlowKey(
+            src: IPAddress(v6High: header.src.high, v6Low: header.src.low),
+            srcPort: header.srcPort,
+            dst: IPAddress(v6High: header.dst.high, v6Low: header.dst.low),
+            dstPort: header.dstPort
+        )
+    }
+
     private static func tcpParameters() -> NWParameters {
         let tcp = NWProtocolTCP.Options()
         tcp.noDelay = false
@@ -474,15 +546,32 @@ extension GatewaySwiftTCP {
 
 private final class GuestSink: PacketSink, @unchecked Sendable {
     let onGuest: @Sendable (GuestIPv4Address, Data) -> Void
+    let onGuest6: @Sendable (GuestIPv6Address, Data) -> Void
 
-    init(onGuest: @escaping @Sendable (GuestIPv4Address, Data) -> Void) {
+    init(
+        onGuest: @escaping @Sendable (GuestIPv4Address, Data) -> Void,
+        onGuest6: @escaping @Sendable (GuestIPv6Address, Data) -> Void
+    ) {
         self.onGuest = onGuest
+        self.onGuest6 = onGuest6
     }
 
     func write(bytes: Data, protocolFamily: UInt8) {
         _ = protocolFamily
-        guard bytes.count >= 20, bytes[0] >> 4 == 4 else { return }
-        onGuest(GuestIPv4Address(IPv4Peek.read32(bytes, 16)), bytes)
+        guard let first = bytes.first else { return }
+        switch first >> 4 {
+        case 4:
+            guard bytes.count >= 20 else { return }
+            onGuest(GuestIPv4Address(IPv4Peek.read32(bytes, 16)), bytes)
+        case 6:
+            guard bytes.count >= 40 else { return }
+            let dst = bytes.withUnsafeBytes { raw in
+                IPv6Key(high: IPv6Peek.read64(raw, 24), low: IPv6Peek.read64(raw, 32)).address
+            }
+            onGuest6(dst, bytes)
+        default:
+            break
+        }
     }
 }
 

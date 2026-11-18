@@ -153,7 +153,9 @@ extension EngineManager {
                     repoTags: Array(Set(tags)).sorted(),
                     repoDigests: Array(Set(repoDigests)).sorted(),
                     created: await Self.createdDate(of: primary),
-                    size: await Self.totalSize(of: primary)
+                    size: await Self.totalSize(of: primary),
+                    labels: await configLabels(of: primary),
+                    containers: containers.values.filter { $0.imageID == digest }.count
                 )
             )
         }
@@ -224,6 +226,8 @@ extension EngineManager {
             labels: config?.config?.labels ?? [:],
             layers: config?.rootfs.diffIDs ?? [],
             exposedPorts: await Self.exposedPorts(of: image, platform: platform),
+            volumes: await Self.volumePaths(of: image, platform: platform),
+            shell: await Self.shell(of: image, platform: platform),
             healthcheck: await Self.healthcheck(of: image, platform: platform)
         )
     }
@@ -244,27 +248,41 @@ extension EngineManager {
                     "conflict: unable to remove repository reference \"\(reference)\" (must force) - image is being used by a container"
                 )
             }
-            if siblings.count > 1 {
+            let named = siblings.filter { !Self.isDigestReference($0.reference) }
+            let byID = Self.isDigestReference(name) || Self.isDigestReference(reference)
+            if byID, named.count > 1 {
+                throw EngineError.conflict(
+                    "conflict: unable to delete \(digest) (must force) - image is referenced in multiple repositories"
+                )
+            }
+            if !byID, named.contains(where: { $0.reference != reference }) {
                 try await imageStore.delete(reference: reference, performCleanup: false)
                 await publishImage(action: "untag", digest: digest, name: reference)
                 return [EngineImageDeleteItem(untagged: reference, deleted: nil)]
             }
-            try await imageStore.delete(reference: reference, performCleanup: !noPrune)
+
+            // A digest reference retains content for containers, but is not a second tag.
+            for sibling in siblings {
+                try await imageStore.delete(reference: sibling.reference, performCleanup: false)
+            }
             if !noPrune {
+                _ = try await imageStore.cleanUpOrphanedBlobs()
                 dropUnpackedCache(digest: digest)
             }
-            await publishImage(action: "untag", digest: digest, name: reference)
+            var items: [EngineImageDeleteItem] = []
+            for tag in named.map(\.reference) {
+                items.append(EngineImageDeleteItem(untagged: tag, deleted: nil))
+                await publishImage(action: "untag", digest: digest, name: tag)
+            }
             await publishImage(action: "delete", digest: digest, name: reference)
-            return [
-                EngineImageDeleteItem(untagged: reference, deleted: nil),
-                EngineImageDeleteItem(untagged: nil, deleted: digest),
-            ]
+            items.append(EngineImageDeleteItem(untagged: nil, deleted: digest))
+            return items
         }
 
-        // Force: untag every stored reference of the digest. Layers (and the delete event)
-        // only go away when no container uses the image, mirroring Docker.
+        // Preserve the digest reference and its blobs while any container uses the image.
+        if inUse { try await retainImage(image) }
         var items: [EngineImageDeleteItem] = []
-        for sibling in siblings {
+        for sibling in siblings where !inUse || sibling.reference != digest {
             try? await imageStore.delete(reference: sibling.reference, performCleanup: false)
             items.append(EngineImageDeleteItem(untagged: sibling.reference, deleted: nil))
             await publishImage(action: "untag", digest: digest, name: sibling.reference)
@@ -278,6 +296,30 @@ extension EngineManager {
             await publishImage(action: "delete", digest: digest, name: reference)
         }
         return items
+    }
+
+    func retainImage(_ image: Containerization.Image) async throws {
+        if image.reference == image.digest { return }
+        _ = try await imageStore.create(description: .init(reference: image.digest, descriptor: image.descriptor))
+    }
+
+    func resolveContainerImage(_ container: EngineContainer) async throws -> Containerization.Image {
+        guard !container.imageID.isEmpty else { return try await resolveImage(container.image) }
+        let image = try await resolveImage(container.imageID)
+        guard image.digest == container.imageID else {
+            throw EngineError.imageNotFound("No such image: \(container.imageID)")
+        }
+        return image
+    }
+
+    /// Backfill digest references for stores created before images were retained at create time.
+    public func retainRestoredContainerImages() async throws {
+        let ids = Set(containers.values.map(\.imageID).filter { !$0.isEmpty })
+        let images = try await imageStore.list()
+        let retained = Set(images.filter { $0.reference == $0.digest }.map(\.digest))
+        for id in ids.subtracting(retained) {
+            if let image = images.first(where: { $0.digest == id }) { try await retainImage(image) }
+        }
     }
 
     func resolveImage(_ name: String) async throws -> Containerization.Image {
@@ -439,6 +481,26 @@ extension EngineManager {
             }
         }
         return ports
+    }
+
+    static func volumePaths(of image: Containerization.Image, platform: Platform) async -> [String] {
+        guard let blob = await Self.dockerConfigBlob(of: image, platform: platform) else { return [] }
+        return blob.config?.Volumes?.keys.sorted() ?? []
+    }
+
+    static func shell(of image: Containerization.Image, platform: Platform) async -> [String] {
+        guard let blob = await Self.dockerConfigBlob(of: image, platform: platform) else { return [] }
+        return blob.config?.Shell ?? []
+    }
+
+    private static func dockerConfigBlob(of image: Containerization.Image, platform: Platform) async -> ImageExposedPortsBlob? {
+        guard let manifest = try? await image.manifest(for: platform),
+            let content = try? await image.getContent(digest: manifest.config.digest),
+            let blob: ImageExposedPortsBlob = try? content.decode()
+        else {
+            return nil
+        }
+        return blob
     }
 
     /// Docker stores `Healthcheck` on the image config; OCI ImageConfig drops that field.
@@ -683,7 +745,7 @@ extension EngineManager {
 
     private func imageInUse(digest: String, members: [Containerization.Image]) -> Bool {
         containers.values.contains { container in
-            if !container.imageID.isEmpty, container.imageID == digest { return true }
+            if !container.imageID.isEmpty { return container.imageID == digest }
             guard !container.image.isEmpty else { return false }
             return members.contains { Self.matches($0, name: container.image) }
         }
@@ -895,6 +957,8 @@ private struct ImageExposedPortsBlob: Decodable {
 
     struct Config: Decodable {
         var ExposedPorts: [String: Empty]?
+        var Volumes: [String: Empty]?
+        var Shell: [String]?
         var Healthcheck: Healthcheck?
 
         struct Empty: Decodable {}
