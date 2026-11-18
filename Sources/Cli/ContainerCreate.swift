@@ -488,7 +488,20 @@ struct Create: ParsableCommand {
         if !options.device.isEmpty { host["Devices"] = options.device }
         if let gpus = options.gpus, !gpus.isEmpty { host["DeviceRequests"] = [gpus] }
         if !options.deviceCgroupRule.isEmpty { host["DeviceCgroupRules"] = options.deviceCgroupRule }
-        if !options.ulimit.isEmpty { host["Ulimits"] = options.ulimit }
+        if !options.ulimit.isEmpty {
+            host["Ulimits"] = try options.ulimit.map { raw -> [String: Any] in
+                let parts = raw.split(separator: "=", maxSplits: 1).map(String.init)
+                guard parts.count == 2, !parts[0].isEmpty else {
+                    throw CLIError.io("invalid --ulimit value \(raw)")
+                }
+                let limits = parts[1].split(separator: ":", maxSplits: 1).map(String.init)
+                guard let soft = Int64(limits[0]) else {
+                    throw CLIError.io("invalid --ulimit value \(raw)")
+                }
+                let hard = limits.count == 2 ? (Int64(limits[1]) ?? soft) : soft
+                return ["Name": parts[0], "Soft": soft, "Hard": hard]
+            }
+        }
         if let shm = options.shmSize { host["ShmSize"] = try DaemonAPI.parseBytes(shm) }
         if let logDriver = options.logDriver, !logDriver.isEmpty, logDriver != "json-file" {
             var config: [String: String] = [:]

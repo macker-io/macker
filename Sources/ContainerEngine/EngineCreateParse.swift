@@ -293,6 +293,18 @@ public struct EngineHealthState: Sendable, Codable, Equatable {
     }
 }
 
+public struct EngineUlimit: Sendable, Codable, Equatable {
+    public var name: String
+    public var soft: UInt64
+    public var hard: UInt64
+
+    public init(name: String, soft: UInt64, hard: UInt64) {
+        self.name = name
+        self.soft = soft
+        self.hard = hard
+    }
+}
+
 public struct EngineContainerRunConfig: Sendable, Codable, Equatable {
     public var extraHosts: [String]
     public var dns: [String]
@@ -308,6 +320,12 @@ public struct EngineContainerRunConfig: Sendable, Codable, Equatable {
     public var groupAdd: [String]
     public var publishAllPorts: Bool
     public var healthcheck: EngineHealthcheck?
+    public var initProcess: Bool
+    public var sysctls: [String: String]
+    public var capAdd: [String]
+    public var capDrop: [String]
+    public var securityOpt: [String]
+    public var ulimits: [EngineUlimit]
 
     public init(
         extraHosts: [String] = [],
@@ -323,7 +341,13 @@ public struct EngineContainerRunConfig: Sendable, Codable, Equatable {
         domainname: String = "",
         groupAdd: [String] = [],
         publishAllPorts: Bool = false,
-        healthcheck: EngineHealthcheck? = nil
+        healthcheck: EngineHealthcheck? = nil,
+        initProcess: Bool = false,
+        sysctls: [String: String] = [:],
+        capAdd: [String] = [],
+        capDrop: [String] = [],
+        securityOpt: [String] = [],
+        ulimits: [EngineUlimit] = []
     ) {
         self.extraHosts = extraHosts
         self.dns = dns
@@ -339,6 +363,36 @@ public struct EngineContainerRunConfig: Sendable, Codable, Equatable {
         self.groupAdd = groupAdd
         self.publishAllPorts = publishAllPorts
         self.healthcheck = healthcheck
+        self.initProcess = initProcess
+        self.sysctls = sysctls
+        self.capAdd = capAdd
+        self.capDrop = capDrop
+        self.securityOpt = securityOpt
+        self.ulimits = ulimits
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        extraHosts = try c.decodeIfPresent([String].self, forKey: .extraHosts) ?? []
+        dns = try c.decodeIfPresent([String].self, forKey: .dns) ?? []
+        dnsSearch = try c.decodeIfPresent([String].self, forKey: .dnsSearch) ?? []
+        dnsOptions = try c.decodeIfPresent([String].self, forKey: .dnsOptions) ?? []
+        restartPolicy = try c.decodeIfPresent(EngineRestartPolicy.self, forKey: .restartPolicy) ?? .none
+        restartCount = try c.decodeIfPresent(Int.self, forKey: .restartCount) ?? 0
+        stopSignal = try c.decodeIfPresent(String.self, forKey: .stopSignal) ?? ""
+        stopTimeout = try c.decodeIfPresent(Int.self, forKey: .stopTimeout) ?? 0
+        privileged = try c.decodeIfPresent(Bool.self, forKey: .privileged) ?? false
+        readonlyRootfs = try c.decodeIfPresent(Bool.self, forKey: .readonlyRootfs) ?? false
+        domainname = try c.decodeIfPresent(String.self, forKey: .domainname) ?? ""
+        groupAdd = try c.decodeIfPresent([String].self, forKey: .groupAdd) ?? []
+        publishAllPorts = try c.decodeIfPresent(Bool.self, forKey: .publishAllPorts) ?? false
+        healthcheck = try c.decodeIfPresent(EngineHealthcheck.self, forKey: .healthcheck)
+        initProcess = try c.decodeIfPresent(Bool.self, forKey: .initProcess) ?? false
+        sysctls = try c.decodeIfPresent([String: String].self, forKey: .sysctls) ?? [:]
+        capAdd = try c.decodeIfPresent([String].self, forKey: .capAdd) ?? []
+        capDrop = try c.decodeIfPresent([String].self, forKey: .capDrop) ?? []
+        securityOpt = try c.decodeIfPresent([String].self, forKey: .securityOpt) ?? []
+        ulimits = try c.decodeIfPresent([EngineUlimit].self, forKey: .ulimits) ?? []
     }
 }
 

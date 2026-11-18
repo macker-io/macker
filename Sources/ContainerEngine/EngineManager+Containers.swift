@@ -155,7 +155,13 @@ extension EngineManager {
                 domainname: spec.domainname,
                 groupAdd: spec.groupAdd,
                 publishAllPorts: spec.publishAllPorts,
-                healthcheck: EngineHealthcheck.inherit(spec.healthcheck, image: image.healthcheck)
+                healthcheck: EngineHealthcheck.inherit(spec.healthcheck, image: image.healthcheck),
+                initProcess: spec.initProcess,
+                sysctls: spec.sysctls,
+                capAdd: spec.capAdd,
+                capDrop: spec.capDrop,
+                securityOpt: spec.securityOpt,
+                ulimits: spec.ulimits
             )
         )
         try persistContainer(record)

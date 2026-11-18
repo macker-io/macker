@@ -1,5 +1,6 @@
 import Containerization
 import ContainerizationOCI
+import ContainerizationOS
 import Foundation
 
 extension EngineManager {
@@ -88,6 +89,28 @@ extension EngineManager {
                 config.hostname = prepared.hostname
                 config.cpus = Self.cpuCount(nanoCpus: prepared.nanoCpus)
                 config.memoryInBytes = prepared.memory > 0 ? UInt64(prepared.memory) : Self.defaultMemoryBytes
+                config.useInit = prepared.run.initProcess
+                if !prepared.run.sysctls.isEmpty {
+                    config.sysctl = prepared.run.sysctls
+                }
+                if prepared.run.privileged {
+                    config.process.capabilities = .allCapabilities
+                    config.maskedPaths = []
+                    config.readonlyPaths = []
+                }
+                Self.applyCapabilities(
+                    &config.process.capabilities,
+                    add: prepared.run.capAdd,
+                    drop: prepared.run.capDrop
+                )
+                if prepared.run.securityOpt.contains(where: { opt in
+                    opt == "no-new-privileges" || opt == "no-new-privileges:true" || opt == "no-new-privileges=true"
+                }) {
+                    config.process.noNewPrivileges = true
+                }
+                if !prepared.run.ulimits.isEmpty {
+                    config.process.rlimits = Self.rlimits(prepared.run.ulimits)
+                }
                 for mount in prepared.mounts where !mount.source.isEmpty && !mount.destination.isEmpty {
                     var options: [String] = []
                     if !mount.rw {
@@ -278,5 +301,63 @@ extension EngineManager {
     private static func cpuCount(nanoCpus: Int64) -> Int {
         guard nanoCpus > 0 else { return 2 }
         return max(1, Int((nanoCpus + 500_000_000) / 1_000_000_000))
+    }
+
+    static func applyCapabilities(_ caps: inout Containerization.LinuxCapabilities, add: [String], drop: [String]) {
+        func parse(_ raw: String) -> [CapabilityName] {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            if trimmed == "ALL" || trimmed == "CAP_ALL" {
+                return CapabilityName.allCases
+            }
+            let normalized = trimmed.hasPrefix("CAP_") ? trimmed : "CAP_\(trimmed)"
+            if let cap = try? CapabilityName(rawValue: normalized) {
+                return [cap]
+            }
+            return []
+        }
+
+        for item in drop {
+            let removed = Set(parse(item))
+            guard !removed.isEmpty else { continue }
+            caps.bounding.removeAll { removed.contains($0) }
+            caps.effective.removeAll { removed.contains($0) }
+            caps.inheritable.removeAll { removed.contains($0) }
+            caps.permitted.removeAll { removed.contains($0) }
+            caps.ambient.removeAll { removed.contains($0) }
+        }
+        for item in add {
+            for cap in parse(item) {
+                if !caps.bounding.contains(cap) { caps.bounding.append(cap) }
+                if !caps.effective.contains(cap) { caps.effective.append(cap) }
+                if !caps.permitted.contains(cap) { caps.permitted.append(cap) }
+            }
+        }
+    }
+
+    static func rlimits(_ items: [EngineUlimit]) -> [LinuxRLimit] {
+        let map: [String: String] = [
+            "as": "RLIMIT_AS",
+            "core": "RLIMIT_CORE",
+            "cpu": "RLIMIT_CPU",
+            "data": "RLIMIT_DATA",
+            "fsize": "RLIMIT_FSIZE",
+            "locks": "RLIMIT_LOCKS",
+            "memlock": "RLIMIT_MEMLOCK",
+            "msgqueue": "RLIMIT_MSGQUEUE",
+            "nice": "RLIMIT_NICE",
+            "nofile": "RLIMIT_NOFILE",
+            "nproc": "RLIMIT_NPROC",
+            "rss": "RLIMIT_RSS",
+            "rtprio": "RLIMIT_RTPRIO",
+            "rttime": "RLIMIT_RTTIME",
+            "sigpending": "RLIMIT_SIGPENDING",
+            "stack": "RLIMIT_STACK",
+        ]
+        return items.compactMap { item in
+            let lower = item.name.lowercased()
+            let key = map[lower] ?? (lower.hasPrefix("rlimit_") ? item.name.uppercased() : "RLIMIT_\(item.name.uppercased())")
+            guard let kind = try? LinuxRLimit.Kind(key) else { return nil }
+            return LinuxRLimit(kind: kind, hard: item.hard, soft: item.soft)
+        }
     }
 }

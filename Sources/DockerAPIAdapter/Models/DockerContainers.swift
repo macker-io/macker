@@ -181,10 +181,22 @@ public struct DockerCreateContainerRequest: Decodable, Sendable {
         public let VolumesFrom: [String]?
         public let Tmpfs: [String: String]?
         public let VolumeDriver: String?
+        public let Init: Bool?
+        public let Sysctls: [String: String]?
+        public let CapAdd: [String]?
+        public let CapDrop: [String]?
+        public let SecurityOpt: [String]?
+        public let Ulimits: [Ulimit]?
 
         public struct RestartPolicy: Decodable, Sendable {
             public let Name: String?
             public let MaximumRetryCount: Int?
+        }
+
+        public struct Ulimit: Decodable, Sendable {
+            public let Name: String
+            public let Soft: Int64?
+            public let Hard: Int64?
         }
     }
 

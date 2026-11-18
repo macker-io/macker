@@ -22,6 +22,7 @@ extension Router {
         "Memory", "NanoCpus", "AutoRemove", "NetworkMode", "Binds", "Mounts", "PortBindings",
         "PublishAllPorts", "Dns", "DnsSearch", "DnsOptions", "ExtraHosts", "RestartPolicy",
         "StopSignal", "StopTimeout", "VolumesFrom", "VolumeDriver",
+        "Init", "Sysctls", "CapAdd", "CapDrop", "Ulimits",
     ]
 
     private static func hostConfigWarnings(_ host: [String: Any]) -> [String] {
@@ -31,9 +32,6 @@ extension Router {
             warn("\(key) is not supported on this runtime and was ignored")
         }
 
-        if bool(host["Privileged"]) {
-            warn("Privileged is recorded on inspect but does not change the MicroVM guest")
-        }
         if bool(host["ReadonlyRootfs"]) {
             warn("ReadonlyRootfs is recorded on inspect but the guest rootfs is not mounted read-only")
         }
@@ -43,8 +41,10 @@ extension Router {
         if isSet(host["Tmpfs"]) {
             warn("Tmpfs is a host directory plus virtiofs, not a kernel tmpfs")
         }
-        if bool(host["Init"]) {
-            ignored("Init")
+        if let opts = host["SecurityOpt"] as? [String],
+            opts.contains(where: { !$0.hasPrefix("no-new-privileges") })
+        {
+            ignored("SecurityOpt")
         }
         if let log = host["LogConfig"] as? [String: Any] {
             let type = (log["Type"] as? String)?.lowercased() ?? ""
@@ -68,7 +68,7 @@ extension Router {
         }
 
         let specific: Set<String> = [
-            "Privileged", "ReadonlyRootfs", "GroupAdd", "Tmpfs", "Init", "LogConfig",
+            "Privileged", "ReadonlyRootfs", "GroupAdd", "Tmpfs", "SecurityOpt", "LogConfig",
             "PidMode", "IpcMode", "UTSMode", "CgroupnsMode", "UsernsMode", "Isolation", "Runtime",
             "ConsoleSize", "ShmSize",
         ]

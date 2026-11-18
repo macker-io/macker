@@ -89,6 +89,12 @@ public struct EngineContainerCreateSpec: Sendable {
     public var publishAllPorts: Bool
     public var volumesFrom: [String]
     public var healthcheck: EngineHealthcheck?
+    public var initProcess: Bool
+    public var sysctls: [String: String]
+    public var capAdd: [String]
+    public var capDrop: [String]
+    public var securityOpt: [String]
+    public var ulimits: [EngineUlimit]
 
     public init(
         name: String? = nil,
@@ -123,7 +129,13 @@ public struct EngineContainerCreateSpec: Sendable {
         groupAdd: [String] = [],
         publishAllPorts: Bool = false,
         volumesFrom: [String] = [],
-        healthcheck: EngineHealthcheck? = nil
+        healthcheck: EngineHealthcheck? = nil,
+        initProcess: Bool = false,
+        sysctls: [String: String] = [:],
+        capAdd: [String] = [],
+        capDrop: [String] = [],
+        securityOpt: [String] = [],
+        ulimits: [EngineUlimit] = []
     ) {
         self.name = name
         self.image = image
@@ -158,6 +170,12 @@ public struct EngineContainerCreateSpec: Sendable {
         self.publishAllPorts = publishAllPorts
         self.volumesFrom = volumesFrom
         self.healthcheck = healthcheck
+        self.initProcess = initProcess
+        self.sysctls = sysctls
+        self.capAdd = capAdd
+        self.capDrop = capDrop
+        self.securityOpt = securityOpt
+        self.ulimits = ulimits
     }
 }
 

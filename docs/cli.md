@@ -35,11 +35,12 @@ CLI options are wired. `--hostname` (`-h` on `run` / `create`) sets the containe
 | `--dns`                                                                                     | Guest still queries the gateway so container names resolve; recursion uses these servers                   |
 | `--mac-address`                                                                             | Stored on the endpoint; virtio-net overwrites it at start                                                  |
 | `--link-local-ip`                                                                           | Stored on the endpoint; unused by the dataplane                                                            |
-| `--privileged`, `--read-only`, `--init`, `--group-add`                                      | Visible on inspect (`--init` is not); guest config is unchanged                                            |
+| `--privileged`, `--read-only`, `--group-add`                                               | `--privileged` grants all Linux capabilities and drops masked/readonly paths inside the MicroVM; `--read-only` / `--group-add` are inspect-only |
+| `--init`, `--cap-add`, `--cap-drop`, `--sysctl`, `--ulimit`, `--security-opt no-new-privileges` | Applied to the MicroVM container config at start |
 | healthcheck                                                                                 | Probed while running; `ps` shows `(healthy)` / `(unhealthy)` / `(health: starting)`                        |
 | `--restart`                                                                                 | `always` / `unless-stopped` also start after daemon restart (`unless-stopped` skips a prior `stop`)        |
 | `--cpus`                                                                                    | Rounded from NanoCpus to a vCPU count                                                                      |
-| Resource / cap / device / log / ulimit / sysctl / cgroup / namespaces other than `--memory` | Sent to the API and returned as create warnings; the guest is unchanged                                   |
+| Device / log / cgroup / namespaces / `--shm-size` / other resources                         | Sent to the API and returned as create warnings; the guest is unchanged                                   |
 | `--tmpfs`                                                                                   | Host directory + virtiofs, not a kernel tmpfs                                                              |
 | Windows: `--cpu-count`, `--cpu-percent`, `--io-maxbandwidth`, `--io-maxiops`                | Not implemented                                                                                            |
 
@@ -49,7 +50,7 @@ CLI options are wired. `--hostname` (`-h` on `run` / `create`) sets the containe
 
 ### `ps` / `container ls`
 
-`-s` SIZE is the guest disk image file size (`SizeRw` and `SizeRootFs` are the same). No `health` / `isolation` / `is-task` filters.
+`-s` SIZE is the guest disk image file size (`SizeRw` and `SizeRootFs` are the same). Supports `--filter health=`. No `isolation` / `is-task` filters.
 
 ### `rm` / `container rm`
 

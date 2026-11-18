@@ -5,9 +5,12 @@ import Testing
 
 struct RouterContractAPITests {
     @Test func createWarnsWhenHostConfigIsNotApplied() {
-        let body = Data(#"{"Image":"alpine","HostConfig":{"CapAdd":["SYS_ADMIN"],"Memory":0}}"#.utf8)
+        let body = Data(#"{"Image":"alpine","HostConfig":{"CapAdd":["NET_ADMIN"],"Init":true,"Sysctls":{"net.ipv4.ip_forward":"1"},"ShmSize":67108864,"Memory":0}}"#.utf8)
         let warnings = Router.unsupportedCreateWarnings(body)
-        #expect(warnings.contains { $0.contains("CapAdd") })
+        #expect(warnings.contains { $0.contains("ShmSize") })
+        #expect(!warnings.contains { $0.contains("CapAdd") })
+        #expect(!warnings.contains { $0.contains("Init") })
+        #expect(!warnings.contains { $0.contains("Sysctls") })
         #expect(!warnings.contains { $0.contains("Memory") })
     }
 

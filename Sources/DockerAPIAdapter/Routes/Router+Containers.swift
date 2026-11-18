@@ -240,6 +240,17 @@ extension Router {
                         startIntervalNanos: $0.StartInterval ?? 0,
                         retries: $0.Retries ?? 0
                     )
+                },
+                initProcess: body.HostConfig?.Init ?? false,
+                sysctls: body.HostConfig?.Sysctls ?? [:],
+                capAdd: body.HostConfig?.CapAdd ?? [],
+                capDrop: body.HostConfig?.CapDrop ?? [],
+                securityOpt: body.HostConfig?.SecurityOpt ?? [],
+                ulimits: (body.HostConfig?.Ulimits ?? []).compactMap { item in
+                    let soft = UInt64(max(item.Soft ?? 0, 0))
+                    let hard = UInt64(max(item.Hard ?? item.Soft ?? 0, 0))
+                    guard !item.Name.isEmpty else { return nil }
+                    return EngineUlimit(name: item.Name, soft: soft, hard: hard)
                 }
             )
             if let driver = body.HostConfig?.VolumeDriver, !driver.isEmpty, driver != "local" {
