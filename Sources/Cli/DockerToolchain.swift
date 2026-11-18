@@ -197,7 +197,7 @@ struct DockerToolchainProbe {
     }
 }
 
-/// The `macker` Docker context state machine (compose-integration-plan §13).
+/// Manages the `macker` Docker context without changing the active context.
 enum DockerContextPlan: Equatable {
     case create
     case keep

@@ -6,17 +6,17 @@ Not compared: Macker-only commands (`setup`, `fetch-runtime`, `doctor`, `status`
 
 ## Official `docker` CLI and Compose
 
-The daemon serves the official `docker` CLI (tested: 29.8.2) and `docker compose` plugin (tested: 5.5.0) as a drop-in engine. Register it once as a Docker context and select it per command or as the active context:
+The official `docker compose` plugin reads your `compose.yaml` and manages the project; Macker runs the containers through the Docker Engine API. Tested with Docker CLI 29.8.2 and Compose 5.5.0. To use Macker for one project without changing your active Docker context:
 
 ```bash
 macker setup                         # creates the `macker` context; never switches the active one
-docker --context macker run --rm alpine echo hi
-docker context use macker            # optional: make it the default for this user
-docker compose up -d                 # uses the active context
+docker --context macker compose up -d
+docker --context macker compose ps
+docker --context macker compose down
 macker doctor                        # docker CLI, compose plugin, context, socket, API version
 ```
 
-`DOCKER_HOST=unix://…/macker.sock` works too. `scripts/compat/run.sh` (suites `cli cli2 compose compose2 build setup`) is the acceptance suite.
+To make Macker your default, run `docker context use macker`. `DOCKER_HOST=unix://…/macker.sock` also works. See [Compose compatibility testing](develop.md#compose-compatibility-testing) for the acceptance suite and what CI verifies.
 
 - API versions: `/v1.24` … `/v1.44` path prefixes and unversioned paths (served as 1.44) are accepted; anything newer gets Docker's `client version … is too new` 400, older gets `… is too old`. Version-dependent shapes are honored where they differ in that range (`volumes/prune` defaults to anonymous-only from 1.42; non-TTY attach/exec/logs report `application/vnd.docker.multiplexed-stream` from 1.42).
 - `version` / `info` report the container platform (`linux` / `arm64`, `aarch64`), not the Mac.

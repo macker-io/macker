@@ -74,6 +74,25 @@ Debug builds report version `0.0.0`. Pass `VERSION=` (or `MACKER_VERSION=`) when
 
 CLI prefix layout (`docs/packaging.md`): `bin/macker` + `bin/mackerd` are exec wrappers around `libexec/macker/` (binaries + SwiftPM `*.bundle`). Guest kernel/initfs live in `share/macker/runtime/`. Preview users install that tarball with `scripts/install.sh`, not Homebrew.
 
+## Compose compatibility testing
+
+[PR CI](../.github/workflows/test.yml) runs `make test`. It does not run the official Docker CLI or boot a MicroVM. To test Compose against a signed local daemon, install the [tested client versions](cli.md#official-docker-cli-and-compose) and run from the repo root:
+
+```bash
+make app macker fetch-runtime
+ONLY=compose_basic scripts/compat/run.sh compose  # one project: up, exec, logs, down
+scripts/compat/run.sh compose compose2            # both Compose runtime suites
+```
+
+The [harness](../scripts/compat/run.sh) uses the clients on `PATH` and prints their versions. It resets containers, networks, and volumes in its test store; use a dedicated `COMPAT_STORE`, never a product store. Other suites cover the Docker CLI, builds, and context setup.
+
+**Remaining CI work:**
+
+- [ ] Pin the Docker CLI and Compose plugin versions; verify artifact checksums and assert the versions before running tests.
+- [ ] Pin fixture images by arm64 digest so a tag update cannot change the workload under test.
+- [ ] Require official-client contract tests and signed MicroVM runtime tests in CI. Disable host-route changes for these jobs; test helper/utun behavior separately on a dedicated runner.
+- [ ] Run a non-blocking job against the latest clients to detect compatibility changes.
+
 ## Scripts (`scripts/`)
 
 Make targets call these.
