@@ -307,7 +307,8 @@ struct Run: ParsableCommand {
 
     func run() throws {
         try Create.rejectRestartWithAutoRemove(restart: options.restart, autoRemove: rm)
-        let id = try Create.submit(options, autoRemove: rm && detach)
+        // Like `docker run`: an attached `-i` session owns stdin, so its EOF closes it.
+        let id = try Create.submit(options, autoRemove: rm && detach, stdinOnce: options.interactive && !detach)
         if let cidfile = options.cidfile, !cidfile.isEmpty {
             try id.write(toFile: cidfile, atomically: true, encoding: .utf8)
         }
@@ -378,8 +379,8 @@ struct Create: ParsableCommand {
         var body: Data
     }
 
-    static func submit(_ options: ContainerCreateOptions, autoRemove: Bool) throws -> String {
-        let encoded = try encodeRequest(options, autoRemove: autoRemove)
+    static func submit(_ options: ContainerCreateOptions, autoRemove: Bool, stdinOnce: Bool = false) throws -> String {
+        let encoded = try encodeRequest(options, autoRemove: autoRemove, stdinOnce: stdinOnce)
         try Self.pullIfNeeded(options)
         let created: CreateResponse
         if let existing = try Self.create(path: encoded.path, payload: encoded.body) {
@@ -402,7 +403,7 @@ struct Create: ParsableCommand {
         return created.Id
     }
 
-    static func encodeRequest(_ options: ContainerCreateOptions, autoRemove: Bool) throws -> EncodedRequest {
+    static func encodeRequest(_ options: ContainerCreateOptions, autoRemove: Bool, stdinOnce: Bool = false) throws -> EncodedRequest {
         try rejectRestartWithAutoRemove(restart: options.restart, autoRemove: autoRemove)
         if let ip6 = options.ip6, !ip6.isEmpty {
             throw CLIError.io("IPv6 is not implemented")
@@ -436,13 +437,13 @@ struct Create: ParsableCommand {
             DnsOptions: options.dnsOption.isEmpty ? nil : options.dnsOption,
             ExtraHosts: options.addHost.isEmpty ? nil : options.addHost,
             RestartPolicy: restart.name == "no" ? nil : .init(Name: restart.name, MaximumRetryCount: restart.maximumRetryCount),
-            StopSignal: options.stopSignal,
-            StopTimeout: options.stopTimeout,
-            GroupAdd: options.groupAdd.isEmpty ? nil : options.groupAdd
+            GroupAdd: options.groupAdd.isEmpty ? nil : options.groupAdd,
+            Init: options.`init` ? true : nil
         )
         if let memory = options.memory {
             host.Memory = try DaemonAPI.parseBytes(memory)
         }
+        try Self.forwardUnsupported(options, into: &host)
         var exposed: [String: CreateBody.Empty] = [:]
         for spec in options.expose {
             let binding = try EnginePortBinding.parseExposed(spec)
@@ -460,8 +461,11 @@ struct Create: ParsableCommand {
             Labels: labels.isEmpty ? nil : labels,
             Tty: options.tty ? true : nil,
             OpenStdin: options.interactive ? true : nil,
+            StdinOnce: stdinOnce ? true : nil,
             ExposedPorts: exposed.isEmpty ? nil : exposed,
             Healthcheck: try Self.healthcheck(options),
+            StopSignal: options.stopSignal,
+            StopTimeout: options.stopTimeout,
             HostConfig: host,
             NetworkingConfig: networks.endpoints.isEmpty ? nil : .init(EndpointsConfig: networks.endpoints)
         )
@@ -470,6 +474,64 @@ struct Create: ParsableCommand {
             path += "?name=\(DaemonAPI.query(name))"
         }
         return EncodedRequest(path: path, body: try JSONEncoder().encode(body))
+    }
+
+    /// Options the daemon cannot honor are still sent, so it rejects them with one clear
+    /// error instead of the CLI dropping them silently.
+    private static func forwardUnsupported(_ options: ContainerCreateOptions, into host: inout CreateBody.HostConfig) throws {
+        func nonEmpty(_ values: [String]) -> [String]? { values.isEmpty ? nil : values }
+        func keyValues(_ values: [String]) -> [String: String]? {
+            guard !values.isEmpty else { return nil }
+            var map: [String: String] = [:]
+            for item in values {
+                let parts = item.split(separator: "=", maxSplits: 1).map(String.init)
+                map[parts[0]] = parts.count == 2 ? parts[1] : ""
+            }
+            return map
+        }
+        func devices(_ values: [String]) -> [[String: String]]? {
+            values.isEmpty ? nil : values.map { ["Path": $0] }
+        }
+        host.Privileged = options.privileged ? true : nil
+        host.CapAdd = nonEmpty(options.capAdd)
+        host.CapDrop = nonEmpty(options.capDrop)
+        host.SecurityOpt = nonEmpty(options.securityOpt)
+        host.PidMode = options.pid
+        host.IpcMode = options.ipc
+        host.UTSMode = options.uts
+        host.UsernsMode = options.userns
+        host.CgroupnsMode = options.cgroupns
+        host.CgroupParent = options.cgroupParent
+        host.Isolation = options.isolation
+        host.Runtime = options.runtime
+        host.Devices = options.device.isEmpty ? nil : options.device.map { ["PathOnHost": $0] }
+        host.DeviceRequests = options.gpus.map { [["Driver": "", "Options": $0]] }
+        host.DeviceCgroupRules = nonEmpty(options.deviceCgroupRule)
+        host.Sysctls = keyValues(options.sysctl)
+        host.StorageOpt = keyValues(options.storageOpt)
+        host.Annotations = keyValues(options.annotation)
+        host.Ulimits = options.ulimit.isEmpty ? nil : options.ulimit.map { ["Name": $0] }
+        host.OomKillDisable = options.oomKillDisable ? true : nil
+        host.OomScoreAdj = options.oomScoreAdj
+        host.PidsLimit = options.pidsLimit
+        host.ShmSize = try options.shmSize.map(DaemonAPI.parseBytes)
+        host.CpuShares = options.cpuShares
+        host.CpuPeriod = options.cpuPeriod
+        host.CpuQuota = options.cpuQuota
+        host.CpusetCpus = options.cpusetCpus
+        host.CpusetMems = options.cpusetMems
+        host.MemoryReservation = try options.memoryReservation.map(DaemonAPI.parseBytes)
+        host.MemorySwap = try options.memorySwap.map { $0 == "-1" ? -1 : try DaemonAPI.parseBytes($0) }
+        host.MemorySwappiness = options.memorySwappiness
+        host.BlkioWeight = options.blkioWeight.map(Int64.init)
+        host.BlkioWeightDevice = devices(options.blkioWeightDevice)
+        host.BlkioDeviceReadBps = devices(options.deviceReadBps)
+        host.BlkioDeviceWriteBps = devices(options.deviceWriteBps)
+        host.BlkioDeviceReadIOps = devices(options.deviceReadIops)
+        host.BlkioDeviceWriteIOps = devices(options.deviceWriteIops)
+        if options.logDriver != nil || !options.logOpt.isEmpty {
+            host.LogConfig = .init(Type: options.logDriver ?? "", Config: keyValues(options.logOpt))
+        }
     }
 
     private static func validatePull(_ pull: String?) throws {
@@ -600,8 +662,11 @@ private struct CreateBody: Encodable {
     var Labels: [String: String]?
     var Tty: Bool?
     var OpenStdin: Bool?
+    var StdinOnce: Bool?
     var ExposedPorts: [String: Empty]?
     var Healthcheck: Healthcheck?
+    var StopSignal: String?
+    var StopTimeout: Int?
     var HostConfig: HostConfig?
     var NetworkingConfig: NetworkingConfig?
 
@@ -635,9 +700,50 @@ private struct CreateBody: Encodable {
         var DnsOptions: [String]?
         var ExtraHosts: [String]?
         var RestartPolicy: RestartPolicy?
-        var StopSignal: String?
-        var StopTimeout: Int?
         var GroupAdd: [String]?
+        var Init: Bool?
+        var CapAdd: [String]?
+        var CapDrop: [String]?
+        var SecurityOpt: [String]?
+        var PidMode: String?
+        var IpcMode: String?
+        var UTSMode: String?
+        var UsernsMode: String?
+        var CgroupnsMode: String?
+        var CgroupParent: String?
+        var Isolation: String?
+        var Runtime: String?
+        var Devices: [[String: String]]?
+        var DeviceRequests: [[String: String]]?
+        var DeviceCgroupRules: [String]?
+        var Sysctls: [String: String]?
+        var StorageOpt: [String: String]?
+        var Annotations: [String: String]?
+        var Ulimits: [[String: String]]?
+        var OomKillDisable: Bool?
+        var OomScoreAdj: Int?
+        var PidsLimit: Int64?
+        var ShmSize: Int64?
+        var CpuShares: Int64?
+        var CpuPeriod: Int64?
+        var CpuQuota: Int64?
+        var CpusetCpus: String?
+        var CpusetMems: String?
+        var MemoryReservation: Int64?
+        var MemorySwap: Int64?
+        var MemorySwappiness: Int64?
+        var BlkioWeight: Int64?
+        var BlkioWeightDevice: [[String: String]]?
+        var BlkioDeviceReadBps: [[String: String]]?
+        var BlkioDeviceWriteBps: [[String: String]]?
+        var BlkioDeviceReadIOps: [[String: String]]?
+        var BlkioDeviceWriteIOps: [[String: String]]?
+        var LogConfig: LogConfig?
+    }
+
+    struct LogConfig: Encodable {
+        var `Type`: String
+        var Config: [String: String]?
     }
 
     struct RestartPolicy: Encodable {

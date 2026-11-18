@@ -31,6 +31,10 @@ extension EngineManager {
         let image = try await resolveImage(record.image)
         var manager = try await ensureManager()
         await reclaimContainerRuntime(record.id)
+        // tmpfs mounts live in the runtime directory just reset: recreate them empty.
+        for mount in record.mounts where mount.type == "tmpfs" && !mount.source.isEmpty {
+            try FileManager.default.createDirectory(atPath: mount.source, withIntermediateDirectories: true)
+        }
 
         let stdoutSink = ProcessLogSink(hopping: { [id = record.id] data in
             await self.appendOutput(id: id, data: data, stdout: true)
@@ -38,7 +42,10 @@ extension EngineManager {
         let stderrSink = ProcessLogSink(hopping: { [id = record.id] data in
             await self.appendOutput(id: id, data: data, stdout: false)
         })
-        let stdinPipe = (record.openStdin || record.tty) ? ProcessStdin() : nil
+        // An attached client may already have written (or closed) stdin before `start`.
+        let stdinPipe = (record.openStdin || record.tty) ? (containerStdin[record.id] ?? ProcessStdin()) : nil
+        containerStdin[record.id] = stdinPipe
+        outputSinks[record.id] = [stdoutSink, stderrSink]
 
         var prepared = record
         let interfaces: [any Interface]
@@ -57,7 +64,10 @@ extension EngineManager {
         do {
             // Attach virtio-net ourselves. ContainerManager's single `network:` cannot
             // express none / host / multiple networks.
-            let rootfs = try await prepareRootfs(id: record.id, image: image)
+            var rootfs = try await prepareRootfs(id: record.id, image: image)
+            if prepared.run.readonlyRootfs {
+                rootfs.options.append("ro")
+            }
             let created = try await manager.create(
                 record.id,
                 image: image,
@@ -78,6 +88,13 @@ extension EngineManager {
                     config.process.user = .init(username: prepared.user)
                 }
                 config.process.terminal = prepared.tty
+                config.process.capabilities = .init(capabilities: Self.containerCapabilities(prepared))
+                if prepared.run.privileged {
+                    // Privileged inside the guest kernel only: nothing is masked or read-only.
+                    config.maskedPaths = []
+                    config.readonlyPaths = []
+                }
+                config.useInit = prepared.run.useInit == true
                 if let stdinPipe {
                     config.process.stdin = stdinPipe
                 }
@@ -86,12 +103,26 @@ extension EngineManager {
                     config.process.stderr = stderrSink
                 }
                 config.hostname = prepared.hostname
+                // An explicit limit sizes the whole MicroVM, so the guest's nproc and
+                // MemTotal match what was asked for (no hidden agent headroom).
                 config.cpus = Self.cpuCount(nanoCpus: prepared.nanoCpus)
+                if prepared.nanoCpus > 0 {
+                    config.cpuOverhead = 0
+                }
                 config.memoryInBytes = prepared.memory > 0 ? UInt64(prepared.memory) : Self.defaultMemoryBytes
+                if prepared.memory > 0 {
+                    config.memoryOverhead = 0
+                }
                 for mount in prepared.mounts where !mount.source.isEmpty && !mount.destination.isEmpty {
                     var options: [String] = []
                     if !mount.rw {
                         options.append("ro")
+                    }
+                    if mount.type == EngineMount.blockType {
+                        // A Linux filesystem image attached as a disk (overlay-capable,
+                        // unlike virtiofs); only one running VM may use it at a time.
+                        config.mounts.append(.block(format: "ext4", source: mount.source, destination: mount.destination, options: options))
+                        continue
                     }
                     config.mounts.append(.share(source: mount.source, destination: mount.destination, options: options))
                 }
@@ -105,11 +136,20 @@ extension EngineManager {
             containerManager = manager
             snapshotBaseline(record.id)
             try await created.create()
+            try await applyPendingArchives(record.id, to: created)
             try await created.start()
         } catch {
             try? await linux?.stop()
             vms[record.id] = nil
+            await drainOutput(record.id)
+            containerStdin[record.id] = nil
             await reclaimContainerRuntime(record.id)
+            if error.localizedDescription.contains("failed to find target executable") {
+                // Docker's wording; clients map "executable file not found" to exit 127.
+                throw EngineError.runtimeUnavailable(
+                    "failed to create task for container: " + Self.describeExecFailure(error, command: prepared.command)
+                )
+            }
             throw EngineError.runtimeUnavailable("failed to start MicroVM: \(error.localizedDescription)")
         }
 
@@ -118,9 +158,6 @@ extension EngineManager {
             throw EngineError.runtimeUnavailable("failed to start MicroVM")
         }
         vms[record.id] = linux
-        if let stdinPipe {
-            containerStdin[record.id] = stdinPipe
-        }
         recordGuestNics(prepared)
         do {
             try await applySecondaryBridgeAddresses(containers[record.id] ?? prepared)
@@ -157,21 +194,45 @@ extension EngineManager {
         }
     }
 
-    func stopVM(_ id: String, timeoutSeconds: Int, signal: Signal = .term) async {
-        guard let linux = vms[id] else { return }
+    /// Sends `signal`, escalates to SIGKILL after `timeoutSeconds`, tears the VM down, and
+    /// returns the process exit code (128+n for a signal death; 137 if it never reported).
+    @discardableResult
+    func stopVM(_ id: String, timeoutSeconds: Int, signal: Signal = .term) async -> Int {
+        guard let linux = vms[id] else { return 128 + Int(signal.rawValue) }
         waitTasks[id]?.cancel()
         waitTasks[id] = nil
+        var code = 137
         try? await linux.kill(signal)
         do {
-            _ = try await linux.wait(timeoutInSeconds: Int64(max(timeoutSeconds, 1)))
+            code = Int(try await linux.wait(timeoutInSeconds: Int64(max(timeoutSeconds, 1))).exitCode)
         } catch {
             try? await linux.kill(.kill)
-            _ = try? await linux.wait(timeoutInSeconds: 2)
+            if let status = try? await linux.wait(timeoutInSeconds: 2) {
+                code = Int(status.exitCode)
+            }
         }
         await teardownVM(id)
+        return code
+    }
+
+    /// Waits until every byte the guest wrote has reached logs and subscribers, then
+    /// flushes partial lines. Runs before an exit is published.
+    func drainOutput(_ id: String) async {
+        for sink in outputSinks.removeValue(forKey: id) ?? [] {
+            await sink.drain()
+        }
+        if var session = ttySessions[id] {
+            let rest = session.finish()
+            ttySessions[id] = session
+            if !rest.isEmpty {
+                pendingLogLines[id, default: [:]][true, default: ""] += rest
+            }
+        }
+        flushLogLines(id)
     }
 
     func teardownVM(_ id: String) async {
+        await drainOutput(id)
         waitTasks[id]?.cancel()
         waitTasks[id] = nil
         containerStdin[id]?.finish()
@@ -197,7 +258,7 @@ extension EngineManager {
     }
 
     func appendOutput(id: String, data: Data, stdout: Bool) {
-        guard !data.isEmpty else { return }
+        guard !data.isEmpty, containers[id] != nil else { return }
         let tty = containers[id]?.tty == true
         let attachData: Data
         let logText: String
@@ -211,21 +272,43 @@ extension EngineManager {
             attachData = data
             logText = String(decoding: data, as: UTF8.self)
         }
-        if !logText.isEmpty, var record = containers[id] {
-            record.logs += logText
-            containers[id] = record
-            appendLogFile(id: id, text: logText)
-        }
-        guard let subscribers = attachSubscribers[id] else { return }
-        for subscriber in subscribers.values {
-            let payload: Data
-            if subscriber.kind == .logs, tty {
-                payload = Data(logText.utf8)
-            } else {
-                payload = attachData
+        var entries: [EngineLogEntry] = []
+        if !logText.isEmpty {
+            let now = Date()
+            var pending = pendingLogLines[id]?[stdout] ?? ""
+            entries = ContainerLogFile.splitLines(logText, pending: &pending).map {
+                EngineLogEntry(time: now, stdout: stdout, text: $0)
             }
-            guard !payload.isEmpty else { continue }
-            subscriber.continuation.yield(EngineIOChunk(data: payload, stdout: stdout))
+            pendingLogLines[id, default: [:]][stdout] = pending
+        }
+        recordLogEntries(id, entries)
+        guard !attachData.isEmpty, let subscribers = attachSubscribers[id] else { return }
+        for subscriber in subscribers.values where subscriber.kind == .attach {
+            subscriber.continuation.yield(EngineIOChunk(data: attachData, stdout: stdout))
+        }
+    }
+
+    /// Emits partial lines still waiting for a newline (at exit).
+    func flushLogLines(_ id: String) {
+        guard let pending = pendingLogLines.removeValue(forKey: id) else { return }
+        let now = Date()
+        let entries = [true, false].compactMap { stdout -> EngineLogEntry? in
+            guard let text = pending[stdout], !text.isEmpty else { return nil }
+            return EngineLogEntry(time: now, stdout: stdout, text: text)
+        }
+        recordLogEntries(id, entries)
+    }
+
+    /// Stores complete log lines and fans them out to `logs -f` subscribers.
+    private func recordLogEntries(_ id: String, _ entries: [EngineLogEntry]) {
+        guard !entries.isEmpty, var record = containers[id] else { return }
+        record.logs += entries
+        containers[id] = record
+        appendLogFile(id: id, entries: entries)
+        for subscriber in (attachSubscribers[id] ?? [:]).values where subscriber.kind == .logs {
+            for entry in entries {
+                subscriber.continuation.yield(EngineIOChunk(data: Data(entry.text.utf8), stdout: entry.stdout, time: entry.time))
+            }
         }
     }
 
@@ -235,8 +318,22 @@ extension EngineManager {
         resetContainerFiles(id)
     }
 
+    /// Clears per-boot state (tmpfs backing dirs, sockets) but keeps the container's writable
+    /// root filesystem, so files survive stop/start like Docker's container layer.
     func resetContainerFiles(_ id: String) {
-        Self.removeRuntimeDirectory(id, root: containerRoot)
+        Self.resetTransientFiles(id, root: containerRoot)
+    }
+
+    /// Runtime-directory entries that belong to the container, not to one boot.
+    static let persistentRuntimeFiles: Set<String> = ["rootfs.ext4", "baseline.json", pendingArchivesDirectory]
+
+    static func resetTransientFiles(_ id: String, root: URL) {
+        let dir = runtimeURL(id: id, root: root)
+        let fm = FileManager.default
+        guard let items = try? fm.contentsOfDirectory(atPath: dir.path) else { return }
+        for name in items where !persistentRuntimeFiles.contains(name) {
+            try? fm.removeItem(at: dir.appendingPathComponent(name))
+        }
     }
 
     func pauseVM(_ id: String) async throws {

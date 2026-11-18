@@ -4,7 +4,7 @@ import Foundation
 extension EngineManager {
     /// Docker `GET /info` — host and daemon facts.
     public func systemInfo() async -> EngineSystemInfo {
-        let containers = Array(self.containers.values)
+        let containers = self.containers.values.filter { !$0.isSystem }
         let images = (try? await imageStore.list()) ?? []
         let version = ProcessInfo.processInfo.operatingSystemVersion
         return EngineSystemInfo(
@@ -41,7 +41,7 @@ extension EngineManager {
         return EngineDiskUsage(
             layersSize: layersSize,
             images: images,
-            containers: Array(self.containers.values.map(\.summary)),
+            containers: self.containers.values.filter { !$0.isSystem }.map(\.summary),
             volumes: listVolumes()
         )
     }

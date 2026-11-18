@@ -42,6 +42,62 @@ struct SocketDaemonTests {
             #expect(try jsonObject(volume.body)["Name"] as? String == "data")
         }
     }
+
+    /// `docker run` blocks on the `wait` response header before it calls `start`; the
+    /// header must reach the client while the body is still pending.
+    @Test func waitHeaderIsFlushedBeforeTheContainerExits() async throws {
+        try await withSocketServer { socket, engine in
+            try await importAlpine(engine)
+            let created = try daemonRequest("POST", "/containers/create?name=w", socket: socket, json: ["Image": "alpine:latest"])
+            #expect(created.statusCode == 201)
+
+            let fd = try connectUnix(socket)
+            defer { close(fd) }
+            var timeout = timeval(tv_sec: 5, tv_usec: 0)
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+            let request = "POST /v1.44/containers/w/wait?condition=next-exit HTTP/1.1\r\nHost: d\r\nContent-Length: 0\r\n\r\n"
+            _ = request.withCString { write(fd, $0, strlen($0)) }
+            var head = Data()
+            var byte = [UInt8](repeating: 0, count: 1024)
+            while !String(decoding: head, as: UTF8.self).contains("\r\n\r\n") {
+                let n = read(fd, &byte, byte.count)
+                guard n > 0 else { break }
+                head.append(contentsOf: byte.prefix(n))
+            }
+            let text = String(decoding: head, as: UTF8.self)
+            #expect(text.hasPrefix("HTTP/1.1 200"))
+            #expect(!text.contains("StatusCode"))
+
+            let removed = try daemonRequest("DELETE", "/containers/w", socket: socket)
+            #expect(removed.statusCode == 204)
+            var rest = Data()
+            while !String(decoding: rest, as: UTF8.self).contains("StatusCode") {
+                let n = read(fd, &byte, byte.count)
+                guard n > 0 else { break }
+                rest.append(contentsOf: byte.prefix(n))
+            }
+            #expect(String(decoding: rest, as: UTF8.self).contains(#"{"StatusCode":0}"#))
+        }
+    }
+}
+
+private func connectUnix(_ path: String) throws -> Int32 {
+    let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+    var address = sockaddr_un()
+    address.sun_family = sa_family_t(AF_UNIX)
+    withUnsafeMutableBytes(of: &address.sun_path) { raw in
+        _ = path.withCString { strncpy(raw.baseAddress!.assumingMemoryBound(to: CChar.self), $0, raw.count - 1) }
+    }
+    let ok = withUnsafePointer(to: &address) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+        }
+    }
+    guard ok == 0 else {
+        close(fd)
+        throw EngineError.runtimeUnavailable("connect \(path) failed")
+    }
+    return fd
 }
 
 private func daemonRequest(

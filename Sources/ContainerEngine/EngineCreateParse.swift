@@ -280,6 +280,18 @@ public struct EngineContainerRunConfig: Sendable, Codable, Equatable {
     public var groupAdd: [String]
     public var publishAllPorts: Bool
     public var healthcheck: EngineHealthcheck?
+    /// Optional so records written before these fields existed still decode.
+    public var useInit: Bool?
+    /// The requested entrypoint and cmd after image defaults (Docker `Config.Entrypoint` /
+    /// `Config.Cmd`); `command` on the record is their concatenation.
+    public var entrypoint: [String]?
+    public var cmd: [String]?
+    /// Optional so records written before these fields existed still decode.
+    public var capAdd: [String]?
+    public var capDrop: [String]?
+    /// Daemon-owned helper container (e.g. the BuildKit builder): hidden from listings,
+    /// name lookup and events.
+    public var system: Bool?
 
     public init(
         extraHosts: [String] = [],
@@ -295,7 +307,13 @@ public struct EngineContainerRunConfig: Sendable, Codable, Equatable {
         domainname: String = "",
         groupAdd: [String] = [],
         publishAllPorts: Bool = false,
-        healthcheck: EngineHealthcheck? = nil
+        healthcheck: EngineHealthcheck? = nil,
+        useInit: Bool? = nil,
+        entrypoint: [String]? = nil,
+        cmd: [String]? = nil,
+        capAdd: [String]? = nil,
+        capDrop: [String]? = nil,
+        system: Bool? = nil
     ) {
         self.extraHosts = extraHosts
         self.dns = dns
@@ -311,6 +329,12 @@ public struct EngineContainerRunConfig: Sendable, Codable, Equatable {
         self.groupAdd = groupAdd
         self.publishAllPorts = publishAllPorts
         self.healthcheck = healthcheck
+        self.useInit = useInit
+        self.entrypoint = entrypoint
+        self.cmd = cmd
+        self.capAdd = capAdd
+        self.capDrop = capDrop
+        self.system = system
     }
 }
 

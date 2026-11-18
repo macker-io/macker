@@ -4,7 +4,7 @@ This is the contributor path: clone, debug-build, test, and package. End-user in
 
 Requirements: Apple Silicon, macOS 15+, Swift 6.2. Container networking (`bridge` / `host`) needs macOS 26+.
 
-Do not run `macker setup` unless you intend to rewrite your `docker` alias and `/var/run/docker.sock`. Guest kernel/initfs come from `fetch-runtime` (or the staged `.runtime/` used by packaging).
+`macker setup` only registers a `macker` Docker context (it never switches the active context or edits shell files; `/var/run/docker.sock` only with `--docker-socket`). For an isolated dev daemon, point `docker` at it with `DOCKER_HOST` instead. Guest kernel/initfs come from `fetch-runtime` (or the staged `.runtime/` used by packaging).
 
 ```bash
 git submodule update --init --recursive

@@ -125,7 +125,7 @@ enum UnixHTTPClient {
 
         let fd = reader.socketFD
         if stdin {
-            HijackIO.copyStdin(to: fd, mux: !tty, detachKeys: detachKeys)
+            HijackIO.copyStdin(to: fd, detachKeys: detachKeys)
         }
 
         if tty, let resize {

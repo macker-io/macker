@@ -261,6 +261,23 @@ extension EngineManager {
     private func removeVolumeFiles(_ name: String) throws {
         let dir = volumeRoot.appendingPathComponent(name, isDirectory: true)
         if FileManager.default.fileExists(atPath: dir.path) {
+            try Self.removeGuestWrittenTree(dir)
+        }
+    }
+
+    /// Guests can leave entries the host user cannot traverse or unlink (overlayfs creates
+    /// mode-0000 `work` directories, for example). The volume belongs to this user, so make
+    /// it owner-accessible and remove it.
+    static func removeGuestWrittenTree(_ dir: URL) throws {
+        do {
+            try FileManager.default.removeItem(at: dir)
+        } catch {
+            let chmod = Process()
+            chmod.executableURL = URL(fileURLWithPath: "/bin/chmod")
+            chmod.arguments = ["-R", "u+rwX", dir.path]
+            chmod.standardError = FileHandle.nullDevice
+            try chmod.run()
+            chmod.waitUntilExit()
             try FileManager.default.removeItem(at: dir)
         }
     }

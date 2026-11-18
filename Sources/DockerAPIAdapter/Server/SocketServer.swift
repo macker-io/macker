@@ -40,6 +40,9 @@ public final class SocketServer: @unchecked Sendable {
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 256)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            // Hijacked attach/exec streams signal stdin EOF with a write-side shutdown;
+            // the connection must stay open for the remaining output.
+            .childChannelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
             .childChannelInitializer { channel in
                 channel.pipeline.configureHTTPServerPipeline(
                     withPipeliningAssistance: true,

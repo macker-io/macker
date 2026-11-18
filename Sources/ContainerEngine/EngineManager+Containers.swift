@@ -1,13 +1,19 @@
 import Containerization
 import Foundation
 
+/// A pending `wait` on one container.
+struct EngineWaiter: Sendable {
+    let condition: EngineWaitCondition
+    let continuation: AsyncStream<Int>.Continuation
+}
+
 extension EngineManager {
     public func listContainers(
         all: Bool = true,
         size: Bool = false,
         filters: [String: [String]] = [:]
     ) throws -> [EngineContainerSummary] {
-        var records = Array(containers.values.filter { all || $0.isActive })
+        var records = Array(containers.values.filter { !$0.isSystem && (all || $0.isActive) })
         if let names = filters["name"], !names.isEmpty {
             records = records.filter { item in
                 names.contains { needle in item.name.contains(needle) || item.id.contains(needle) }
@@ -93,7 +99,10 @@ extension EngineManager {
         let image = try await inspectImage(name: spec.image)
         let name = try uniqueName(spec.name)
         let id = Self.makeContainerID()
-        let command = (spec.entrypoint ?? image.entrypoint) + (spec.cmd ?? image.cmd)
+        let entrypoint = spec.entrypoint ?? image.entrypoint
+        // Docker drops the image CMD when the entrypoint is overridden.
+        let cmd = spec.cmd ?? (spec.entrypoint == nil ? image.cmd : [])
+        let command = entrypoint + cmd
         let env = image.env + spec.env
         let now = Date()
         let tmpfsRoot = Self.runtimeURL(id: id, root: containerRoot).appendingPathComponent("tmpfs", isDirectory: true)
@@ -112,6 +121,8 @@ extension EngineManager {
         if spec.autoRemove, spec.restartPolicy.name != "no" {
             throw EngineError.invalidArgument("Conflicting options: --restart and --rm")
         }
+        try Self.validateResources(memory: spec.memory, nanoCpus: spec.nanoCpus)
+        _ = try GuestCapabilities.resolve(privileged: spec.privileged, add: spec.capAdd, drop: spec.capDrop)
         for extra in spec.extraHosts {
             _ = try EngineExtraHost.parse(extra)
         }
@@ -131,13 +142,14 @@ extension EngineManager {
             startedAt: nil,
             finishedAt: nil,
             exitCode: 0,
-            logs: "",
+            logs: [],
             autoRemove: spec.autoRemove,
             memory: spec.memory,
             nanoCpus: spec.nanoCpus,
             networkMode: attached.mode,
             tty: spec.tty,
             openStdin: spec.openStdin,
+            stdinOnce: spec.stdinOnce,
             mounts: mounts,
             endpoints: attached.endpoints,
             portBindings: portBindings,
@@ -155,12 +167,18 @@ extension EngineManager {
                 domainname: spec.domainname,
                 groupAdd: spec.groupAdd,
                 publishAllPorts: spec.publishAllPorts,
-                healthcheck: EngineHealthcheck.inherit(spec.healthcheck, image: image.healthcheck)
+                healthcheck: EngineHealthcheck.inherit(spec.healthcheck, image: image.healthcheck),
+                useInit: spec.useInit ? true : nil,
+                entrypoint: entrypoint,
+                cmd: cmd,
+                capAdd: spec.capAdd.isEmpty ? nil : spec.capAdd,
+                capDrop: spec.capDrop.isEmpty ? nil : spec.capDrop,
+                system: spec.system ? true : nil
             )
         )
         try persistContainer(record)
         containers[id] = record
-        await publish(EngineEvent(type: "container", action: "create", actorID: id, attributes: ["name": name, "image": spec.image]))
+        await publish(containerEvent("create", record))
         var warnings = attached.warnings
         if attached.mode == "host", exposedPorts.isEmpty {
             warnings.append("host network: image has no ExposedPorts; Mac localhost will not be proxied")
@@ -177,15 +195,59 @@ extension EngineManager {
         return (container, bytes, bytes)
     }
 
+    /// User-initiated start. Like Docker, it resets the restart-policy counter.
     public func startContainer(_ idOrName: String) async throws -> Bool {
-        var container = try resolveContainer(idOrName)
+        try await startContainer(idOrName, byRestartPolicy: false)
+    }
+
+    func startContainer(_ idOrName: String, byRestartPolicy: Bool) async throws -> Bool {
+        let id = try resolveContainer(idOrName).id
+        if let inflight = startTasks[id] {
+            // Someone else is booting it: once that boot succeeds the container is running;
+            // if it failed, this caller makes its own attempt below.
+            if (try? await inflight.task.value) != nil {
+                return false
+            }
+            if let again = startTasks[id] {
+                _ = try await again.task.value
+                return false
+            }
+        }
+        let token = UUID()
+        let task = Task { try await self.bootAndMarkRunning(id, byRestartPolicy: byRestartPolicy) }
+        startTasks[id] = (token, task)
+        defer {
+            if startTasks[id]?.token == token {
+                startTasks[id] = nil
+            }
+        }
+        return try await task.value
+    }
+
+    private func bootAndMarkRunning(_ id: String, byRestartPolicy: Bool) async throws -> Bool {
+        var container = try resolveContainer(id)
         if container.state == "running" {
             return false
         }
         if container.state == "paused" {
             throw EngineError.conflict("cannot start a paused container: \(container.id)")
         }
-        try await bootContainer(container)
+        if !byRestartPolicy, container.run.restartCount != 0 {
+            container.run.restartCount = 0
+            saveContainer(container)
+        }
+        do {
+            try await bootContainer(container)
+        } catch {
+            // Like Docker's start-failure reset: end attached streams so clients that
+            // attached before `start` (`docker run`) do not wait forever, and remove
+            // an AutoRemove container (`docker run --rm` waits for `removed`).
+            finishAttachSubscribers(container.id)
+            if container.autoRemove {
+                try? await deleteContainer(container.id, force: true, removeAnonymousVolumes: true)
+            }
+            throw error
+        }
         container = try resolveContainer(container.id)
         container.state = "running"
         container.startedAt = Date()
@@ -194,7 +256,7 @@ extension EngineManager {
         saveContainer(container)
         watchVM(container.id)
         startHealthMonitor(container.id)
-        await publish(EngineEvent(type: "container", action: "start", actorID: container.id, attributes: ["name": container.name, "image": container.image]))
+        await publish(containerEvent("start", container))
         return true
     }
 
@@ -211,9 +273,11 @@ extension EngineManager {
         let timeout = timeoutSeconds ?? (container.run.stopTimeout > 0 ? container.run.stopTimeout : 10)
         let rawSignal = signal ?? (container.run.stopSignal.isEmpty ? nil : container.run.stopSignal)
         let parsed = rawSignal.map { Self.parsedKillSignal($0) } ?? .term
-        let code = parsed.rawValue == 9 ? 137 : 128 + Int(parsed.rawValue)
         cancelHealthMonitor(container.id)
-        await stopVM(container.id, timeoutSeconds: timeout, signal: parsed)
+        if action == "stop" {
+            await publish(containerEvent("kill", container, extra: ["signal": "\(parsed.rawValue)"]))
+        }
+        let code = await stopVM(container.id, timeoutSeconds: timeout, signal: parsed)
         await handleVMExit(id: container.id, code: code, action: action)
         return true
     }
@@ -224,19 +288,39 @@ extension EngineManager {
         }
         _ = try await startContainer(idOrName)
         let container = try resolveContainer(idOrName)
-        await publish(EngineEvent(type: "container", action: "restart", actorID: container.id, attributes: ["name": container.name]))
+        await publish(containerEvent("restart", container))
     }
 
+    /// Delivers `signal` to the container's main process. Only SIGKILL waits for the exit;
+    /// any other signal is just sent, and the process decides (Docker `kill` semantics).
     public func killContainer(_ idOrName: String, signal: String) async throws {
-        let container = try resolveContainer(idOrName)
-        guard container.isActive else {
+        var container = try resolveContainer(idOrName)
+        let parsed = try Self.killSignal(signal)
+        guard container.isActive, let linux = vms[container.id] else {
             throw EngineError.conflict("container \(container.id) is not running")
         }
-        let parsed = Self.parsedKillSignal(signal)
-        let code = parsed.rawValue == 9 ? 137 : 128 + Int(parsed.rawValue)
-        await stopVM(container.id, timeoutSeconds: 2, signal: parsed)
-        await handleVMExit(id: container.id, code: code, action: "kill")
-        await publish(EngineEvent(type: "container", action: "die", actorID: container.id, attributes: ["exitCode": "\(code)"]))
+        if container.state == "paused" {
+            try await resumeVM(container.id)
+            container.state = "running"
+            saveContainer(container)
+        }
+        // Docker: SIGKILL, or the container's own stop signal, is a manual stop.
+        let stopSignal = container.run.stopSignal.isEmpty ? nil : Self.parsedKillSignal(container.run.stopSignal)
+        if parsed == .kill || stopSignal == nil || stopSignal == parsed {
+            manualStops.insert(container.id)
+        }
+        await publish(containerEvent("kill", container, extra: ["signal": "\(parsed.rawValue)"]))
+        guard parsed == .kill else {
+            try await linux.kill(parsed)
+            return
+        }
+        let exited = waitStream(container.id, condition: .notRunning)
+        try? await linux.kill(.kill)
+        if await Self.first(of: exited, timeoutSeconds: 10) == nil {
+            // The guest did not report the exit; tear the VM down ourselves.
+            let code = await stopVM(container.id, timeoutSeconds: 1, signal: .kill)
+            await handleVMExit(id: container.id, code: code, action: "kill")
+        }
     }
 
     public func pauseContainer(_ idOrName: String) async throws {
@@ -247,7 +331,7 @@ extension EngineManager {
         try await pauseVM(container.id)
         container.state = "paused"
         saveContainer(container)
-        await publish(EngineEvent(type: "container", action: "pause", actorID: container.id, attributes: ["name": container.name]))
+        await publish(containerEvent("pause", container))
     }
 
     public func unpauseContainer(_ idOrName: String) async throws {
@@ -258,7 +342,7 @@ extension EngineManager {
         try await resumeVM(container.id)
         container.state = "running"
         saveContainer(container)
-        await publish(EngineEvent(type: "container", action: "unpause", actorID: container.id, attributes: ["name": container.name]))
+        await publish(containerEvent("unpause", container))
     }
 
     public func renameContainer(_ idOrName: String, to newName: String) async throws {
@@ -267,16 +351,65 @@ extension EngineManager {
         let old = container.name
         container.name = name
         saveContainer(container)
-        await publish(EngineEvent(type: "container", action: "rename", actorID: container.id, attributes: ["name": name, "oldName": old]))
+        await publish(containerEvent("rename", container, extra: ["oldName": "/\(old)"]))
     }
 
-    public func waitContainer(_ idOrName: String) async throws -> Int {
+    /// Registers a waiter now and returns a stream that yields the exit code once
+    /// `condition` is met. Registration is synchronous with the actor, so a `start`
+    /// issued after this call returns can never be missed (`next-exit` before `start`).
+    public func waitContainer(
+        _ idOrName: String,
+        condition: EngineWaitCondition
+    ) throws -> AsyncStream<Int> {
         let container = try resolveContainer(idOrName)
-        if container.state == "exited" || container.state == "dead" {
-            return container.exitCode
+        return waitStream(container.id, condition: condition)
+    }
+
+    /// Blocks until the container is not running; returns its exit code.
+    public func waitContainer(_ idOrName: String) async throws -> Int {
+        let stream = try waitContainer(idOrName, condition: .notRunning)
+        for await code in stream {
+            return code
         }
-        return await withCheckedContinuation { continuation in
-            waiters[container.id, default: []].append(continuation)
+        throw EngineError.containerNotFound("No such container: \(idOrName)")
+    }
+
+    func waitStream(_ id: String, condition: EngineWaitCondition) -> AsyncStream<Int> {
+        let (stream, continuation) = AsyncStream<Int>.makeStream()
+        if condition == .notRunning, let container = containers[id], !container.isActive {
+            continuation.yield(container.exitCode)
+            continuation.finish()
+            return stream
+        }
+        let token = UUID()
+        waiters[id, default: [:]][token] = EngineWaiter(condition: condition, continuation: continuation)
+        continuation.onTermination = { [weak self] _ in
+            Task { await self?.dropWaiter(id, token: token) }
+        }
+        return stream
+    }
+
+    private func dropWaiter(_ id: String, token: UUID) {
+        waiters[id]?[token] = nil
+        if waiters[id]?.isEmpty == true {
+            waiters[id] = nil
+        }
+    }
+
+    /// First value of `stream`, or `nil` after `timeoutSeconds`.
+    static func first(of stream: AsyncStream<Int>, timeoutSeconds: Int) async -> Int? {
+        await withTaskGroup(of: Int?.self) { group in
+            group.addTask {
+                for await value in stream { return value }
+                return nil
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(timeoutSeconds))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
         }
     }
 
@@ -292,16 +425,17 @@ extension EngineManager {
         let remaining = try? resolveContainer(container.id)
         let anonymous = (remaining ?? container).mounts.filter(\.anonymous).map(\.name)
         await teardownVM(container.id)
-        finishWaiters(id: container.id, code: container.exitCode)
-        finishAttachSubscribers(container.id, extra: nil)
-        await finishExecs(forContainer: container.id, code: container.exitCode)
+        let code = (remaining ?? container).exitCode
+        finishAttachSubscribers(container.id)
+        await finishExecs(forContainer: container.id, code: code)
         await forgetContainer(container.id)
+        notifyWaiters(id: container.id, code: code, removed: true)
         if removeAnonymousVolumes {
             for name in anonymous where !name.isEmpty {
                 try? await deleteVolume(name, force: true)
             }
         }
-        await publish(EngineEvent(type: "container", action: "destroy", actorID: container.id, attributes: ["name": container.name]))
+        await publish(containerEvent("destroy", remaining ?? container))
     }
 
     public func pruneContainers(filters: [String: [String]] = [:]) async throws -> (deleted: [String], spaceReclaimed: Int64) {
@@ -313,22 +447,27 @@ extension EngineManager {
         for item in unused {
             let id = item.id
             space += containerDiskSize(id)
-            finishAttachSubscribers(id, extra: nil)
+            let record = containers[id]
+            finishAttachSubscribers(id)
             await finishExecs(forContainer: id, code: 0)
             for (execID, exec) in execs where exec.containerID == id {
                 execs[execID] = nil
             }
-            let name = item.names.first.map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "/")) } ?? id
             await forgetContainer(id)
+            notifyWaiters(id: id, code: item.exitCode, removed: true)
             deleted.append(id)
-            await publish(EngineEvent(type: "container", action: "destroy", actorID: id, attributes: ["name": name]))
+            if let record {
+                await publish(containerEvent("destroy", record))
+            }
         }
         return (deleted, space)
     }
 
-    public func containerLogs(_ idOrName: String, follow: Bool = false) async throws -> (text: String, tty: Bool, live: EngineIOSession?) {
+    /// Logged lines so far and, when following a running container, a live session that
+    /// yields later lines (each chunk one ``EngineLogEntry``, with `time`).
+    public func containerLogs(_ idOrName: String, follow: Bool = false) async throws -> (entries: [EngineLogEntry], tty: Bool, live: EngineIOSession?) {
         let container = try resolveContainer(idOrName)
-        let text = container.logs
+        let entries = container.logs
         let tty = container.tty
         let live: EngineIOSession?
         if follow, container.isActive {
@@ -341,11 +480,12 @@ extension EngineManager {
         } else {
             live = nil
         }
-        return (text, tty, live)
+        return (entries, tty, live)
     }
 
     public func updateContainer(_ idOrName: String, memory: Int64?, nanoCpus: Int64?) async throws {
         var container = try resolveContainer(idOrName)
+        try Self.validateResources(memory: memory ?? 0, nanoCpus: nanoCpus ?? 0)
         if let memory {
             container.memory = memory
         }
@@ -353,7 +493,7 @@ extension EngineManager {
             container.nanoCpus = nanoCpus
         }
         saveContainer(container)
-        await publish(EngineEvent(type: "container", action: "update", actorID: container.id, attributes: ["name": container.name]))
+        await publish(containerEvent("update", container))
     }
 
     public func containerTop(_ idOrName: String, psArgs: String? = nil) async throws -> EngineContainerTop {
@@ -411,13 +551,26 @@ extension EngineManager {
         return stats
     }
 
+    /// Smallest MicroVM that boots the guest agent plus a small workload. `--memory` sizes the
+    /// whole VM, so Docker's own 6MB floor would yield a guest that cannot start.
+    static let minimumMemoryBytes: Int64 = 64 * 1024 * 1024
+
+    static func validateResources(memory: Int64, nanoCpus: Int64) throws {
+        if memory < 0 || (memory > 0 && memory < minimumMemoryBytes) {
+            throw EngineError.invalidArgument("Minimum memory limit allowed is 64MB (each container is a MicroVM)")
+        }
+        if nanoCpus < 0 {
+            throw EngineError.invalidArgument("Range of CPUs is from 0.01 to the number of CPUs available")
+        }
+    }
+
     func resolveContainer(_ idOrName: String) throws -> EngineContainer {
         let key = idOrName.hasPrefix("/") ? String(idOrName.dropFirst()) : idOrName
         if let container = containers[key] {
             return container
         }
         if let container = containers.values.first(where: {
-            $0.name == key || $0.id.hasPrefix(key)
+            !$0.isSystem && ($0.name == key || $0.id.hasPrefix(key))
         }) {
             return container
         }
@@ -433,7 +586,14 @@ extension EngineManager {
     func finish(container: inout EngineContainer, exitCode: Int, action: String) async {
         cancelHealthMonitor(container.id)
         let id = container.id
-        await publish(EngineEvent(type: "container", action: action, actorID: id, attributes: ["name": container.name]))
+        flushLogLines(id)
+        container.logs = containers[id]?.logs ?? container.logs
+        let userStop = manualStops.remove(id) != nil
+        let action = userStop && action == "die" ? "kill" : action
+        await publish(containerEvent("die", container, extra: ["exitCode": "\(exitCode)"]))
+        if action == "stop" {
+            await publish(containerEvent("stop", container))
+        }
 
         // Graceful daemon exit: keep always/unless-stopped as running on disk so the next
         // boot treats them as interrupted, not as a manual `stop`.
@@ -441,7 +601,7 @@ extension EngineManager {
             container.state = "running"
             container.finishedAt = nil
             saveContainer(container)
-            await teardownSession(id, extra: action, code: exitCode)
+            await teardownSession(id, code: exitCode)
             return
         }
 
@@ -456,9 +616,9 @@ extension EngineManager {
         if restart {
             container.run.restartCount += 1
             saveContainer(container)
-            await teardownSession(id, extra: action, code: exitCode)
+            await teardownSession(id, code: exitCode)
             do {
-                _ = try await startContainer(id)
+                _ = try await startContainer(id, byRestartPolicy: true)
             } catch {
                 container.state = "exited"
                 saveContainer(container)
@@ -470,20 +630,37 @@ extension EngineManager {
         } else {
             saveContainer(container)
         }
-        await teardownSession(id, extra: action, code: exitCode)
-    }
-
-    private func teardownSession(_ id: String, extra action: String, code: Int) async {
-        finishAttachSubscribers(id, extra: "container \(String(id.prefix(12))) \(action)\n")
-        await finishExecs(forContainer: id, code: code)
-        finishWaiters(id: id, code: code)
-    }
-
-    private func finishWaiters(id: String, code: Int) {
-        let pending = waiters.removeValue(forKey: id) ?? []
-        for waiter in pending {
-            waiter.resume(returning: code)
+        await teardownSession(id, code: exitCode)
+        if container.autoRemove {
+            notifyWaiters(id: id, code: exitCode, removed: true)
+            await publish(containerEvent("destroy", container))
         }
+    }
+
+    private func teardownSession(_ id: String, code: Int) async {
+        finishAttachSubscribers(id)
+        await finishExecs(forContainer: id, code: code)
+        notifyWaiters(id: id, code: code, removed: false)
+    }
+
+    /// Resolves exit waiters (`not-running`, `next-exit`); on removal, every waiter.
+    func notifyWaiters(id: String, code: Int, removed: Bool) {
+        guard var pending = waiters[id] else { return }
+        for (token, waiter) in pending where removed || waiter.condition != .removed {
+            waiter.continuation.yield(code)
+            waiter.continuation.finish()
+            pending[token] = nil
+        }
+        waiters[id] = pending.isEmpty ? nil : pending
+    }
+
+    /// Docker event for a container: name, image, and every label as actor attributes.
+    func containerEvent(_ action: String, _ container: EngineContainer, extra: [String: String] = [:]) -> EngineEvent {
+        var attributes = container.labels
+        attributes["name"] = container.name
+        attributes["image"] = container.image
+        attributes.merge(extra) { _, new in new }
+        return EngineEvent(type: "container", action: action, actorID: container.id, attributes: attributes)
     }
 
     private func uniqueName(_ requested: String?) throws -> String {
@@ -494,16 +671,22 @@ extension EngineManager {
         } else {
             name = raw
         }
-        if containers.values.contains(where: { $0.name == name }) {
+        if containers.values.contains(where: { !$0.isSystem && $0.name == name }) {
             throw EngineError.conflict("Conflict. The container name \"/\(name)\" is already in use")
         }
         return name
     }
 
     public func shutdown() async {
+        // In parallel, like dockerd: each container gets its own stop timeout instead of
+        // the daemon's exit taking the sum of all of them.
         let ids = containers.values.filter(\.isActive).map(\.id)
-        for id in ids {
-            _ = try? await stopContainer(id, timeoutSeconds: 10, action: "shutdown")
+        await withTaskGroup(of: Void.self) { group in
+            for id in ids {
+                group.addTask {
+                    _ = try? await self.stopContainer(id, action: "shutdown")
+                }
+            }
         }
         await networkGateway.shutdown()
     }
@@ -515,6 +698,9 @@ extension EngineManager {
 
     func forgetContainer(_ id: String) async {
         cancelHealthMonitor(id)
+        pendingLogLines[id] = nil
+        outputSinks[id] = nil
+        manualStops.remove(id)
         await stopPortPublishers(id)
         await releaseInterfaces(id, keepAddresses: false)
         containers[id] = nil
@@ -543,10 +729,17 @@ extension EngineManager {
                 continue
             }
             let logFile = Self.logURL(id: container.id, root: root)
-            let raw = (try? String(contentsOf: logFile, encoding: .utf8)) ?? ""
-            container.logs = container.tty ? TTYSession.cook(raw) : raw
-            if container.tty, container.logs != raw {
-                try? container.logs.write(to: logFile, atomically: true, encoding: .utf8)
+            let raw = (try? Data(contentsOf: logFile)) ?? Data()
+            let decoded = ContainerLogFile.decode(raw, fallbackTime: container.finishedAt ?? container.created)
+            container.logs = decoded.entries
+            if decoded.legacy {
+                // Pre-JSON raw text log: cook TTY output once and rewrite in the new format.
+                let text = String(decoding: raw, as: UTF8.self)
+                container.logs = ContainerLogFile.legacyEntries(
+                    container.tty ? TTYSession.cook(text) : text,
+                    time: container.finishedAt ?? container.created
+                )
+                try? ContainerLogFile.encode(container.logs).write(to: logFile, options: .atomic)
             }
             loaded[container.id] = container
         }
@@ -572,7 +765,7 @@ extension EngineManager {
                 container.finishedAt = now
                 containers[id] = container
                 try? persistContainer(container, root: root)
-                removeRuntimeDirectory(id, root: root)
+                resetTransientFiles(id, root: root)
             }
             let hasStarted = wasActive || container.startedAt != nil
             if container.run.restartPolicy.shouldStartAfterDaemonRestart(wasActive: wasActive, hasStarted: hasStarted) {
@@ -589,7 +782,7 @@ extension EngineManager {
     /// Starts containers selected by ``restoreContainers(_:root:)``. Failures leave them exited.
     public func startRestartPolicies() async {
         for id in restartAfterDaemon {
-            _ = try? await startContainer(id)
+            _ = try? await startContainer(id, byRestartPolicy: true)
         }
     }
 
@@ -626,9 +819,10 @@ extension EngineManager {
         }
     }
 
-    func appendLogFile(id: String, text: String) {
+    func appendLogFile(id: String, entries: [EngineLogEntry]) {
+        guard !entries.isEmpty else { return }
         let url = Self.logURL(id: id, root: containerRoot)
-        let data = Data(text.utf8)
+        let data = ContainerLogFile.encode(entries)
         if !FileManager.default.fileExists(atPath: url.path) {
             FileManager.default.createFile(atPath: url.path, contents: data)
             return

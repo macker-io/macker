@@ -15,8 +15,10 @@ struct RouterSystemAPITests {
             let info = await router.handle(try RouterTestSupport.request("GET", "/info"))
             #expect(info.status == 200)
             let body = try RouterTestSupport.jsonObject(info)
-            #expect(body["BuilderVersion"] as? String == "1")
-            #expect(body["OSType"] as? String == "darwin")
+            #expect(body["BuilderVersion"] as? String == "2")
+            // Runtime platform (the Linux guest), not the Mac host.
+            #expect(body["OSType"] as? String == "linux")
+            #expect(body["Architecture"] as? String == "aarch64")
             #expect((body["Images"] as? NSNumber)?.intValue ?? 0 >= 1)
             #expect((body["Containers"] as? NSNumber)?.intValue ?? 0 >= 1)
 

@@ -55,12 +55,7 @@ extension EngineManager {
         saveContainer(container)
         if changed {
             await publish(
-                EngineEvent(
-                    type: "container",
-                    action: "health_status",
-                    actorID: id,
-                    attributes: ["healthStatus": health.status]
-                )
+                containerEvent("health_status", container, extra: ["healthStatus": health.status])
             )
         }
     }

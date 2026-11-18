@@ -134,12 +134,18 @@ public struct DockerCreateContainerRequest: Decodable, Sendable {
     public let WorkingDir: String?
     public let Tty: Bool?
     public let OpenStdin: Bool?
+    public let StdinOnce: Bool?
     public let Volumes: [String: EmptyObject]?
     public let ExposedPorts: [String: EmptyObject]?
     public let Healthcheck: Healthcheck?
+    /// Top-level `ContainerConfig` fields (not `HostConfig`).
+    public let StopSignal: String?
+    public let StopTimeout: Int?
+    public let NetworkDisabled: Bool?
     public let HostConfig: HostConfig?
     public let NetworkingConfig: NetworkingConfig?
 
+    /// Any JSON object; only presence/count matters.
     public struct EmptyObject: Decodable, Sendable {}
 
     public struct Healthcheck: Decodable, Sendable {
@@ -173,10 +179,65 @@ public struct DockerCreateContainerRequest: Decodable, Sendable {
         public let VolumesFrom: [String]?
         public let Tmpfs: [String: String]?
         public let VolumeDriver: String?
+        public let Init: Bool?
+
+        // Decoded only so non-default values can be rejected (see `DockerCreateValidator`).
+        public let CapAdd: [String]?
+        public let CapDrop: [String]?
+        public let PidMode: String?
+        public let IpcMode: String?
+        public let UTSMode: String?
+        public let UsernsMode: String?
+        public let CgroupnsMode: String?
+        public let Cgroup: String?
+        public let CgroupParent: String?
+        public let Devices: [EmptyObject]?
+        public let DeviceRequests: [EmptyObject]?
+        public let DeviceCgroupRules: [String]?
+        public let SecurityOpt: [String]?
+        public let Sysctls: [String: String]?
+        public let Ulimits: [EmptyObject]?
+        public let Links: [String]?
+        public let OomScoreAdj: Int?
+        public let OomKillDisable: Bool?
+        public let PidsLimit: Int64?
+        public let ShmSize: Int64?
+        public let CpuShares: Int64?
+        public let CpuPeriod: Int64?
+        public let CpuQuota: Int64?
+        public let CpuRealtimePeriod: Int64?
+        public let CpuRealtimeRuntime: Int64?
+        public let CpusetCpus: String?
+        public let CpusetMems: String?
+        public let CpuCount: Int64?
+        public let CpuPercent: Int64?
+        public let IOMaximumIOps: Int64?
+        public let IOMaximumBandwidth: Int64?
+        public let BlkioWeight: Int64?
+        public let BlkioWeightDevice: [EmptyObject]?
+        public let BlkioDeviceReadBps: [EmptyObject]?
+        public let BlkioDeviceWriteBps: [EmptyObject]?
+        public let BlkioDeviceReadIOps: [EmptyObject]?
+        public let BlkioDeviceWriteIOps: [EmptyObject]?
+        public let MemoryReservation: Int64?
+        public let MemorySwap: Int64?
+        public let MemorySwappiness: Int64?
+        public let LogConfig: LogConfig?
+        public let Runtime: String?
+        public let Isolation: String?
+        public let MaskedPaths: [String]?
+        public let ReadonlyPaths: [String]?
+        public let StorageOpt: [String: String]?
+        public let Annotations: [String: String]?
 
         public struct RestartPolicy: Decodable, Sendable {
             public let Name: String?
             public let MaximumRetryCount: Int?
+        }
+
+        public struct LogConfig: Decodable, Sendable {
+            public let `Type`: String?
+            public let Config: [String: String]?
         }
     }
 
@@ -190,6 +251,15 @@ public struct DockerMountConfig: Decodable, Sendable {
     public let Source: String?
     public let Target: String?
     public let ReadOnly: Bool?
+    public let VolumeOptions: VolumeOptions?
+
+    public struct VolumeOptions: Decodable, Sendable {
+        public let DriverConfig: DriverConfig?
+    }
+
+    public struct DriverConfig: Decodable, Sendable {
+        public let Name: String?
+    }
 }
 
 public struct DockerPortBinding: Codable, Sendable {
@@ -251,6 +321,7 @@ public struct DockerContainerInspect: Encodable, Sendable {
     public let State: State
     public let Image: String
     public let Name: String
+    public let RestartCount: Int
     public let Driver: String
     public let Platform: String
     public let HostConfig: HostConfig
@@ -294,6 +365,9 @@ public struct DockerContainerInspect: Encodable, Sendable {
         public let NanoCpus: Int64
         public let AutoRemove: Bool
         public let Privileged: Bool
+        /// `null` when unset, like Docker.
+        public let CapAdd: [String]?
+        public let CapDrop: [String]?
         public let ReadonlyRootfs: Bool
         public let PublishAllPorts: Bool
         public let Dns: [String]
@@ -302,13 +376,19 @@ public struct DockerContainerInspect: Encodable, Sendable {
         public let ExtraHosts: [String]
         public let GroupAdd: [String]
         public let RestartPolicy: RestartPolicy
-        public let StopSignal: String
-        public let StopTimeout: Int
         public let PortBindings: [String: [DockerPortBinding]]
+        /// Omitted unless `--init` was requested, like Docker's `*bool`.
+        public let Init: Bool?
+        public let LogConfig: LogConfig
 
         public struct RestartPolicy: Encodable, Sendable {
             public let Name: String
             public let MaximumRetryCount: Int
+        }
+
+        public struct LogConfig: Encodable, Sendable {
+            public let `Type`: String
+            public let Config: [String: String]
         }
     }
 
@@ -317,14 +397,19 @@ public struct DockerContainerInspect: Encodable, Sendable {
         public let Domainname: String
         public let User: String
         public let Env: [String]
-        public let Cmd: [String]
+        public let Cmd: [String]?
+        public let Entrypoint: [String]?
         public let Image: String
         public let WorkingDir: String
         public let Labels: [String: String]
         public let Tty: Bool
         public let OpenStdin: Bool
+        public let StdinOnce: Bool
         public let ExposedPorts: [String: EmptyObject]
         public let Healthcheck: Healthcheck?
+        /// Omitted when unset, like Docker.
+        public let StopSignal: String?
+        public let StopTimeout: Int?
 
         public struct EmptyObject: Encodable, Sendable {}
 
@@ -385,6 +470,7 @@ public struct DockerContainerInspect: Encodable, Sendable {
         )
         self.Image = container.imageID
         self.Name = "/\(container.name)"
+        self.RestartCount = container.run.restartCount
         self.Driver = "containerization"
         self.Platform = "linux"
         self.HostConfig = .init(
@@ -393,6 +479,8 @@ public struct DockerContainerInspect: Encodable, Sendable {
             NanoCpus: container.nanoCpus,
             AutoRemove: container.autoRemove,
             Privileged: container.run.privileged,
+            CapAdd: container.run.capAdd,
+            CapDrop: container.run.capDrop,
             ReadonlyRootfs: container.run.readonlyRootfs,
             PublishAllPorts: container.run.publishAllPorts,
             Dns: container.run.dns,
@@ -404,21 +492,24 @@ public struct DockerContainerInspect: Encodable, Sendable {
                 Name: container.run.restartPolicy.name,
                 MaximumRetryCount: container.run.restartPolicy.maximumRetryCount
             ),
-            StopSignal: container.run.stopSignal,
-            StopTimeout: container.run.stopTimeout,
-            PortBindings: Self.portBindings(container.portBindings)
+            PortBindings: Self.portBindings(container.portBindings),
+            Init: container.run.useInit == true ? true : nil,
+            LogConfig: .init(Type: "json-file", Config: [:])
         )
         self.Config = .init(
             Hostname: container.hostname,
             Domainname: container.run.domainname,
             User: container.user,
             Env: container.env,
-            Cmd: container.command,
+            // Records from before entrypoint/cmd were kept separately only have `command`.
+            Cmd: container.run.cmd ?? container.command,
+            Entrypoint: container.run.entrypoint.flatMap { $0.isEmpty ? nil : $0 },
             Image: container.image,
             WorkingDir: container.workingDir,
             Labels: container.labels,
             Tty: container.tty,
             OpenStdin: container.openStdin,
+            StdinOnce: container.stdinOnce,
             ExposedPorts: Dictionary(uniqueKeysWithValues: container.exposedPorts.map { ($0.dockerKey, .init()) }),
             Healthcheck: container.run.healthcheck.map {
                 .init(
@@ -429,7 +520,9 @@ public struct DockerContainerInspect: Encodable, Sendable {
                     StartInterval: $0.startIntervalNanos,
                     Retries: $0.retries
                 )
-            }
+            },
+            StopSignal: container.run.stopSignal.isEmpty ? nil : container.run.stopSignal,
+            StopTimeout: container.run.stopTimeout > 0 ? container.run.stopTimeout : nil
         )
         let primary = container.endpoints.first
         self.NetworkSettings = .init(
@@ -476,8 +569,19 @@ public struct DockerContainerInspect: Encodable, Sendable {
     }
 }
 
+/// `POST /containers/{id}/wait`.
 public struct DockerWaitResponse: Encodable, Sendable {
     public let StatusCode: Int
+    public let Error: WaitError?
+
+    public struct WaitError: Encodable, Sendable {
+        public let Message: String
+    }
+
+    public init(StatusCode: Int, Error: WaitError? = nil) {
+        self.StatusCode = StatusCode
+        self.Error = Error
+    }
 }
 
 public struct DockerTopResponse: Encodable, Sendable {

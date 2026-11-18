@@ -550,6 +550,20 @@ extension EngineManager {
         return parsed
     }
 
+    /// Guests boot the host's Linux architecture only (no x86_64 emulation is wired up), so a
+    /// request for another platform is rejected instead of silently running the native variant.
+    public static func requireRunnablePlatform(_ raw: String?) throws {
+        guard let raw, !raw.isEmpty else { return }
+        let requested = try buildPlatform(raw)
+        let runtime = Platform.current
+        guard requested.os == runtime.os, requested.architecture == runtime.architecture else {
+            throw EngineError.notImplemented(
+                "platform \(raw) is not supported: Macker runs \(runtime.os)/\(runtime.architecture) MicroVMs "
+                    + "and has no x86_64 emulation; use an image that provides \(runtime.os)/\(runtime.architecture)"
+            )
+        }
+    }
+
     /// Global `ARG`s take the value passed with `--build-arg`, else their default.
     public static func unsupportedBuildNetwork(_ raw: String) -> String? {
         let mode = raw.trimmingCharacters(in: .whitespacesAndNewlines)

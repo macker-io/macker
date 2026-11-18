@@ -21,6 +21,11 @@ extension EngineManager {
 
     /// Places a copy-on-write (or copied) rootfs in the container runtime directory.
     func prepareRootfs(id: String, image: Containerization.Image) async throws -> Mount {
+        let existing = Self.runtimeURL(id: id, root: containerRoot).appendingPathComponent("rootfs.ext4")
+        if FileManager.default.fileExists(atPath: existing.path) {
+            // Restart: keep the container's own writable filesystem.
+            return .block(format: "ext4", source: existing.path, destination: "/", options: [])
+        }
         let cacheDir = unpackedCacheDirectory(digest: image.digest)
         let cached = cacheDir.appendingPathComponent("rootfs.ext4")
         let cachedBaseline = cacheDir.appendingPathComponent("baseline.json")

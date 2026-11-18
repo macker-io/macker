@@ -22,7 +22,9 @@ struct RouterAPITests {
             #expect(version.status == 200)
             let body = try RouterTestSupport.jsonObject(version)
             #expect(body["ApiVersion"] as? String == DockerAPI.version)
-            #expect(body["Os"] as? String == "darwin")
+            #expect(body["Os"] as? String == "linux")
+            #expect(body["Arch"] as? String == "arm64")
+            #expect(body["MinAPIVersion"] as? String == DockerAPI.minimumVersion)
         }
     }
 
@@ -72,7 +74,7 @@ struct RouterAPITests {
             #expect(created.status == 201)
             let id = try RouterTestSupport.jsonObject(created)["Id"] as? String
             #expect(id?.count == 64)
-            #expect(RouterTestSupport.header(created, "Location") == "/v1.41/containers/\(id!)")
+            #expect(RouterTestSupport.header(created, "Location") == nil)
             #expect(RouterTestSupport.header(created, "Content-Type") == "application/json")
 
             let hidden = await router.handle(try RouterTestSupport.request("GET", "/containers/json"))

@@ -19,7 +19,15 @@ public actor EngineManager {
     let networkRoot: URL
     let portPublisher = PortPublisher()
     var containers: [String: EngineContainer] = [:]
-    var waiters: [String: [CheckedContinuation<Int, Never>]] = [:]
+    var waiters: [String: [UUID: EngineWaiter]] = [:]
+    /// stdout/stderr sinks of the running VM, drained before an exit is published.
+    var outputSinks: [String: [ProcessLogSink]] = [:]
+    var execSinks: [String: [ProcessLogSink]] = [:]
+    /// Output not yet terminated by a newline, per container and stream (`true` = stdout).
+    var pendingLogLines: [String: [Bool: String]] = [:]
+    /// Containers whose next exit was requested by the user (`kill` with the stop signal or
+    /// SIGKILL), so restart policies do not bring them back.
+    var manualStops: Set<String> = []
     var execs: [String: EngineExec] = [:]
     var execProcesses: [String: LinuxProcess] = [:]
     var execStdin: [String: ProcessStdin] = [:]
@@ -38,6 +46,11 @@ public actor EngineManager {
     var containerManager: ContainerManager?
     var vms: [String: LinuxContainer] = [:]
     var waitTasks: [String: Task<Void, Never>] = [:]
+    /// Boots in flight, so a second `start` (API client vs. restart policy) joins the first
+    /// instead of booting a second MicroVM for the same container.
+    var startTasks: [String: (token: UUID, task: Task<Bool, Error>)] = [:]
+    /// In-flight boot of the hidden BuildKit builder.
+    var buildKitBoot: Task<String, Error>?
     var healthTasks: [String: Task<Void, Never>] = [:]
     var guestNics: [String: [GuestNic]] = [:]
     let restartAfterDaemon: [String]
@@ -90,11 +103,25 @@ public actor EngineManager {
     }
 
     func publish(_ event: EngineEvent) async {
+        // Daemon-owned helper containers stay invisible to `docker events`.
+        let subject = event.type == "container" ? event.actorID : (event.attributes["container"] ?? "")
+        if !subject.isEmpty, containers[subject]?.isSystem == true {
+            return
+        }
         await eventBus.publish(event)
     }
 
     static func parsedKillSignal(_ raw: String) -> Signal {
         (try? Signal(raw)) ?? .term
+    }
+
+    /// `SIGTERM`, `TERM`, or `15`; anything else is an invalid argument.
+    static func killSignal(_ raw: String) throws -> Signal {
+        do {
+            return try Signal(raw)
+        } catch {
+            throw EngineError.invalidArgument("Invalid signal: \(raw)")
+        }
     }
 
     static func makeContainerID() -> String {

@@ -1,0 +1,17 @@
+services:
+  bad:
+    image: alpine:3.20
+    command: ["sleep", "3600"]
+    healthcheck:
+      test: ["CMD", "false"]
+      interval: 1s
+      timeout: 1s
+      retries: 2
+    stop_grace_period: 1s
+  dependent:
+    image: alpine:3.20
+    command: ["sleep", "3600"]
+    depends_on:
+      bad:
+        condition: service_healthy
+    stop_grace_period: 1s

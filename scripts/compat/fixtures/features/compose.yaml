@@ -1,0 +1,43 @@
+services:
+  init:
+    image: alpine:3.20
+    command: ["sh", "-c", "echo seeded > /shared/from-init"]
+    volumes: [shared:/shared]
+  app:
+    image: alpine:3.20
+    command: ["sleep", "3600"]
+    hostname: app-host
+    init: true
+    read_only: true
+    tmpfs: [/scratch]
+    env_file: [app.env]
+    environment:
+      APP_MARK: ${APP_MARK:-initial}
+    extra_hosts: ["pinned.test:10.1.2.3"]
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    volumes:
+      - shared:/shared
+      - ext_vol:/ext
+    networks:
+      pinned:
+        ipv4_address: 172.31.7.10
+      ext_net: {}
+    stop_grace_period: 1s
+  extra:
+    image: alpine:3.20
+    command: ["sleep", "3600"]
+    profiles: [extra]
+    stop_grace_period: 1s
+networks:
+  pinned:
+    ipam:
+      config:
+        - subnet: 172.31.7.0/24
+  ext_net:
+    external: true
+volumes:
+  shared:
+  ext_vol:
+    external: true

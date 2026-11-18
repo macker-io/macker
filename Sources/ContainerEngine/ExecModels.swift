@@ -87,10 +87,13 @@ public struct EngineExec: Sendable {
 public struct EngineIOChunk: Sendable {
     public let data: Data
     public let stdout: Bool
+    /// When the bytes were logged. Set for log entries (`logs`, attach `logs=1` replay).
+    public let time: Date?
 
-    public init(data: Data, stdout: Bool) {
+    public init(data: Data, stdout: Bool, time: Date? = nil) {
         self.data = data
         self.stdout = stdout
+        self.time = time
     }
 }
 
@@ -100,6 +103,10 @@ public struct EngineIOSession: Sendable {
     public let stdin: Bool
     public let chunks: AsyncStream<EngineIOChunk>
     public let writeStdin: @Sendable (Data) async -> Void
+    /// The client finished sending stdin (half-close). Closes the process stdin when the
+    /// session owns it (exec, or a `StdinOnce` container); otherwise only detaches stdin.
+    public let closeStdin: @Sendable () async -> Void
+    /// The client went away.
     public let close: @Sendable () async -> Void
 }
 
@@ -108,11 +115,6 @@ public enum DockerStdio {
     public static func frame(_ data: Data, stdout: Bool) -> Data {
         guard !data.isEmpty else { return Data() }
         return muxFrame(data, stream: stdout ? 1 : 2)
-    }
-
-    /// Stream 0. Empty payload is stdin EOF.
-    public static func stdinFrame(_ data: Data) -> Data {
-        muxFrame(data, stream: 0)
     }
 
     /// Pull complete multiplexed frames. Stream 0 is stdin; 1 stdout; 2 stderr.

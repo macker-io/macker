@@ -1,6 +1,7 @@
 import Containerization
 import Foundation
 
+import struct ContainerizationOS.CapabilityName
 import struct ContainerizationOS.Terminal
 
 extension EngineManager {
@@ -12,12 +13,7 @@ extension EngineManager {
         let id = Self.makeContainerID()
         execs[id] = EngineExec(id: id, container: container, spec: spec)
         await publish(
-            EngineEvent(
-                type: "container",
-                action: "exec_create",
-                actorID: container.id,
-                attributes: ["name": container.name, "execID": id, "execCommand": spec.cmd.joined(separator: " ")]
-            )
+            containerEvent("exec_create", container, extra: ["execID": id, "execCommand": spec.cmd.joined(separator: " ")])
         )
         return id
     }
@@ -97,6 +93,7 @@ extension EngineManager {
         exec.pid = Int(process.pid)
         execs[id] = exec
         execProcesses[id] = process
+        execSinks[id] = [stdoutSink, stderrSink]
         if let stdinPipe {
             execStdin[id] = stdinPipe
         }
@@ -108,12 +105,7 @@ extension EngineManager {
             )
         }
         await publish(
-            EngineEvent(
-                type: "container",
-                action: "exec_start",
-                actorID: container.id,
-                attributes: ["name": container.name, "execID": id]
-            )
+            containerEvent("exec_start", container, extra: ["execID": id])
         )
 
         execWaitTasks[id] = Task { [process] in
@@ -126,6 +118,8 @@ extension EngineManager {
             } catch {
                 code = 137
             }
+            // Deliver every byte before the exit code becomes visible and the stream closes.
+            await self.drainExecOutput(id)
             await self.completeExec(id, code: code, fromWait: true)
             try? await process.delete()
         }
@@ -139,6 +133,9 @@ extension EngineManager {
             writeStdin: { data in
                 await engine.writeExecStdin(id, data: data)
             },
+            closeStdin: {
+                await engine.closeExecStdin(id)
+            },
             close: {
                 await engine.closeExecStdin(id)
             }
@@ -149,10 +146,15 @@ extension EngineManager {
         execStdin[id]?.yield(data)
     }
 
+    /// Ends the exec's stdin after everything already written. The SDK relay closes the
+    /// guest fd once the stream is drained; `process.closeStdin()` would cut it short.
     func closeExecStdin(_ id: String) async {
         execStdin[id]?.finish()
-        if let process = execProcesses[id] {
-            try? await process.closeStdin()
+    }
+
+    func drainExecOutput(_ id: String) async {
+        for sink in execSinks.removeValue(forKey: id) ?? [] {
+            await sink.drain()
         }
     }
 
@@ -174,14 +176,12 @@ extension EngineManager {
         }
         cleanupExecIO(id)
         if wasRunning {
-            await publish(
-                EngineEvent(
-                    type: "container",
-                    action: "exec_die",
-                    actorID: exec.containerID,
-                    attributes: ["execID": id, "exitCode": "\(code)"]
-                )
-            )
+            let attributes = ["execID": id, "exitCode": "\(code)"]
+            if let container = containers[exec.containerID] {
+                await publish(containerEvent("exec_die", container, extra: attributes))
+            } else {
+                await publish(EngineEvent(type: "container", action: "exec_die", actorID: exec.containerID, attributes: attributes))
+            }
         }
     }
 
@@ -260,6 +260,15 @@ extension EngineManager {
         return "unable to start exec process: \(raw)"
     }
 
+    static func containerCapabilities(_ container: EngineContainer, privilegedExec: Bool = false) -> [CapabilityName] {
+        // Validated at create; a record that no longer resolves falls back to the defaults.
+        (try? GuestCapabilities.resolve(
+            privileged: container.run.privileged || privilegedExec,
+            add: container.run.capAdd ?? [],
+            drop: container.run.capDrop ?? []
+        )) ?? GuestCapabilities.defaults
+    }
+
     private static func configure(
         _ config: inout LinuxProcessConfiguration,
         exec: EngineExec,
@@ -277,9 +286,8 @@ extension EngineManager {
             config.user = .init(username: exec.user)
         }
         config.terminal = exec.tty
-        if exec.privileged {
-            config.capabilities = .allCapabilities
-        }
+        // Docker: an exec gets the container's capability set; `exec --privileged` gets all.
+        config.capabilities = .init(capabilities: Self.containerCapabilities(container, privilegedExec: exec.privileged))
         if let stdin {
             config.stdin = stdin
         }
@@ -298,6 +306,7 @@ extension EngineManager {
 
     private func cleanupExecIO(_ id: String) {
         execWaitTasks[id] = nil
+        execSinks[id] = nil
         execStdin[id]?.finish()
         execStdin[id] = nil
         execProcesses[id] = nil

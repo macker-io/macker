@@ -146,12 +146,12 @@ actor NetworkGateway {
     }
 
     /// Drops the link and returns the addresses to IPAM.
+    /// Leases outlive `detach` (a stopped container keeps its address), so this walks the IPAM
+    /// tables rather than the live endpoint records.
     func forget(containerID: String) {
-        for record in records where record.containerID == containerID {
-            release(
-                networkID: record.networkID,
-                key: Self.endpointKey(containerID: containerID, networkID: record.networkID)
-            )
+        let prefix = Self.endpointKey(containerID: containerID, networkID: "")
+        for networkID in Array(ipam.keys) {
+            ipam[networkID]?.release(idsWithPrefix: prefix)
         }
         detach(containerID: containerID)
     }

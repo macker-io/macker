@@ -2,7 +2,7 @@
 
 macOS-native Linux containers. The daemon speaks the Docker Engine API over a UNIX socket and boots each container in a MicroVM (Apple `containerization` + Virtualization.framework).
 
-This is a **CLI preview**. There is no GUI on this release line. Not Docker Desktop: no Compose, no BuildKit/buildx, no Swarm.
+This is a **CLI preview**. There is no GUI on this release line. The official `docker` CLI, `docker compose`, and `docker build` (BuildKit) work against it as a drop-in engine; Swarm does not.
 
 **Requirements:** Apple Silicon. macOS 15+ to boot MicroVMs. **macOS 26+** for `bridge` / `host` networking.
 
@@ -27,7 +27,7 @@ curl -fsSL https://raw.githubusercontent.com/macker-io/macker/main/scripts/insta
 curl -fsSL https://raw.githubusercontent.com/macker-io/macker/main/scripts/install.sh | bash -s -- --uninstall
 ```
 
-Do **not** run `macker setup` unless you want to alias `docker` to `macker` and point `/var/run/docker.sock` at Macker.
+`macker setup` registers a Docker context named `macker` for the official `docker` CLI (see below). It does not switch your active context, edit shell files, or touch `/var/run/docker.sock` unless you pass `--docker-socket`.
 
 Optional: `sudo macker helper install` so the Mac can `curl` container IPs over utun. `-p` works without it.
 
@@ -59,17 +59,32 @@ echo hello | macker exec -i web cat
 
 Official `nginx` has no `wget` / `curl` — `cat` the static files, or `exec` into `alpine`.
 
-## Build
+## Official `docker` CLI and Compose
 
-Classic Docker builder only (`DOCKER_BUILDKIT=0`). Each `RUN` boots a throwaway MicroVM. BuildKit syntax (`# syntax=`, heredocs, `RUN --mount`, bake) is not implemented.
+The official `docker` CLI (29.x) and `docker compose` plugin work against Macker (Docker Engine API 1.24–1.44). Register the context once:
 
 ```bash
-macker build -t demo:latest .
-macker run --rm demo:latest
-macker builder prune
+macker setup                              # creates the `macker` docker context (idempotent)
+docker --context macker run --rm alpine echo hello
+docker --context macker compose up -d
+docker context use macker                 # optional: make Macker the default engine
+macker doctor                             # docker CLI, compose plugin, context, socket, API
 ```
 
-The official `docker` CLI talking to `macker.sock` defaults to BuildKit on 23+ and will fail. Use `macker build`.
+`macker setup --force` repoints an existing `macker` context that targets something else; `macker setup --uninstall` removes it (only if it points at Macker); `--docker-socket` also links `/var/run/docker.sock` (opt-in). `DOCKER_HOST=unix://…/macker.sock` works as well.
+
+`--privileged` and `--cap-add` / `--cap-drop` apply inside the container's own MicroVM. Options a MicroVM cannot honor (`--pid host`, `--device`, `--network container:…`, `--platform linux/amd64`, …) fail with an error instead of being ignored. Details: [docs/cli.md](docs/cli.md#official-docker-cli-and-compose).
+
+## Build
+
+`docker build` and `docker compose build` use BuildKit (Dockerfile `# syntax=`, heredocs, `RUN --mount`, secrets) through a builder MicroVM the daemon manages, and the image lands in Macker's store as with Docker Engine: [docs/buildkit.md](docs/buildkit.md).
+
+```bash
+docker --context macker build -t demo:latest .
+docker --context macker run --rm demo:latest
+```
+
+`macker build` (and `DOCKER_BUILDKIT=0 docker build`) use the classic builder: each `RUN` boots a throwaway MicroVM, and BuildKit-only syntax is rejected.
 
 ## Socket
 
@@ -97,9 +112,9 @@ curl http://127.0.0.1:18080
 
 ## Preview limits
 
-- Apple Silicon only. No Compose, Swarm, buildx, plugins, secrets, or configs.
-- `macvlan` / `ipvlan` / `--net=container:` / IPv6 are not implemented.
-- Many Docker flags are accepted as no-ops (see [docs/cli.md](docs/cli.md)).
-- `macker setup` is opt-in and will fight Docker Desktop if you already use it.
+- Apple Silicon only, `linux/arm64` images only (no x86_64 emulation). No Swarm, plugins, secrets, or configs.
+- `macvlan` / `ipvlan` / IPv6 are not implemented; `--network container:` cannot be supported (one kernel per container).
+- Docker flags that need a shared host kernel (host namespaces, host devices, cgroup knobs) are rejected; a few others are approximated (see [docs/cli.md](docs/cli.md)).
+- `buildx` builders created with `--driver docker-container` do not work (their state volume cannot back overlayfs); use the default builder.
 
 Apache-2.0. See [LICENSE](LICENSE).

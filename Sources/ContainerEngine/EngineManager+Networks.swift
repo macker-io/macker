@@ -219,7 +219,13 @@ extension EngineManager {
     func attachCreateEndpoints(_ spec: EngineContainerCreateSpec) throws -> (mode: String, endpoints: [EngineEndpoint], warnings: [String]) {
         var warnings: [String] = []
         let mode = normalizedNetworkMode(spec.networkMode)
-        if mode.hasPrefix("container:") || mode == "macvlan" || mode == "ipvlan" {
+        if mode.hasPrefix("container:") {
+            throw EngineError.notImplemented(
+                "network mode \(mode) is not supported: every container is a separate MicroVM with its own kernel, "
+                    + "so it cannot join another container's network namespace; put both containers on one user-defined network instead"
+            )
+        }
+        if mode == "macvlan" || mode == "ipvlan" {
             throw EngineError.notImplemented("network mode \(mode) is not implemented")
         }
 
@@ -617,6 +623,7 @@ extension EngineManager {
         guard !ip.isEmpty else { return }
 
         let bindings = mode == "host" ? record.exposedPorts : record.portBindings
+        try checkPortAllocation(bindings, for: record.id)
 
         let bridgeTarget = record.endpoints.first { endpoint in
             networks[endpoint.networkID]?.driver == "bridge" && !endpoint.ipv4Address.isEmpty
@@ -659,6 +666,23 @@ extension EngineManager {
         }
         updated.portBindings = published
         saveContainer(updated)
+    }
+
+    /// The OS cannot catch every clash (listeners use address reuse so a restarted container can
+    /// rebind at once), so the daemon keeps Docker's port-allocator rule itself: one host
+    /// address:port per protocol across all running containers.
+    func checkPortAllocation(_ bindings: [EnginePortBinding], for containerID: String) throws {
+        let mine = bindings.filter { $0.hostPort != 0 }
+        for (index, binding) in mine.enumerated() where mine[..<index].contains(where: binding.conflicts) {
+            throw EngineError.conflict(binding.allocatedError)
+        }
+        for other in containers.values where other.id != containerID && vms[other.id] != nil {
+            let mode = normalizedNetworkMode(other.networkMode)
+            let held = mode == "host" ? other.exposedPorts : other.portBindings
+            for binding in mine where held.contains(where: binding.conflicts) {
+                throw EngineError.conflict(binding.allocatedError)
+            }
+        }
     }
 
     func stopPortPublishers(_ containerID: String) async {
@@ -743,7 +767,7 @@ extension EngineManager {
 
     private func inspectPayload(_ network: EngineNetwork) -> EngineNetworkInspect {
         let attached: [EngineNetworkContainer] = containers.values.compactMap { container in
-            guard let endpoint = container.endpoints.first(where: { $0.networkID == network.id }) else {
+            guard !container.isSystem, let endpoint = container.endpoints.first(where: { $0.networkID == network.id }) else {
                 return nil
             }
             let prefix = endpoint.ipv4Prefix > 0 ? endpoint.ipv4Prefix : prefixLength(network.subnet)

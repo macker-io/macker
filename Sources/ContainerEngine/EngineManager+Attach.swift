@@ -6,9 +6,10 @@ import struct ContainerizationOS.Terminal
 /// Fan-out target for live container output.
 struct EngineIOSubscriber: Sendable {
     enum Kind: Sendable {
-        /// Live stdio. TTY stays close to the PTY; includes the Docker exit notice.
+        /// Live stdio. TTY stays close to the PTY.
         case attach
-        /// `logs -f`. TTY is cooked so DSR queries never hit the client's terminal.
+        /// `logs -f`: one chunk per log line (with its time). TTY is cooked so DSR queries
+        /// never hit the client's terminal.
         case logs
     }
 
@@ -52,14 +53,7 @@ extension EngineManager {
                 kind: .attach,
                 replay: replay
             )
-            await publish(
-                EngineEvent(
-                    type: "container",
-                    action: "attach",
-                    actorID: container.id,
-                    attributes: ["name": container.name]
-                )
-            )
+            await publish(containerEvent("attach", container))
             return session
         }
 
@@ -100,8 +94,10 @@ extension EngineManager {
         includeCurrentLine: Bool
     ) -> [EngineIOChunk] {
         var chunks: [EngineIOChunk] = []
-        if includeLogs, !container.logs.isEmpty {
-            chunks.append(EngineIOChunk(data: Data(container.logs.utf8), stdout: true))
+        if includeLogs {
+            chunks += container.logs.map {
+                EngineIOChunk(data: Data($0.text.utf8), stdout: $0.stdout, time: $0.time)
+            }
         }
         if includeCurrentLine, container.tty, let line = ttySessions[container.id]?.currentLine, !line.isEmpty {
             chunks.append(EngineIOChunk(data: line, stdout: true))
@@ -144,6 +140,9 @@ extension EngineManager {
             writeStdin: { data in
                 await engine.writeAttachStdin(containerID, data: data)
             },
+            closeStdin: {
+                await engine.closeAttachStdin(containerID)
+            },
             close: {
                 await engine.closeAttach(containerID, sessionID: sessionID)
             }
@@ -151,7 +150,28 @@ extension EngineManager {
     }
 
     func writeAttachStdin(_ containerID: String, data: Data) {
-        containerStdin[containerID]?.yield(data)
+        attachStdinPipe(containerID)?.yield(data)
+    }
+
+    /// Docker closes the container's stdin when an attached client ends its stdin and the
+    /// container was created with `StdinOnce`; otherwise only that client stops sending.
+    func closeAttachStdin(_ containerID: String) {
+        guard containers[containerID]?.stdinOnce == true else { return }
+        attachStdinPipe(containerID)?.finish()
+    }
+
+    /// The running process's stdin, or (before `start` / `start -a`) a pipe that `bootContainer` will
+    /// hand to the process, so input sent between attach and start is not lost.
+    private func attachStdinPipe(_ containerID: String) -> ProcessStdin? {
+        if let pipe = containerStdin[containerID] {
+            return pipe
+        }
+        guard let container = containers[containerID], container.openStdin, !container.isActive else {
+            return nil
+        }
+        let pipe = ProcessStdin()
+        containerStdin[containerID] = pipe
+        return pipe
     }
 
     func closeAttach(_ containerID: String, sessionID: UUID) {
@@ -163,12 +183,9 @@ extension EngineManager {
         }
     }
 
-    func finishAttachSubscribers(_ containerID: String, extra: String?) {
+    func finishAttachSubscribers(_ containerID: String) {
         let subscribers = attachSubscribers.removeValue(forKey: containerID) ?? [:]
         for subscriber in subscribers.values {
-            if subscriber.kind == .attach, let extra, !extra.isEmpty {
-                subscriber.continuation.yield(EngineIOChunk(data: Data(extra.utf8), stdout: true))
-            }
             subscriber.continuation.finish()
         }
     }

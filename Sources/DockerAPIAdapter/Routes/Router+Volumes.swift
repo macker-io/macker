@@ -76,7 +76,12 @@ extension Router {
 
     func pruneVolumes(_ request: HTTPRequest) async -> HTTPResponse {
         do {
-            let result = try await engine.pruneVolumes(filters: Self.parseFilters(request.query["filters"]))
+            var filters = Self.parseFilters(request.query["filters"])
+            // Before API 1.42 prune removed named volumes too; 1.42 made that opt-in (`all`).
+            if !request.apiVersion.atLeast("1.42"), filters["all"] == nil {
+                filters["all"] = ["true"]
+            }
+            let result = try await engine.pruneVolumes(filters: filters)
             return HTTPResponse(
                 status: 200,
                 headers: [("Content-Type", "application/json")],

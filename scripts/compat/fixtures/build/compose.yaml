@@ -1,0 +1,8 @@
+services:
+  app:
+    build:
+      context: .
+      args:
+        MSG: built-by-compose
+    command: ["sh", "-c", "cat /msg; exec sleep 3600"]
+    stop_grace_period: 1s

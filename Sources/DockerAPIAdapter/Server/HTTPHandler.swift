@@ -44,8 +44,10 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler, @unchec
             let parsed = Self.parseURI(head.uri)
             let bodyData = body.map { Data($0.readableBytesView) } ?? Data()
             var headers: [String: String] = [:]
+            var headerList: [(String, String)] = []
             for (name, value) in head.headers {
                 headers[name.lowercased()] = value
+                headerList.append((name.lowercased(), value))
             }
             let spool = self.spool
             spool?.finish()
@@ -55,6 +57,7 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler, @unchec
                 query: parsed.query,
                 queryAll: parsed.queryAll,
                 headers: headers,
+                headerList: headerList,
                 body: bodyData,
                 bodyFile: spool?.readableURL
             )
@@ -81,8 +84,11 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler, @unchec
                         body: .buffer(JSONBody.encode(DockerErrorResponse(message: "internal server error")))
                     )
                 }
-                if case .hijack = response.body {
+                switch response.body {
+                case .hijack, .upgrade:
                     handler.hijacked = true
+                default:
+                    break
                 }
                 handler.writeResponse(channel: channel, request: request, response: response, cleanup: cleanup)
                 logger.debug("\(request.method) \(request.path) -> \(response.status)")
@@ -129,6 +135,24 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler, @unchec
             return
         }
 
+        if case .upgrade(let upgrade) = response.body {
+            cleanup?()
+            channel.eventLoop.execute {
+                guard channel.isActive else { return }
+                Self.stripHTTPCodec(channel: channel, httpHandler: self)
+                Self.writeRawHTTP(
+                    channel: channel,
+                    statusLine: "HTTP/1.1 101 UPGRADED",
+                    headers: [("Connection", "Upgrade"), ("Upgrade", upgrade.protocolName)]
+                )
+                upgrade.configure(channel).whenFailure { error in
+                    self.logger.error("upgrade failed: \(error)")
+                    channel.close(promise: nil)
+                }
+            }
+            return
+        }
+
         guard channel.isActive else {
             if case .stream(let stream) = response.body {
                 OnceClose(stream.onClose, then: cleanup).run()
@@ -165,6 +189,10 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler, @unchec
 
         case .stream(let stream):
             Self.writeHead(channel: channel, status: response.status, headers: headers)
+            // Clients block on the response header before their next step (`docker run`
+            // waits for the `wait` header before `start`), so it must not sit in the buffer
+            // until the first body chunk.
+            channel.flush()
             let close = OnceClose(stream.onClose, then: cleanup)
             channel.closeFuture.whenComplete { _ in
                 close.run()
@@ -188,7 +216,7 @@ final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler, @unchec
                 close.run()
             }
 
-        case .hijack:
+        case .hijack, .upgrade:
             cleanup?()
         }
     }

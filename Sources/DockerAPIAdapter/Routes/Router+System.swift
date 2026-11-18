@@ -15,7 +15,10 @@ extension Router {
             headers: [
                 ("Content-Type", "text/plain; charset=utf-8"),
                 ("Api-Version", DockerAPI.version),
+                ("Builder-Version", "2"),
                 ("Docker-Experimental", "true"),
+                ("Ostype", DockerAPI.os),
+                ("Swarm", "inactive"),
                 ("Cache-Control", "no-cache, no-store, must-revalidate"),
                 ("Pragma", "no-cache"),
             ],
@@ -99,6 +102,10 @@ extension Router {
         if !matchesActor(event, type: "container", keys: filters["container"]) { return false }
         if !matchesActor(event, type: "volume", keys: filters["volume"]) { return false }
         if !matchesActor(event, type: "network", keys: filters["network"]) { return false }
+        // Docker matches `label=` against the actor attributes, which carry the object's labels.
+        if let labels = filters["label"], !labels.isEmpty, !FilterMatch.labels(event.attributes, specs: labels) {
+            return false
+        }
         return true
     }
 

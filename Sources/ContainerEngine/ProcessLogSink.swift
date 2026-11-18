@@ -2,26 +2,41 @@ import Containerization
 import Foundation
 
 /// Forwards guest stdout/stderr into the Docker log buffer and attach subscribers.
+///
+/// The SDK calls `write` synchronously; chunks are queued and handed to `handler` one at a
+/// time, in order, by a single pump task. `drain()` lets the exit path wait until every
+/// chunk the SDK wrote has been handled, so attach/log streams never close before their
+/// last bytes (the SDK's `wait()` returns only after the guest closed stdout/stderr).
 final class ProcessLogSink: Writer, @unchecked Sendable {
-    private let onChunk: @Sendable (Data) -> Void
+    private let continuation: AsyncStream<Data>.Continuation
+    private let pump: Task<Void, Never>
 
-    init(onChunk: @escaping @Sendable (Data) -> Void) {
-        self.onChunk = onChunk
-    }
-
-    /// Hop onto an async target from the SDK's synchronous `Writer.write`.
     init(hopping handler: @escaping @Sendable (Data) async -> Void) {
-        self.onChunk = { data in
-            Task { await handler(data) }
+        let (chunks, continuation) = AsyncStream<Data>.makeStream()
+        self.continuation = continuation
+        self.pump = Task {
+            for await chunk in chunks {
+                await handler(chunk)
+            }
         }
     }
 
     func write(_ data: Data) throws {
         guard !data.isEmpty else { return }
-        onChunk(data)
+        continuation.yield(data)
     }
 
     func close() throws {}
+
+    /// Stops accepting output and waits until everything already written is handled.
+    func drain() async {
+        continuation.finish()
+        await pump.value
+    }
+
+    deinit {
+        continuation.finish()
+    }
 }
 
 /// Host-side stdin pipe for a guest process (`ReaderStream` for the SDK).
