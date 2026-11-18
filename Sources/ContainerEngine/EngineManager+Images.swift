@@ -152,7 +152,9 @@ extension EngineManager {
                     repoTags: Array(Set(tags)).sorted(),
                     repoDigests: Array(Set(repoDigests)).sorted(),
                     created: await Self.createdDate(of: primary),
-                    size: await Self.totalSize(of: primary)
+                    size: await Self.totalSize(of: primary),
+                    labels: await configLabels(of: primary),
+                    containers: containers.values.filter { $0.imageID == digest }.count
                 )
             )
         }
@@ -225,6 +227,8 @@ extension EngineManager {
             labels: config?.config?.labels ?? [:],
             layers: config?.rootfs.diffIDs ?? [],
             exposedPorts: await Self.exposedPorts(of: image, platform: platform),
+            volumes: await Self.volumePaths(of: image, platform: platform),
+            shell: await Self.shell(of: image, platform: platform),
             healthcheck: await Self.healthcheck(of: image, platform: platform)
         )
     }
@@ -434,6 +438,26 @@ extension EngineManager {
             }
         }
         return ports
+    }
+
+    static func volumePaths(of image: Containerization.Image, platform: Platform) async -> [String] {
+        guard let blob = await Self.dockerConfigBlob(of: image, platform: platform) else { return [] }
+        return blob.config?.Volumes?.keys.sorted() ?? []
+    }
+
+    static func shell(of image: Containerization.Image, platform: Platform) async -> [String] {
+        guard let blob = await Self.dockerConfigBlob(of: image, platform: platform) else { return [] }
+        return blob.config?.Shell ?? []
+    }
+
+    private static func dockerConfigBlob(of image: Containerization.Image, platform: Platform) async -> ImageExposedPortsBlob? {
+        guard let manifest = try? await image.manifest(for: platform),
+            let content = try? await image.getContent(digest: manifest.config.digest),
+            let blob: ImageExposedPortsBlob = try? content.decode()
+        else {
+            return nil
+        }
+        return blob
     }
 
     /// Docker stores `Healthcheck` on the image config; OCI ImageConfig drops that field.
@@ -890,6 +914,8 @@ private struct ImageExposedPortsBlob: Decodable {
 
     struct Config: Decodable {
         var ExposedPorts: [String: Empty]?
+        var Volumes: [String: Empty]?
+        var Shell: [String]?
         var Healthcheck: Healthcheck?
 
         struct Empty: Decodable {}

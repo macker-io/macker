@@ -14,6 +14,8 @@ public struct EngineImageSummary: Sendable {
     public let repoDigests: [String]
     public let created: Date
     public let size: Int64
+    public let labels: [String: String]
+    public let containers: Int
 
     public var isDangling: Bool { repoTags.isEmpty }
 }
@@ -36,6 +38,8 @@ public struct EngineImageInspect: Sendable {
     public let labels: [String: String]
     public let layers: [String]
     public let exposedPorts: [EnginePortBinding]
+    public let volumes: [String]
+    public let shell: [String]
     public let healthcheck: EngineHealthcheck?
 }
 

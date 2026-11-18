@@ -11,11 +11,21 @@ public struct Router: Sendable {
 
     public func handle(_ request: HTTPRequest) async -> HTTPResponse {
         let (apiVersion, path) = Self.splitAPIVersion(request.path)
-        if let apiVersion, apiVersion != DockerAPI.version {
-            return Self.jsonError(
-                status: 400,
-                message: "client version \(apiVersion) is too new. Maximum supported API version is \(DockerAPI.version)"
-            )
+        if let apiVersion {
+            switch DockerAPI.check(apiVersion) {
+            case .supported:
+                break
+            case .tooNew:
+                return Self.jsonError(
+                    status: 400,
+                    message: "client version \(apiVersion) is too new. Maximum supported API version is \(DockerAPI.version)"
+                )
+            case .tooOld:
+                return Self.jsonError(
+                    status: 400,
+                    message: "client version \(apiVersion) is too old. Minimum supported API version is \(DockerAPI.minVersion)"
+                )
+            }
         }
 
         let method = request.method.uppercased()
@@ -87,6 +97,18 @@ public struct Router: Sendable {
             }
             if let route = Self.matchNamedImage(method: method, path: path) {
                 return await handleNamedImage(route, request: request)
+            }
+            if let checkpoint = Self.matchCheckpoint(method: method, path: path) {
+                return await checkpointResponse(checkpoint)
+            }
+            if let plugin = Self.pluginResponse(method: method, path: path, query: request.query) {
+                return plugin
+            }
+            if let swarm = Self.swarmResponse(method: method, path: path) {
+                return swarm
+            }
+            if method == "GET", let name = Self.distributionName(path) {
+                return await distributionInspect(name, request: request)
             }
             return Self.jsonError(status: 404, message: "page not found")
         }

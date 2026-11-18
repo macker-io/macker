@@ -495,7 +495,7 @@ struct ImageGroup: ParsableCommand {
         commandName: "image",
         abstract: "Manage images.",
         subcommands: [
-            ImageLs.self, Pull.self, ImageRm.self, Tag.self, Push.self, History.self, ImageInspect.self,
+            ImageLs.self, Build.self, Pull.self, ImageRm.self, Tag.self, Push.self, History.self, ImageInspect.self,
             ImagePrune.self, Save.self, Load.self, Import.self,
         ]
     )

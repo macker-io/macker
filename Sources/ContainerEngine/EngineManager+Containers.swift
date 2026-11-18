@@ -270,13 +270,33 @@ extension EngineManager {
         await publish(EngineEvent(type: "container", action: "rename", actorID: container.id, attributes: ["name": name, "oldName": old]))
     }
 
-    public func waitContainer(_ idOrName: String) async throws -> Int {
+    /// Docker `POST /containers/{id}/wait?condition=`. `not-running` returns immediately when the
+    /// container is not running. `next-exit` waits for a future exit. `removed` waits for deletion.
+    public func waitContainer(_ idOrName: String, condition: String = "not-running") async throws -> Int {
+        let parsed = try EngineWaitCondition.parse(condition)
         let container = try resolveContainer(idOrName)
-        if container.state == "exited" || container.state == "dead" {
-            return container.exitCode
+        switch parsed {
+        case .notRunning:
+            if !container.isActive, container.state != "restarting" {
+                return container.exitCode
+            }
+            return await waitForExit(container.id)
+        case .nextExit:
+            return await waitForExit(container.id)
+        case .removed:
+            return await waitForRemoval(container.id)
         }
-        return await withCheckedContinuation { continuation in
-            waiters[container.id, default: []].append(continuation)
+    }
+
+    private func waitForExit(_ id: String) async -> Int {
+        await withCheckedContinuation { continuation in
+            waiters[id, default: []].append(continuation)
+        }
+    }
+
+    private func waitForRemoval(_ id: String) async -> Int {
+        await withCheckedContinuation { continuation in
+            removedWaiters[id, default: []].append(continuation)
         }
     }
 
@@ -344,16 +364,46 @@ extension EngineManager {
         return (text, tty, live)
     }
 
-    public func updateContainer(_ idOrName: String, memory: Int64?, nanoCpus: Int64?) async throws {
+    public func updateContainer(_ idOrName: String, _ update: EngineContainerUpdate) async throws -> [String] {
         var container = try resolveContainer(idOrName)
-        if let memory {
-            container.memory = memory
+        if container.state == "dead" || container.state == "removing" {
+            throw EngineError.conflict(
+                "Cannot update container \(container.id): container is marked for removal and cannot be \"update\""
+            )
         }
-        if let nanoCpus {
-            container.nanoCpus = nanoCpus
+        if let policy = update.restartPolicy {
+            if container.autoRemove, policy.name != "no" {
+                throw EngineError.conflict(
+                    "Cannot update container \(container.id): Restart policy cannot be updated because AutoRemove is enabled for the container"
+                )
+            }
+            container.run.restartPolicy = policy
+        }
+        var resized = false
+        if let memory = update.memory {
+            if memory < 0 {
+                throw EngineError.invalidArgument("invalid memory limit: \(memory)")
+            }
+            if memory != container.memory {
+                container.memory = memory
+                resized = true
+            }
+        }
+        if let nanoCpus = update.nanoCpus {
+            if nanoCpus < 0 {
+                throw EngineError.invalidArgument("invalid NanoCpus: \(nanoCpus)")
+            }
+            if nanoCpus != container.nanoCpus {
+                container.nanoCpus = nanoCpus
+                resized = true
+            }
         }
         saveContainer(container)
         await publish(EngineEvent(type: "container", action: "update", actorID: container.id, attributes: ["name": container.name]))
+        if resized, container.isActive {
+            return ["memory and CPU limits apply on the next start; a running MicroVM is not resized"]
+        }
+        return []
     }
 
     public func containerTop(_ idOrName: String, psArgs: String? = nil) async throws -> EngineContainerTop {
@@ -486,6 +536,13 @@ extension EngineManager {
         }
     }
 
+    private func finishRemovedWaiters(id: String, code: Int) {
+        let pending = removedWaiters.removeValue(forKey: id) ?? []
+        for waiter in pending {
+            waiter.resume(returning: code)
+        }
+    }
+
     private func uniqueName(_ requested: String?) throws -> String {
         let raw = requested?.trimmingCharacters(in: CharacterSet(charactersIn: "/")) ?? ""
         let name: String
@@ -514,10 +571,13 @@ extension EngineManager {
     }
 
     func forgetContainer(_ id: String) async {
+        let code = containers[id]?.exitCode ?? 0
         cancelHealthMonitor(id)
         await stopPortPublishers(id)
         await releaseInterfaces(id, keepAddresses: false)
         containers[id] = nil
+        finishRemovedWaiters(id: id, code: code)
+        finishWaiters(id: id, code: code)
         ttySessions[id] = nil
         statsSamples[id] = nil
         lastStats[id] = nil

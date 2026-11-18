@@ -1,4 +1,5 @@
 import ArgumentParser
+import Darwin
 import Foundation
 
 struct Version: ParsableCommand {
@@ -498,11 +499,91 @@ struct SystemPrune: ParsableCommand {
     }
 }
 
+struct SystemDialStdio: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "dial-stdio",
+        abstract: "Proxy the daemon UNIX socket over stdin and stdout."
+    )
+
+    func run() throws {
+        let socketPath = try DaemonAPI.socket()
+        let fd = try Self.connect(socketPath)
+        defer { Darwin.close(fd) }
+        let input = FileHandle.standardInput.fileDescriptor
+        let output = FileHandle.standardOutput.fileDescriptor
+        let group = DispatchGroup()
+        group.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            defer { group.leave() }
+            Self.copy(from: input, to: fd)
+            _ = shutdown(fd, SHUT_WR)
+        }
+        Self.copy(from: fd, to: output)
+        group.wait()
+    }
+
+    private static func connect(_ socketPath: String) throws -> Int32 {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else {
+            throw CLIError.http("failed to create UNIX socket: \(String(cString: strerror(errno)))")
+        }
+        var addr = sockaddr_un()
+        addr.sun_len = UInt8(MemoryLayout<sockaddr_un>.stride)
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let pathLimit = MemoryLayout.size(ofValue: addr.sun_path) - 1
+        guard socketPath.utf8.count <= pathLimit else {
+            Darwin.close(fd)
+            throw CLIError.http("socket path exceeds UNIX address limit: \(socketPath)")
+        }
+        socketPath.withCString { src in
+            withUnsafeMutableBytes(of: &addr.sun_path) { dest in
+                dest.copyBytes(from: UnsafeRawBufferPointer(start: src, count: socketPath.utf8.count + 1))
+            }
+        }
+        let connected = withUnsafePointer(to: &addr) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        guard connected == 0 else {
+            let message = String(cString: strerror(errno))
+            Darwin.close(fd)
+            throw CLIError.http("cannot connect to \(socketPath): \(message)")
+        }
+        return fd
+    }
+
+    private static func copy(from source: Int32, to destination: Int32) {
+        var buffer = [UInt8](repeating: 0, count: 32 * 1024)
+        while true {
+            let count = Darwin.read(source, &buffer, buffer.count)
+            if count == 0 { return }
+            if count < 0 {
+                if errno == EINTR { continue }
+                return
+            }
+            var offset = 0
+            while offset < count {
+                let wrote = buffer.withUnsafeBytes { raw -> Int in
+                    guard let base = raw.baseAddress else { return 0 }
+                    return Darwin.write(destination, base + offset, count - offset)
+                }
+                if wrote < 0 {
+                    if errno == EINTR { continue }
+                    return
+                }
+                if wrote == 0 { return }
+                offset += wrote
+            }
+        }
+    }
+}
+
 struct SystemGroup: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "system",
         abstract: "Manage Macker.",
-        subcommands: [SystemDf.self, Info.self, Events.self, SystemPrune.self]
+        subcommands: [SystemDf.self, Info.self, Events.self, SystemPrune.self, SystemDialStdio.self]
     )
 }
 

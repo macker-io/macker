@@ -180,6 +180,115 @@ struct Restart: ParsableCommand {
     func run() throws { try ContainerAction.post("restart", containers, query: "t=\(time)", timeoutSeconds: time + 30) }
 }
 
+struct Update: ParsableCommand {
+    static let configuration = CommandConfiguration(abstract: "Update configuration of one or more containers.")
+
+    @Option(name: .customLong("blkio-weight"), help: "Block IO (relative weight), between 10 and 1000.")
+    var blkioWeight: Int?
+
+    @Option(name: .customLong("cpu-period"), help: "Limit CPU CFS period.")
+    var cpuPeriod: Int?
+
+    @Option(name: .customLong("cpu-quota"), help: "Limit CPU CFS quota.")
+    var cpuQuota: Int?
+
+    @Option(name: .customLong("cpu-rt-period"), help: "Limit the CPU real-time period in microseconds.")
+    var cpuRtPeriod: Int?
+
+    @Option(name: .customLong("cpu-rt-runtime"), help: "Limit the CPU real-time runtime in microseconds.")
+    var cpuRtRuntime: Int?
+
+    @Option(name: [.customShort("c"), .customLong("cpu-shares")], help: "CPU shares (relative weight).")
+    var cpuShares: Int?
+
+    @Option(help: "Number of CPUs.")
+    var cpus: Double?
+
+    @Option(name: .customLong("cpuset-cpus"), help: "CPUs in which to allow execution (0-3, 0,1).")
+    var cpusetCpus: String?
+
+    @Option(name: .customLong("cpuset-mems"), help: "MEMs in which to allow execution (0-3, 0,1).")
+    var cpusetMems: String?
+
+    @Option(name: [.customShort("m"), .long], help: "Memory limit.")
+    var memory: String?
+
+    @Option(name: .customLong("memory-reservation"), help: "Memory soft limit.")
+    var memoryReservation: String?
+
+    @Option(name: .customLong("memory-swap"), help: "Swap limit equal to memory plus swap: '-1' for unlimited swap.")
+    var memorySwap: String?
+
+    @Option(name: .customLong("pids-limit"), help: "Tune container pids limit (set -1 for unlimited).")
+    var pidsLimit: Int?
+
+    @Option(help: "Restart policy to apply when a container exits.")
+    var restart: String?
+
+    @Option(name: .customLong("cpu-count"), help: "Windows: CPU count.")
+    var cpuCount: Int?
+
+    @Option(name: .customLong("cpu-percent"), help: "Windows: CPU percent.")
+    var cpuPercent: Int?
+
+    @Option(name: .customLong("io-maxbandwidth"), help: "Windows: maximum IO bandwidth limit.")
+    var ioMaxBandwidth: String?
+
+    @Option(name: .customLong("io-maxiops"), help: "Windows: maximum IOps limit.")
+    var ioMaxIOps: Int?
+
+    @Argument var containers: [String]
+
+    func run() throws {
+        let body = try encodedBody()
+        for id in containers {
+            let response = try DaemonAPI.decode(
+                UpdateResponse.self,
+                from: DaemonAPI.post("/containers/\(DaemonAPI.path(id))/update", body: body, timeoutSeconds: 30)
+            )
+            for warning in response.Warnings ?? [] {
+                fputs("\(warning)\n", stderr)
+            }
+            print(id)
+        }
+    }
+
+    private func encodedBody() throws -> Data {
+        var body: [String: Any] = [:]
+        if let memory { body["Memory"] = try DaemonAPI.parseBytes(memory) }
+        if let cpus { body["NanoCpus"] = Int64((cpus * 1_000_000_000).rounded()) }
+        if let restart {
+            let policy = try EngineRestartPolicy.parse(restart)
+            body["RestartPolicy"] = [
+                "Name": policy.name,
+                "MaximumRetryCount": policy.maximumRetryCount,
+            ]
+        }
+        if let cpuShares { body["CpuShares"] = cpuShares }
+        if let cpuPeriod { body["CpuPeriod"] = cpuPeriod }
+        if let cpuQuota { body["CpuQuota"] = cpuQuota }
+        if let cpuRtPeriod { body["CpuRealtimePeriod"] = cpuRtPeriod }
+        if let cpuRtRuntime { body["CpuRealtimeRuntime"] = cpuRtRuntime }
+        if let cpusetCpus { body["CpusetCpus"] = cpusetCpus }
+        if let cpusetMems { body["CpusetMems"] = cpusetMems }
+        if let memoryReservation { body["MemoryReservation"] = try DaemonAPI.parseBytes(memoryReservation) }
+        if let memorySwap {
+            body["MemorySwap"] = memorySwap == "-1" ? -1 : try DaemonAPI.parseBytes(memorySwap)
+        }
+        if let blkioWeight { body["BlkioWeight"] = blkioWeight }
+        if let pidsLimit { body["PidsLimit"] = pidsLimit }
+        if let cpuCount { body["CpuCount"] = cpuCount }
+        if let cpuPercent { body["CpuPercent"] = cpuPercent }
+        if let ioMaxBandwidth { body["IOMaximumBandwidth"] = try DaemonAPI.parseBytes(ioMaxBandwidth) }
+        if let ioMaxIOps { body["IOMaximumIOps"] = ioMaxIOps }
+        return try JSONSerialization.data(withJSONObject: body)
+    }
+
+    private struct UpdateResponse: Decodable {
+        var Warnings: [String]?
+    }
+}
+
 struct Kill: ParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Kill one or more running containers.")
     @Option(name: .shortAndLong, help: "Signal to send.")
@@ -384,7 +493,7 @@ struct ContainerGroup: ParsableCommand {
         commandName: "container",
         abstract: "Manage containers.",
         subcommands: [
-            ContainerLs.self, Run.self, Create.self, Start.self, Stop.self, Restart.self, Kill.self,
+            ContainerLs.self, Run.self, Create.self, Start.self, Stop.self, Restart.self, Update.self, Kill.self,
             ContainerRm.self, Pause.self, Unpause.self, Rename.self, Logs.self, Wait.self, Top.self,
             Stats.self, Attach.self, Exec.self, Cp.self, Export.self, Diff.self, Commit.self, ContainerInspect.self, Port.self,
             ContainerPrune.self,

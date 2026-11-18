@@ -36,6 +36,21 @@ struct RouterAPITests {
             #expect(tooNew.status == 400)
             let message = try RouterTestSupport.jsonObject(tooNew)["message"] as? String
             #expect(message?.contains("too new") == true)
+            #expect(message?.contains(DockerAPI.version) == true)
+
+            let tooOld = await router.handle(try RouterTestSupport.request("GET", "/v1.23/version"))
+            #expect(tooOld.status == 400)
+            let oldMessage = try RouterTestSupport.jsonObject(tooOld)["message"] as? String
+            #expect(oldMessage?.contains("too old") == true)
+            #expect(oldMessage?.contains(DockerAPI.minVersion) == true)
+
+            let older = await router.handle(try RouterTestSupport.request("GET", "/v1.40/_ping"))
+            #expect(older.status == 200)
+            let minimum = await router.handle(try RouterTestSupport.request("GET", "/v1.24/version"))
+            #expect(minimum.status == 200)
+            let versionBody = try RouterTestSupport.jsonObject(minimum)
+            #expect(versionBody["ApiVersion"] as? String == DockerAPI.version)
+            #expect(versionBody["MinAPIVersion"] as? String == DockerAPI.minVersion)
         }
     }
 

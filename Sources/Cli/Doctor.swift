@@ -14,7 +14,7 @@ struct Doctor: ParsableCommand {
         var results: [CheckResult] = []
         results.append(contentsOf: hostChecks())
         results.append(contentsOf: engineChecks())
-        results.append(contentsOf: socketChecks())
+        results.append(contentsOf: try socketChecks())
         results.append(contentsOf: helperChecks())
         Report.print(results)
         print("")
@@ -95,8 +95,8 @@ struct Doctor: ParsableCommand {
         }
     }
 
-    private func socketChecks() -> [CheckResult] {
-        let path = DaemonAPI.socket
+    private func socketChecks() throws -> [CheckResult] {
+        let path = try DaemonAPI.socket()
         var results: [CheckResult] = []
         if FileManager.default.fileExists(atPath: path) {
             results.append(CheckResult(status: .ok, title: "Socket file", detail: path))

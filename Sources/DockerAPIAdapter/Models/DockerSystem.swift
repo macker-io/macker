@@ -29,7 +29,7 @@ public struct DockerVersionResponse: Encodable, Sendable {
     public static func current() -> DockerVersionResponse {
         let details: [String: String] = [
             "ApiVersion": DockerAPI.version,
-            "MinAPIVersion": DockerAPI.version,
+            "MinAPIVersion": DockerAPI.minVersion,
             "Os": "darwin",
             "Arch": "arm64",
             "Experimental": "true",
@@ -44,7 +44,7 @@ public struct DockerVersionResponse: Encodable, Sendable {
             ],
             Version: DockerAPI.daemonVersion,
             ApiVersion: DockerAPI.version,
-            MinAPIVersion: DockerAPI.version,
+            MinAPIVersion: DockerAPI.minVersion,
             GitCommit: "dev",
             GoVersion: "swift-6.2",
             Os: "darwin",

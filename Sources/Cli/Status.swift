@@ -8,7 +8,7 @@ struct Status: ParsableCommand {
     )
 
     func run() throws {
-        let socket = DaemonAPI.socket
+        let socket = try DaemonAPI.socket()
         print("Socket: \(socket)")
 
         guard FileManager.default.fileExists(atPath: socket) else {
