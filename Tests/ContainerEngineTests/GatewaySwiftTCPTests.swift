@@ -9,12 +9,12 @@ private typealias IPv4Address = ContainerizationExtras.IPv4Address
 
 @Suite(.serialized)
 struct GatewaySwiftTCPTests {
-    @Test func bridgesTCPPayloadThroughAMacSocket() throws {
+    @Test func bridgesTCPPayloadThroughAMacSocket() async throws {
         let listener = try NWListener(using: .tcp, on: .any)
         let listenerQueue = DispatchQueue(label: "test.swifttcp.listener")
-        let listenerReady = DispatchSemaphore(value: 0)
+        let listenerReady = OSAllocatedUnfairLock(initialState: false)
         listener.stateUpdateHandler = { state in
-            if case .ready = state { listenerReady.signal() }
+            if case .ready = state { listenerReady.withLock { $0 = true } }
         }
         listener.newConnectionHandler = { connection in
             connection.stateUpdateHandler = { state in
@@ -26,16 +26,15 @@ struct GatewaySwiftTCPTests {
         }
         listener.start(queue: listenerQueue)
         defer { listener.cancel() }
-        #expect(listenerReady.wait(timeout: .now() + 1) == .success)
+        let ready = try await waitUntil(timeout: .seconds(1)) { listenerReady.withLock { $0 } }
+        try #require(ready, "TCP listener did not become ready")
         let hostPort = try #require(listener.port?.rawValue)
 
         let guest = IPv4Address(0xAC11_0002)
         let remote = IPv4Address(0x7F00_0001)
         let outputs = OSAllocatedUnfairLock<[Data]>(initialState: [])
-        let outputSignal = DispatchSemaphore(value: 0)
         let stack = GatewaySwiftTCP { _, data in
             outputs.withLock { $0.append(data) }
-            outputSignal.signal()
         }
         defer { stack.closeAll() }
 
@@ -48,10 +47,12 @@ struct GatewaySwiftTCPTests {
             src: guest, dst: remote, payload: syn
         )
         stack.handleTCP(packet: synPacket, segment: try #require(TCPSegment.parse(syn)))
-        #expect(outputSignal.wait(timeout: .now() + 2) == .success)
+        let replied = try await waitUntil(timeout: .seconds(2)) { outputs.withLock { !$0.isEmpty } }
+        try #require(replied, "Gateway did not reply to SYN")
         let synAckData = try #require(outputs.withLock { $0.first })
         let synAckPacket = try #require(IPv4Packet.parse(synAckData))
         let synAckSegment = try #require(TCPSegment.parse(synAckPacket.payload))
+        try #require(synAckSegment.flags.contains(.synAck))
         let ack = makeTCPPacket(
             src: guest, dst: remote, srcPort: 40_000, dstPort: hostPort,
             seq: 8, ack: synAckSegment.seq &+ 1, flags: TCPSegment.Flags.ack.rawValue
@@ -62,11 +63,8 @@ struct GatewaySwiftTCPTests {
         )
         stack.handleTCP(packet: ackPacket, segment: try #require(TCPSegment.parse(ack)))
 
-        var receivedHostPayload = false
-        let deadline = Date().addingTimeInterval(3)
-        while Date() < deadline, !receivedHostPayload {
-            _ = outputSignal.wait(timeout: .now() + 0.1)
-            receivedHostPayload = outputs.withLock { packets in
+        let receivedHostPayload = try await waitUntil(timeout: .seconds(3)) {
+            outputs.withLock { packets in
                 packets.compactMap { IPv4Packet.parse($0) }
                     .compactMap { TCPSegment.parse($0.payload)?.payload }
                     .contains(Data("hello-from-host".utf8))
@@ -271,6 +269,17 @@ struct GatewaySwiftTCPTests {
         #expect(result.transferred == total)
         #expect(result.mbps > 200, "guest→host throughput regression (\(result.mbps) Mbps)")
     }
+}
+
+// Suspend between checks so the gateway's ingest task can run even on a single worker.
+private func waitUntil(timeout: Duration, _ condition: () -> Bool) async throws -> Bool {
+    let clock = ContinuousClock()
+    let deadline = clock.now + timeout
+    while !condition() {
+        guard clock.now < deadline else { return false }
+        try await clock.sleep(until: min(deadline, clock.now + .milliseconds(5)))
+    }
+    return true
 }
 
 private struct ThroughputResult {
