@@ -24,11 +24,16 @@ public enum DockerGlobalFlags {
         while index < arguments.count {
             let arg = arguments[index]
             if arg == "--" || !arg.hasPrefix("-") || arg == "-" {
+                kept.append(contentsOf: rewriteHelpShortFlag(Array(arguments[index...])))
+                break
+            }
+            if arg == "--help" || arg == "--version" || arg == "-v" {
                 kept.append(contentsOf: arguments[index...])
                 break
             }
-            if arg == "--help" || arg == "-h" || arg == "--version" || arg == "-v" {
-                kept.append(contentsOf: arguments[index...])
+            if arg == "-h" {
+                kept.append("--help")
+                kept.append(contentsOf: arguments.dropFirst(index + 1))
                 break
             }
             if let value = consume("--host", "-H", arg, arguments, &index) {
@@ -58,6 +63,36 @@ public enum DockerGlobalFlags {
             break
         }
         return kept
+    }
+
+    /// Maps `-h` to `--help` for every subcommand except `run` and `create`,
+    /// where `-h` is Docker's short option for `--hostname`.
+    private static func rewriteHelpShortFlag(_ rest: [String]) -> [String] {
+        let nonFlags = rest.prefix(while: { $0 != "--" }).filter { !$0.hasPrefix("-") }
+        let isCreateOrRun: Bool = {
+            guard let first = nonFlags.first else { return false }
+            if first == "run" || first == "create" { return true }
+            if first == "container", nonFlags.dropFirst().first == "run" || nonFlags.dropFirst().first == "create" {
+                return true
+            }
+            return false
+        }()
+        if isCreateOrRun { return rest }
+        var out: [String] = []
+        var stop = false
+        for arg in rest {
+            if stop {
+                out.append(arg)
+                continue
+            }
+            if arg == "--" {
+                stop = true
+                out.append(arg)
+                continue
+            }
+            out.append(arg == "-h" ? "--help" : arg)
+        }
+        return out
     }
 
     /// `--host`, then `MACKER_HOST` / `DOCKER_HOST`, then the selected context, then the default socket.

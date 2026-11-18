@@ -30,5 +30,9 @@ struct ContextStoreTests {
         #expect(stripped == ["macker", "ps", "-a"])
         #expect(DockerGlobalFlags.context == "other")
         #expect(DockerGlobalFlags.host == "unix:///tmp/flag.sock")
+
+        #expect(DockerGlobalFlags.install(from: ["macker", "ps", "-h"]) == ["macker", "ps", "--help"])
+        #expect(DockerGlobalFlags.install(from: ["macker", "run", "-h", "web", "alpine"]) == ["macker", "run", "-h", "web", "alpine"])
+        #expect(DockerGlobalFlags.install(from: ["macker", "container", "create", "-h", "web", "alpine"]) == ["macker", "container", "create", "-h", "web", "alpine"])
     }
 }

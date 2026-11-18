@@ -4,7 +4,7 @@ Compared against the [Docker Engine CLI](https://docs.docker.com/reference/cli/d
 
 Not compared: Macker-only commands (`setup`, `fetch-runtime`, `doctor`, `status`, `helper`). Not implemented as working product surfaces: Compose, buildx, and Swarm membership. `plugin`, `checkpoint`, `swarm`, `node`, `service`, `secret`, `config`, and `stack` are recognized; see below.
 
-`--format` (`images`, `history`, `search`, `version`, `info`, `events`, `system df`, `inspect`, `volume ls`) supports `table`, `{{.Field}}` (including dotted paths), and `json`. No pipeline functions, `if`, or `range`.
+`--format` (`images`, `history`, `search`, `version`, `info`, `events`, `system df`, `inspect`, `volume ls`) supports `table`, `{{.Field}}` (including dotted paths), `{{json .}}`, `{{json .Field}}`, and `json`. No pipeline functions, `if`, or `range`.
 
 Networking model: [networking.md](networking.md). BuildKit follow-up: [buildkit.md](buildkit.md).
 
@@ -12,11 +12,11 @@ Networking model: [networking.md](networking.md). BuildKit follow-up: [buildkit.
 
 | Area      | Commands                                                                                                                                                                                                                                 |
 | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Container | `run`, `create`, `start`, `stop`, `restart`, `update`, `kill`, `rm`, `pause`, `unpause`, `rename`, `logs`, `wait`, `top`, `stats`, `attach`, `exec`, `cp`, `export`, `diff`, `commit`, `port`, `ps` / `container ls`, `inspect`, `container prune` |
-| Image     | `pull`, `push`, `images` / `image ls`, `rmi` / `image rm`, `tag`, `history`, `search`, `inspect`, `save`, `load`, `import`, `image prune`, `build` / `image build`                                                                       |
+| Container | `run`, `create`, `start`, `stop`, `restart`, `update`, `kill`, `rm`, `pause`, `unpause`, `rename`, `logs`, `wait`, `top`, `stats`, `attach`, `exec`, `cp`, `export`, `diff`, `commit`, `port`, `ps` / `container ls` (`ps`, `list`), `inspect`, `container prune` |
+| Image     | `pull`, `push`, `images` / `image ls` (`list`), `rmi` / `image rm`, `tag`, `history`, `search`, `inspect`, `save`, `load`, `import`, `image prune`, `build` / `image build`                                                       |
 | Builder   | `build`, `builder prune`                                                                                                                                                                                                                 |
-| Volume    | `volume ls`, `create`, `inspect`, `rm`, `prune`                                                                                                                                                                                          |
-| Network   | `network ls`, `create`, `inspect`, `rm`, `connect`, `disconnect`, `prune`                                                                                                                                                                |
+| Volume    | `volume ls` (`list`), `create`, `inspect`, `rm`, `prune`                                                                                                                                                                                 |
+| Network   | `network ls` (`list`), `create`, `inspect`, `rm`, `connect`, `disconnect`, `prune`                                                                                                                                                       |
 | System    | `version`, `info`, `events`, `system df`, `system prune`, `login`, `logout`                                                                                                                                                              |
 | Plugin    | `plugin ls`, `inspect`, `install`, `enable`, `disable`, `rm`, `create`, `push`, `set`, `upgrade`                                                                                                                                         |
 | Swarm     | `swarm`, `node`, `service`, `secret`, `config`, `stack` (commands recognized; this node is not a swarm manager)                                                                                                                          |
@@ -28,7 +28,7 @@ Options are complete (no extra notes below) for: `pause`, `unpause`, `rename`, `
 
 ### `run` / `create`
 
-CLI options are wired. `--hostname` has no short `-h` (reserved for `--help`). `--ip6` assigns static IPv6 on `--ipv6` bridge networks. `-p` supports bracketed IPv6 host bindings such as `[::1]:8080:80`. `--network container:` / `macvlan` / `ipvlan` are not implemented. `--volume-driver` must be `local`. `--rm` and `--restart` conflict. Foreground `--rm` is removed by the CLI after wait; `-d --rm` uses engine AutoRemove.
+CLI options are wired. `--hostname` (`-h` on `run` / `create`) sets the container hostname. `--ip6` assigns static IPv6 on `--ipv6` bridge networks. `-p` supports bracketed IPv6 host bindings such as `[::1]:8080:80`. `--network container:` / `macvlan` / `ipvlan` are not implemented. `--volume-driver` must be `local`. `--rm` and `--restart` conflict. Foreground `--rm` is removed by the CLI after wait; `-d --rm` uses engine AutoRemove.
 
 | Accepted but no-op / different                                                              | Notes                                                                                                      |
 | ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |

@@ -25,6 +25,7 @@ public struct Macker: ParsableCommand {
             BuilderGroup.self,
             PluginGroup.self, CheckpointGroup.self, ContextGroup.self, ManifestGroup.self, TrustGroup.self,
             SwarmGroup.self, NodeGroup.self, ServiceGroup.self, SecretGroup.self, ConfigGroup.self, StackGroup.self,
-        ]
+        ],
+        helpNames: [.long]
     )
 }

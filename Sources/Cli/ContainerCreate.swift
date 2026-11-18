@@ -8,7 +8,7 @@ struct ContainerCreateOptions: ParsableArguments {
     @Option(help: "Assign a name to the container.")
     var name: String?
 
-    @Option(help: "Container host name.")
+    @Option(name: [.customShort("h"), .long], help: "Container host name.")
     var hostname: String?
 
     @Option(help: "Container NIS domain name.")

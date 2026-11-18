@@ -493,7 +493,7 @@ struct ContainerGroup: ParsableCommand {
         commandName: "container",
         abstract: "Manage containers.",
         subcommands: [
-            ContainerLs.self, Run.self, Create.self, Start.self, Stop.self, Restart.self, Update.self, Kill.self,
+            ContainerLs.self, ContainerPs.self, ContainerList.self, Run.self, Create.self, Start.self, Stop.self, Restart.self, Update.self, Kill.self,
             ContainerRm.self, Pause.self, Unpause.self, Rename.self, Logs.self, Wait.self, Top.self,
             Stats.self, Attach.self, Exec.self, Cp.self, Export.self, Diff.self, Commit.self, ContainerInspect.self, Port.self,
             ContainerPrune.self,
@@ -503,6 +503,18 @@ struct ContainerGroup: ParsableCommand {
 
 struct ContainerLs: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "ls", abstract: "List containers.")
+    @OptionGroup var options: ContainerListOptions
+    func run() throws { try Ps.list(options) }
+}
+
+struct ContainerPs: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "ps", abstract: "List containers.", shouldDisplay: false)
+    @OptionGroup var options: ContainerListOptions
+    func run() throws { try Ps.list(options) }
+}
+
+struct ContainerList: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "list", abstract: "List containers.", shouldDisplay: false)
     @OptionGroup var options: ContainerListOptions
     func run() throws { try Ps.list(options) }
 }

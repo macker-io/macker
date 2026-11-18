@@ -6,15 +6,13 @@ struct NetworkGroup: ParsableCommand {
         commandName: "network",
         abstract: "Manage networks.",
         subcommands: [
-            NetworkLs.self, NetworkCreate.self, NetworkInspect.self, NetworkRm.self,
+            NetworkLs.self, NetworkList.self, NetworkCreate.self, NetworkInspect.self, NetworkRm.self,
             NetworkConnect.self, NetworkDisconnect.self, NetworkPrune.self,
         ]
     )
 }
 
-struct NetworkLs: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "ls", abstract: "List networks.")
-
+struct NetworkListOptions: ParsableArguments {
     @Option(name: [.customShort("f"), .long], help: "Filter output (e.g. 'driver=bridge', 'label=key=value').")
     var filter: [String] = []
 
@@ -26,8 +24,22 @@ struct NetworkLs: ParsableCommand {
 
     @Flag(name: .customLong("no-trunc"), help: "Do not truncate output.")
     var noTrunc = false
+}
+
+struct NetworkLs: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "ls", abstract: "List networks.")
+
+    @OptionGroup var options: NetworkListOptions
 
     func run() throws {
+        try Self.list(options)
+    }
+
+    static func list(_ options: NetworkListOptions) throws {
+        let filter = options.filter
+        let format = options.format
+        let quiet = options.quiet
+        let noTrunc = options.noTrunc
         var path = "/networks"
         if !filter.isEmpty {
             path += "?filters=\(DaemonAPI.query(try DaemonAPI.filtersJSON(filter)))"
@@ -64,6 +76,12 @@ struct NetworkLs: ParsableCommand {
             [$0[0].1, $0[1].1, $0[2].1, $0[3].1]
         })
     }
+}
+
+struct NetworkList: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "list", abstract: "List networks.", shouldDisplay: false)
+    @OptionGroup var options: NetworkListOptions
+    func run() throws { try NetworkLs.list(options) }
 }
 
 struct NetworkCreate: ParsableCommand {

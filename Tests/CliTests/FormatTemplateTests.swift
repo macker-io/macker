@@ -53,4 +53,17 @@ struct FormatTemplateTests {
             _ = try FormatTemplate.render(template, row: [("ID", "abc")])
         }
     }
+
+    @Test func jsonSubfieldSupportsNestedObjectsAndRows() throws {
+        let template = try FormatTemplate.parse("{{json .NetworkSettings.Ports}}")
+        let object: [String: Any] = [
+            "NetworkSettings": [
+                "Ports": ["80/tcp": [["HostPort": "8080"]]]
+            ]
+        ]
+        #expect(try FormatTemplate.render(template, object: object) == "{\"80/tcp\":[{\"HostPort\":\"8080\"}]}")
+
+        let rowTemplate = try FormatTemplate.parse("{{json .Names}}")
+        #expect(try FormatTemplate.render(rowTemplate, row: [("Names", "web")]) == "\"web\"")
+    }
 }

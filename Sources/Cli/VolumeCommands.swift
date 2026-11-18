@@ -5,13 +5,11 @@ struct VolumeGroup: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "volume",
         abstract: "Manage volumes.",
-        subcommands: [VolumeLs.self, VolumeCreate.self, VolumeInspect.self, VolumeRm.self, VolumePrune.self]
+        subcommands: [VolumeLs.self, VolumeList.self, VolumeCreate.self, VolumeInspect.self, VolumeRm.self, VolumePrune.self]
     )
 }
 
-struct VolumeLs: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "ls", abstract: "List volumes.")
-
+struct VolumeListOptions: ParsableArguments {
     @Option(name: [.customShort("f"), .long], help: "Filter output (e.g. 'dangling=true', 'label=key=value').")
     var filter: [String] = []
 
@@ -20,13 +18,26 @@ struct VolumeLs: ParsableCommand {
 
     @Flag(name: [.customShort("q"), .long], help: "Only display volume names.")
     var quiet = false
+}
+
+struct VolumeLs: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "ls", abstract: "List volumes.")
+
+    @OptionGroup var options: VolumeListOptions
 
     func run() throws {
+        try Self.list(options)
+    }
+
+    static func list(_ options: VolumeListOptions) throws {
+        let filter = options.filter
+        let format = options.format
+        let quiet = options.quiet
         var path = "/volumes"
         if !filter.isEmpty {
             path += "?filters=\(DaemonAPI.query(try DaemonAPI.filtersJSON(filter)))"
         }
-        let list = try DaemonAPI.decode(VolumeList.self, from: DaemonAPI.get(path))
+        let list = try DaemonAPI.decode(VolumeListResponse.self, from: DaemonAPI.get(path))
         let volumes = list.Volumes ?? []
 
         if quiet {
@@ -57,6 +68,12 @@ struct VolumeLs: ParsableCommand {
         }
         Table.print(headers: ["DRIVER", "VOLUME NAME"], rows: rows.map { [$0[0].1, $0[1].1] })
     }
+}
+
+struct VolumeList: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "list", abstract: "List volumes.", shouldDisplay: false)
+    @OptionGroup var options: VolumeListOptions
+    func run() throws { try VolumeLs.list(options) }
 }
 
 struct VolumeCreate: ParsableCommand {
@@ -158,7 +175,7 @@ struct VolumePrune: ParsableCommand {
     }
 }
 
-private struct VolumeList: Decodable {
+private struct VolumeListResponse: Decodable {
     var Volumes: [VolumeItem]?
 }
 
