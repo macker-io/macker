@@ -3,19 +3,6 @@ import Foundation
 
 /// `POST /containers/{id}/update`. Nil fields are left unchanged. `0` is not a value here;
 /// the API layer already treats Docker's zero as "unset".
-public enum EngineWaitCondition: String, Sendable {
-    case notRunning = "not-running"
-    case nextExit = "next-exit"
-    case removed
-
-    static func parse(_ raw: String) throws -> EngineWaitCondition {
-        guard let condition = EngineWaitCondition(rawValue: raw) else {
-            throw EngineError.invalidArgument("invalid wait condition: \(raw)")
-        }
-        return condition
-    }
-}
-
 public struct EngineContainerUpdate: Sendable {
     public var memory: Int64?
     public var nanoCpus: Int64?
@@ -306,6 +293,12 @@ public struct EngineUlimit: Sendable, Codable, Equatable {
 }
 
 public struct EngineContainerRunConfig: Sendable, Codable, Equatable {
+    private enum LegacyCodingKeys: String, CodingKey { case initProcess }
+
+    public static let supportedSecurityOptions: Set<String> = [
+        "no-new-privileges", "no-new-privileges:true", "no-new-privileges=true",
+    ]
+
     public var extraHosts: [String]
     public var dns: [String]
     public var dnsSearch: [String]
@@ -320,12 +313,19 @@ public struct EngineContainerRunConfig: Sendable, Codable, Equatable {
     public var groupAdd: [String]
     public var publishAllPorts: Bool
     public var healthcheck: EngineHealthcheck?
-    public var initProcess: Bool
+    public var useInit: Bool
     public var sysctls: [String: String]
     public var capAdd: [String]
     public var capDrop: [String]
     public var securityOpt: [String]
     public var ulimits: [EngineUlimit]
+    /// The requested entrypoint and cmd after image defaults (Docker `Config.Entrypoint` /
+    /// `Config.Cmd`); `command` on the record is their concatenation.
+    public var entrypoint: [String]?
+    public var cmd: [String]?
+    /// Daemon-owned helper container (e.g. the BuildKit builder): hidden from listings,
+    /// name lookup and events.
+    public var system: Bool?
 
     public init(
         extraHosts: [String] = [],
@@ -342,12 +342,15 @@ public struct EngineContainerRunConfig: Sendable, Codable, Equatable {
         groupAdd: [String] = [],
         publishAllPorts: Bool = false,
         healthcheck: EngineHealthcheck? = nil,
-        initProcess: Bool = false,
+        useInit: Bool = false,
         sysctls: [String: String] = [:],
         capAdd: [String] = [],
         capDrop: [String] = [],
         securityOpt: [String] = [],
-        ulimits: [EngineUlimit] = []
+        ulimits: [EngineUlimit] = [],
+        entrypoint: [String]? = nil,
+        cmd: [String]? = nil,
+        system: Bool? = nil
     ) {
         self.extraHosts = extraHosts
         self.dns = dns
@@ -363,7 +366,10 @@ public struct EngineContainerRunConfig: Sendable, Codable, Equatable {
         self.groupAdd = groupAdd
         self.publishAllPorts = publishAllPorts
         self.healthcheck = healthcheck
-        self.initProcess = initProcess
+        self.useInit = useInit
+        self.entrypoint = entrypoint
+        self.cmd = cmd
+        self.system = system
         self.sysctls = sysctls
         self.capAdd = capAdd
         self.capDrop = capDrop
@@ -387,7 +393,11 @@ public struct EngineContainerRunConfig: Sendable, Codable, Equatable {
         groupAdd = try c.decodeIfPresent([String].self, forKey: .groupAdd) ?? []
         publishAllPorts = try c.decodeIfPresent(Bool.self, forKey: .publishAllPorts) ?? false
         healthcheck = try c.decodeIfPresent(EngineHealthcheck.self, forKey: .healthcheck)
-        initProcess = try c.decodeIfPresent(Bool.self, forKey: .initProcess) ?? false
+        let legacy = try decoder.container(keyedBy: LegacyCodingKeys.self)
+        useInit = try c.decodeIfPresent(Bool.self, forKey: .useInit) ?? legacy.decodeIfPresent(Bool.self, forKey: .initProcess) ?? false
+        entrypoint = try c.decodeIfPresent([String].self, forKey: .entrypoint)
+        cmd = try c.decodeIfPresent([String].self, forKey: .cmd)
+        system = try c.decodeIfPresent(Bool.self, forKey: .system)
         sysctls = try c.decodeIfPresent([String: String].self, forKey: .sysctls) ?? [:]
         capAdd = try c.decodeIfPresent([String].self, forKey: .capAdd) ?? []
         capDrop = try c.decodeIfPresent([String].self, forKey: .capDrop) ?? []

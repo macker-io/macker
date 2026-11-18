@@ -295,6 +295,7 @@ public struct EngineNetworkConnectSpec: Sendable {
             network: network,
             aliases: aliases,
             ipv4: ipv4,
+            ipv6: ipv6,
             driverOpts: driverOpts,
             gwPriority: gwPriority,
             linkLocalIPs: linkLocalIPs

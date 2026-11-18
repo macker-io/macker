@@ -55,12 +55,7 @@ extension EngineManager {
         saveContainer(container)
         if changed {
             await publish(
-                EngineEvent(
-                    type: "container",
-                    action: "health_status",
-                    actorID: id,
-                    attributes: ["healthStatus": health.status]
-                )
+                containerEvent("health_status", container, extra: ["healthStatus": health.status])
             )
         }
     }
@@ -89,6 +84,7 @@ extension EngineManager {
                 if !container.user.isEmpty {
                     config.user = .init(username: container.user)
                 }
+                try Self.applyProcessSecurity(&config, run: container.run)
                 config.terminal = false
                 config.stdout = sink
                 config.stderr = sink

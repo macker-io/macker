@@ -198,6 +198,14 @@ extension Router {
             guard !body.Image.isEmpty else {
                 return Self.jsonError(status: 400, message: "Image is required")
             }
+            do {
+                try DockerCreateValidator.validate(body)
+            } catch let rejection as DockerCreateValidator.Rejection {
+                return Self.jsonError(status: 400, message: rejection.message)
+            }
+            // `docker run --platform` sends the platform as a query parameter (API ≥ 1.41).
+            try EngineManager.requireRunnablePlatform(request.query["platform"])
+            let networkMode = Self.networkMode(body.HostConfig?.NetworkMode)
             spec = EngineContainerCreateSpec(
                 name: request.query["name"],
                 image: body.Image,
@@ -210,21 +218,22 @@ extension Router {
                 labels: body.Labels ?? [:],
                 tty: body.Tty ?? false,
                 openStdin: body.OpenStdin ?? false,
+                stdinOnce: body.StdinOnce ?? false,
                 memory: body.HostConfig?.Memory ?? 0,
                 nanoCpus: body.HostConfig?.NanoCpus ?? 0,
                 autoRemove: body.HostConfig?.AutoRemove ?? false,
-                networkMode: body.HostConfig?.NetworkMode ?? "default",
+                networkMode: networkMode,
                 volumeRequests: Self.volumeRequests(from: body),
                 portBindings: try Self.portBindings(from: body),
                 exposedPorts: try Self.exposedPorts(from: body),
-                endpointRequests: try Self.endpointRequests(from: body),
+                endpointRequests: Self.endpointRequests(from: body, networkMode: networkMode),
                 extraHosts: body.HostConfig?.ExtraHosts ?? [],
                 dns: body.HostConfig?.Dns ?? [],
                 dnsSearch: body.HostConfig?.DnsSearch ?? [],
                 dnsOptions: body.HostConfig?.DnsOptions ?? [],
                 restartPolicy: try Self.restartPolicy(body.HostConfig?.RestartPolicy),
-                stopSignal: body.HostConfig?.StopSignal ?? "",
-                stopTimeout: body.HostConfig?.StopTimeout ?? 0,
+                stopSignal: body.StopSignal ?? "",
+                stopTimeout: body.StopTimeout ?? 0,
                 privileged: body.HostConfig?.Privileged ?? false,
                 readonlyRootfs: body.HostConfig?.ReadonlyRootfs ?? false,
                 domainname: body.Domainname ?? "",
@@ -241,17 +250,12 @@ extension Router {
                         retries: $0.Retries ?? 0
                     )
                 },
-                initProcess: body.HostConfig?.Init ?? false,
+                useInit: body.HostConfig?.Init ?? false,
                 sysctls: body.HostConfig?.Sysctls ?? [:],
                 capAdd: body.HostConfig?.CapAdd ?? [],
                 capDrop: body.HostConfig?.CapDrop ?? [],
                 securityOpt: body.HostConfig?.SecurityOpt ?? [],
-                ulimits: (body.HostConfig?.Ulimits ?? []).compactMap { item in
-                    let soft = UInt64(max(item.Soft ?? 0, 0))
-                    let hard = UInt64(max(item.Hard ?? item.Soft ?? 0, 0))
-                    guard !item.Name.isEmpty else { return nil }
-                    return EngineUlimit(name: item.Name, soft: soft, hard: hard)
-                }
+                ulimits: try (body.HostConfig?.Ulimits ?? []).map(Self.ulimit)
             )
             if let driver = body.HostConfig?.VolumeDriver, !driver.isEmpty, driver != "local" {
                 return Self.jsonError(status: 400, message: "volume driver \"\(driver)\" is not supported")
@@ -265,10 +269,7 @@ extension Router {
             let warnings = Self.unsupportedCreateWarnings(request.body) + result.warnings
             return HTTPResponse(
                 status: 201,
-                headers: [
-                    ("Content-Type", "application/json"),
-                    ("Location", "/v1.41/containers/\(result.id)"),
-                ],
+                headers: [("Content-Type", "application/json")],
                 body: .buffer(JSONBody.encode(DockerCreateContainerResponse(Id: result.id, Warnings: warnings)))
             )
         } catch {
@@ -330,58 +331,47 @@ extension Router {
         }
 
         let timestamps = Self.queryFlag(request.query["timestamps"])
-        let follow = Self.queryFlag(request.query["follow"])
         let tail = request.query["tail"]
         let since = Self.parseTimestamp(request.query["since"])
         let until = Self.parseTimestamp(request.query["until"])
+        // Decide before the disk scan: if the deadline passes during replay,
+        // still drain live records that arrived before it.
+        let follow = Self.queryFlag(request.query["follow"]) && (until.map { $0 > Date() } ?? true)
 
         do {
-            let tty: Bool
-            let live: EngineIOSession?
-            let payload: Data
-            if let count = tail.flatMap(Int.init), count >= 0 {
-                let replay = try await engine.tailContainerLogs(
-                    id, count: count, follow: follow, stdout: stdout, stderr: stderr, since: since, until: until
-                )
-                tty = replay.tty
-                live = replay.live
-                payload = replay.history.reduce(into: Data()) { result, line in
-                    result.append(Self.framedIOChunk(line, tty: tty, stdout: stdout, stderr: stderr, timestamps: timestamps))
-                }
-            } else {
-                let replay = try await engine.containerLogs(id, follow: follow)
-                tty = replay.tty
-                live = replay.live
-                payload = Self.logHistoryPayload(
-                    replay.history, tty: tty, stdout: stdout, stderr: stderr, timestamps: timestamps,
-                    since: since, until: until
-                )
+            let count = tail.flatMap(Int.init).flatMap { $0 >= 0 ? $0 : nil } ?? Int.max
+            let (history, tty, live) = try await engine.tailContainerLogs(
+                id, count: count, follow: follow, stdout: stdout, stderr: stderr, since: since, until: until
+            )
+            let payload = history.reduce(into: Data()) { result, chunk in
+                result.append(Self.framedIOChunk(chunk, tty: tty, stdout: stdout, stderr: stderr, timestamps: timestamps))
             }
+            let headers = [("Content-Type", Self.streamContentType(tty: tty, version: request.apiVersion))]
 
-            guard follow, let session = live else {
+            guard let session = live else {
                 var buffer = ByteBuffer()
                 buffer.writeBytes(payload)
-                return HTTPResponse(
-                    status: 200,
-                    headers: [("Content-Type", "application/vnd.docker.raw-stream")],
-                    body: .buffer(buffer)
-                )
+                return HTTPResponse(status: 200, headers: headers, body: .buffer(buffer))
             }
 
             let (stream, continuation) = AsyncStream<ByteBuffer>.makeStream()
             Task {
+                // Close the subscription at the deadline even if the process is silent.
+                let deadline = until.map { end in
+                    Task {
+                        while end.timeIntervalSinceNow > 0 {
+                            try await Task.sleep(for: .seconds(min(86_400, end.timeIntervalSinceNow)))
+                        }
+                        await session.close()
+                    }
+                }
+                defer { deadline?.cancel() }
                 Self.yieldLog(payload, to: continuation)
                 for await chunk in session.chunks {
+                    if let until, let time = chunk.timestamp, time > until { continue }
+                    if let since, let time = chunk.timestamp, time < since { continue }
                     Self.yieldLog(
-                        Self.framedIOChunk(
-                            chunk,
-                            tty: tty,
-                            stdout: stdout,
-                            stderr: stderr,
-                            timestamps: timestamps,
-                            since: since,
-                            until: until
-                        ),
+                        Self.framedIOChunk(chunk, tty: tty, stdout: stdout, stderr: stderr, timestamps: timestamps),
                         to: continuation
                     )
                 }
@@ -389,7 +379,7 @@ extension Router {
             }
             return HTTPResponse(
                 status: 200,
-                headers: [("Content-Type", "application/vnd.docker.raw-stream")],
+                headers: headers,
                 body: .stream(.init(stream, onClose: { await session.close() }))
             )
         } catch {
@@ -546,18 +536,43 @@ extension Router {
         }
     }
 
+    /// Docker writes the 200 header at once and the JSON body when the condition is met.
+    /// Clients (`docker run`) block on the header before calling `start`, so the waiter is
+    /// registered before this returns and the body is streamed later.
     private func waitContainer(_ id: String, request: HTTPRequest) async -> HTTPResponse {
-        let condition = request.query["condition"].flatMap { $0.isEmpty ? nil : $0 } ?? "not-running"
+        let condition: EngineWaitCondition
+        switch request.query["condition"] ?? "" {
+        case "":
+            condition = .notRunning
+        case let raw:
+            guard let parsed = EngineWaitCondition(rawValue: raw) else {
+                return Self.jsonError(status: 400, message: "invalid condition: \"\(raw)\"")
+            }
+            condition = parsed
+        }
+        let exits: AsyncStream<Int>
         do {
-            let code = try await engine.waitContainer(id, condition: condition)
-            return HTTPResponse(
-                status: 200,
-                headers: [("Content-Type", "application/json")],
-                body: .buffer(JSONBody.encode(DockerWaitResponse(StatusCode: code)))
-            )
+            exits = try await engine.waitContainer(id, condition: condition)
         } catch {
             return Self.engineError(error)
         }
+        let (body, continuation) = AsyncStream<ByteBuffer>.makeStream()
+        let task = Task {
+            var response = DockerWaitResponse(StatusCode: -1, Error: .init(Message: "wait canceled: daemon is shutting down"))
+            for await code in exits {
+                response = DockerWaitResponse(StatusCode: code)
+                break
+            }
+            if !Task.isCancelled {
+                continuation.yield(JSONBody.encodeLine(response))
+            }
+            continuation.finish()
+        }
+        return HTTPResponse(
+            status: 200,
+            headers: [("Content-Type", "application/json")],
+            body: .stream(.init(body, onClose: { task.cancel() }))
+        )
     }
 
     private func resizeContainer(_ id: String, request: HTTPRequest) async -> HTTPResponse {
@@ -700,9 +715,18 @@ extension Router {
         return bindings
     }
 
-    static func endpointRequests(from body: DockerCreateContainerRequest) throws -> [EngineEndpointRequest] {
-        (body.NetworkingConfig?.EndpointsConfig ?? [:]).map { name, config in
-            EngineEndpointRequest(
+    /// Docker's `"default"` network mode is `bridge` on Linux daemons.
+    static func networkMode(_ raw: String?) -> String {
+        guard let raw, !raw.isEmpty, raw != "default" else { return "bridge" }
+        return raw
+    }
+
+    /// `EndpointsConfig` keys are network names; the official CLI keys the endpoint of the
+    /// default network as `"default"`, which means whatever `NetworkMode` resolves to.
+    static func endpointRequests(from body: DockerCreateContainerRequest, networkMode: String) -> [EngineEndpointRequest] {
+        (body.NetworkingConfig?.EndpointsConfig ?? [:]).sorted { $0.key < $1.key }.map { key, config in
+            let name = key == "default" ? networkMode : key
+            return EngineEndpointRequest(
                 network: name,
                 aliases: Self.endpointAliases(config),
                 ipv4: config.IPAMConfig?.IPv4Address,
@@ -713,6 +737,18 @@ extension Router {
                 linkLocalIPs: config.IPAMConfig?.LinkLocalIPs ?? []
             )
         }
+    }
+
+    private static func ulimit(_ item: DockerCreateContainerRequest.HostConfig.Ulimit) throws -> EngineUlimit {
+        // Docker encodes RLIM_INFINITY as signed -1; the OCI runtime uses UInt64.max.
+        let soft = item.Soft ?? 0
+        let hard = item.Hard ?? soft
+        guard !item.Name.isEmpty, soft >= -1, hard >= -1,
+            UInt64(bitPattern: soft) <= UInt64(bitPattern: hard)
+        else {
+            throw EngineError.invalidArgument("invalid ulimit \(item.Name): \(soft):\(hard)")
+        }
+        return EngineUlimit(name: item.Name, soft: UInt64(bitPattern: soft), hard: UInt64(bitPattern: hard))
     }
 
     static func restartPolicy(_ policy: DockerCreateContainerRequest.HostConfig.RestartPolicy?) throws -> EngineRestartPolicy {
@@ -743,9 +779,8 @@ extension Router {
                 requests.append(EngineVolumeRequest(type: "tmpfs", source: "", destination: destination, readOnly: false))
                 continue
             }
-            if type != "bind" && type != "volume" {
-                continue
-            }
+            // Other types are rejected by `DockerCreateValidator`.
+            guard type == "bind" || type == "volume" else { continue }
             requests.append(
                 EngineVolumeRequest(
                     type: type,
@@ -778,101 +813,10 @@ extension Router {
         )
     }
 
-    static func formatLogs(
-        _ text: String,
-        timestamps: Bool,
-        tail: String?,
-        since: Date? = nil,
-        until: Date? = nil,
-        details: Bool = false
-    ) -> String {
-        _ = details
-        let hadTrailingNewline = text.hasSuffix("\n")
-        var lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        if hadTrailingNewline, lines.last == "" {
-            lines.removeLast()
-        }
-        if since != nil || until != nil {
-            lines = lines.filter { line in
-                guard let stamp = logTimestamp(line) else { return true }
-                if let since, stamp < since { return false }
-                if let until, stamp > until { return false }
-                return true
-            }
-        }
-        if let tail, tail != "all", let count = Int(tail), count >= 0 {
-            lines = Array(lines.suffix(count))
-        }
-        if timestamps {
-            lines = lines.map { line in
-                if line.isEmpty { return line }
-                if logTimestamp(line) != nil { return line }
-                return "\(ISO8601.string(from: Date())) \(line)"
-            }
-        }
-        var result = lines.joined(separator: "\n")
-        if hadTrailingNewline, !lines.isEmpty {
-            result += "\n"
-        }
-        return result
-    }
-
-    static func logTimestamp(_ line: String) -> Date? {
-        let token = line.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? line
-        return ISO8601.parse(token)
-    }
-
-    static func logHistoryPayload(
-        _ history: [EngineIOChunk], tty: Bool, stdout: Bool, stderr: Bool, timestamps: Bool,
-        since: Date?, until: Date?
-    ) -> Data {
-        let selected = history.filter { chunk in
-            (tty || (chunk.stdout ? stdout : stderr)) && logDateMatches(chunk.timestamp, since: since, until: until)
-        }.map { chunk in
-            guard chunk.timestamp == nil, since != nil || until != nil else { return chunk }
-            let text = formatLogs(String(decoding: chunk.data, as: UTF8.self), timestamps: false, tail: nil, since: since, until: until)
-            return EngineIOChunk(data: Data(text.utf8), stdout: chunk.stdout)
-        }
-        let chunks = timestamps ? logLines(selected) : selected
-        var result = Data()
-        for chunk in chunks {
-            result.append(framedIOChunk(chunk, tty: tty, stdout: stdout, stderr: stderr, timestamps: timestamps))
-        }
-        return result
-    }
-
-    private static func logDateMatches(_ date: Date?, since: Date?, until: Date?) -> Bool {
-        guard let date else { return true }
-        if let since, date < since { return false }
-        if let until, date > until { return false }
-        return true
-    }
-
-    // Match LogTail: order lines by the record with their newline (or last byte if
-    // unterminated), while keeping the timestamp of their first byte.
-    private static func logLines(_ chunks: [EngineIOChunk]) -> [EngineIOChunk] {
-        var lines: [EngineIOChunk] = []
-        var partial: [Bool: (data: Data, date: Date?, position: Int, record: Int)] = [:]
-        for (index, chunk) in chunks.enumerated() where !chunk.data.isEmpty {
-            var pending = partial.removeValue(forKey: chunk.stdout) ?? (Data(), chunk.timestamp, 0, 0)
-            var start = chunk.data.startIndex
-            while let newline = chunk.data[start...].firstIndex(of: 0x0a) {
-                let next = chunk.data.index(after: newline)
-                pending.data.append(chunk.data[start..<next])
-                lines.append(EngineIOChunk(data: pending.data, stdout: chunk.stdout, timestamp: pending.date))
-                pending = (Data(), chunk.timestamp, 0, 0)
-                start = next
-            }
-            pending.data.append(chunk.data[start...])
-            if !pending.data.isEmpty {
-                partial[chunk.stdout] = (pending.data, pending.date, lines.count, index)
-            }
-        }
-        // Insert from newest to oldest so earlier insertion positions remain valid.
-        for (stdout, entry) in partial.sorted(by: { $0.value.record > $1.value.record }) {
-            lines.insert(EngineIOChunk(data: entry.data, stdout: stdout, timestamp: entry.date), at: entry.position)
-        }
-        return lines
+    /// Non-TTY stdio is multiplexed (8-byte stream headers); API 1.42+ says so in the
+    /// Content-Type.
+    static func streamContentType(tty: Bool, version: DockerAPIVersion) -> String {
+        !tty && version.atLeast("1.42") ? "application/vnd.docker.multiplexed-stream" : "application/vnd.docker.raw-stream"
     }
 
     static func dockerLogPayload(data: Data, tty: Bool, stdout: Bool) -> Data {
@@ -883,48 +827,22 @@ extension Router {
         return DockerStdio.frame(data, stdout: stdout)
     }
 
+    /// One attach/exec/log chunk on the wire: dropped if its stream was not requested,
+    /// optionally prefixed with its RFC 3339 log time, framed unless TTY.
     static func framedIOChunk(
         _ chunk: EngineIOChunk,
         tty: Bool,
         stdout: Bool,
         stderr: Bool,
-        timestamps: Bool = false,
-        since: Date? = nil,
-        until: Date? = nil
+        timestamps: Bool = false
     ) -> Data {
         if !tty {
             if chunk.stdout && !stdout { return Data() }
             if !chunk.stdout && !stderr { return Data() }
         }
-        guard logDateMatches(chunk.timestamp, since: since, until: until) else { return Data() }
-        let data: Data
-        if let stamp = chunk.timestamp {
-            if timestamps {
-                let prefix = Data("\(ISO8601.string(from: stamp)) ".utf8)
-                var stamped = Data()
-                var start = chunk.data.startIndex
-                while start < chunk.data.endIndex {
-                    let end = chunk.data[start...].firstIndex(of: 0x0a).map { chunk.data.index(after: $0) } ?? chunk.data.endIndex
-                    stamped.append(prefix)
-                    stamped.append(chunk.data[start..<end])
-                    start = end
-                }
-                data = stamped
-            } else {
-                data = chunk.data
-            }
-        } else if timestamps || since != nil || until != nil {
-            data = Data(
-                formatLogs(
-                    String(decoding: chunk.data, as: UTF8.self),
-                    timestamps: timestamps,
-                    tail: nil,
-                    since: since,
-                    until: until
-                ).utf8
-            )
-        } else {
-            data = chunk.data
+        var data = chunk.data
+        if timestamps, chunk.startsLogLine, let time = chunk.timestamp {
+            data = Data("\(ISO8601.string(from: time)) ".utf8) + data
         }
         return dockerLogPayload(data: data, tty: tty, stdout: chunk.stdout)
     }

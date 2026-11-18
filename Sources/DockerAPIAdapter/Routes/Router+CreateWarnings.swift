@@ -32,8 +32,9 @@ extension Router {
             warn("\(key) is not supported on this runtime and was ignored")
         }
 
-        if bool(host["ReadonlyRootfs"]) {
-            warn("ReadonlyRootfs is recorded on inspect but the guest rootfs is not mounted read-only")
+        // -1 is Docker's default sentinel, not a request to configure swappiness.
+        if let swappiness = host["MemorySwappiness"] as? NSNumber, swappiness.intValue != -1 {
+            ignored("MemorySwappiness")
         }
         if isSet(host["GroupAdd"]) {
             warn("GroupAdd is recorded on inspect but is not applied in the guest")
@@ -70,7 +71,7 @@ extension Router {
         let specific: Set<String> = [
             "Privileged", "ReadonlyRootfs", "GroupAdd", "Tmpfs", "SecurityOpt", "LogConfig",
             "PidMode", "IpcMode", "UTSMode", "CgroupnsMode", "UsernsMode", "Isolation", "Runtime",
-            "ConsoleSize", "ShmSize",
+            "ConsoleSize", "ShmSize", "MemorySwappiness",
         ]
         for key in host.keys.sorted() {
             if appliedHostKeys.contains(key) || specific.contains(key) { continue }
@@ -91,11 +92,6 @@ extension Router {
         if let list = value as? [Any] { return !list.isEmpty }
         if let object = value as? [String: Any] { return !object.isEmpty }
         return true
-    }
-
-    private static func bool(_ value: Any?) -> Bool {
-        guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return false }
-        return number.boolValue
     }
 
     private static func number(_ value: Any?) -> Double {

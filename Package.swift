@@ -20,6 +20,7 @@ let package = Package(
         .package(path: "./Vendor/containerization"),
         .package(path: "./ClientTransport"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.80.0"),
+        .package(url: "https://github.com/apple/swift-nio-http2.git", from: "1.45.0"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.10.1"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
         .package(url: "https://github.com/apple/swift-system.git", from: "1.6.4"),
@@ -65,6 +66,7 @@ let package = Package(
                 .product(name: "ContainerizationOS", package: "containerization"),
                 .product(name: "ContainerizationExtras", package: "containerization"),
                 .product(name: "ContainerizationEXT4", package: "containerization"),
+                .product(name: "ContainerizationArchive", package: "containerization"),
                 .product(name: "SystemPackage", package: "swift-system"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "SwiftTCP", package: "SwiftTCP"),
@@ -81,6 +83,7 @@ let package = Package(
                 "HelperSupport",
                 .product(name: "ContainerizationOCI", package: "containerization"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "NIOEmbedded", package: "swift-nio"),
             ]
         ),
         .testTarget(
@@ -98,6 +101,8 @@ let package = Package(
                 "ContainerEngine",
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "NIOHTTP2", package: "swift-nio-http2"),
+                .product(name: "NIOHPACK", package: "swift-nio-http2"),
                 .product(name: "NIOWebSocket", package: "swift-nio"),
                 .product(name: "NIOFoundationCompat", package: "swift-nio"),
                 .product(name: "Logging", package: "swift-log"),

@@ -67,6 +67,8 @@ public struct EngineContainerCreateSpec: Sendable {
     public var labels: [String: String]
     public var tty: Bool
     public var openStdin: Bool
+    /// Close the container's stdin when the first attached client closes its stdin.
+    public var stdinOnce: Bool
     public var memory: Int64
     public var nanoCpus: Int64
     public var autoRemove: Bool
@@ -89,12 +91,15 @@ public struct EngineContainerCreateSpec: Sendable {
     public var publishAllPorts: Bool
     public var volumesFrom: [String]
     public var healthcheck: EngineHealthcheck?
-    public var initProcess: Bool
+    /// Run a minimal init as PID 1 that forwards signals and reaps zombies.
+    public var useInit: Bool
     public var sysctls: [String: String]
     public var capAdd: [String]
     public var capDrop: [String]
     public var securityOpt: [String]
     public var ulimits: [EngineUlimit]
+    /// Daemon-owned helper container; not settable through the Docker API.
+    var system = false
 
     public init(
         name: String? = nil,
@@ -108,6 +113,7 @@ public struct EngineContainerCreateSpec: Sendable {
         labels: [String: String] = [:],
         tty: Bool = false,
         openStdin: Bool = false,
+        stdinOnce: Bool = false,
         memory: Int64 = 0,
         nanoCpus: Int64 = 0,
         autoRemove: Bool = false,
@@ -130,7 +136,7 @@ public struct EngineContainerCreateSpec: Sendable {
         publishAllPorts: Bool = false,
         volumesFrom: [String] = [],
         healthcheck: EngineHealthcheck? = nil,
-        initProcess: Bool = false,
+        useInit: Bool = false,
         sysctls: [String: String] = [:],
         capAdd: [String] = [],
         capDrop: [String] = [],
@@ -148,6 +154,7 @@ public struct EngineContainerCreateSpec: Sendable {
         self.labels = labels
         self.tty = tty
         self.openStdin = openStdin
+        self.stdinOnce = stdinOnce
         self.memory = memory
         self.nanoCpus = nanoCpus
         self.autoRemove = autoRemove
@@ -170,13 +177,23 @@ public struct EngineContainerCreateSpec: Sendable {
         self.publishAllPorts = publishAllPorts
         self.volumesFrom = volumesFrom
         self.healthcheck = healthcheck
-        self.initProcess = initProcess
+        self.useInit = useInit
         self.sysctls = sysctls
         self.capAdd = capAdd
         self.capDrop = capDrop
         self.securityOpt = securityOpt
         self.ulimits = ulimits
     }
+}
+
+/// When `wait` returns.
+public enum EngineWaitCondition: String, Sendable, CaseIterable {
+    /// Immediately if the container is not running, else at its next exit.
+    case notRunning = "not-running"
+    /// At the next exit, even if the container has not started yet.
+    case nextExit = "next-exit"
+    /// When the container is removed.
+    case removed
 }
 
 /// Full container record backing the Docker Container API. Persisted as `{store}/containers/{id}.json`.
@@ -202,6 +219,7 @@ public struct EngineContainer: Sendable, Codable {
     public var networkMode: String
     public var tty: Bool
     public var openStdin: Bool
+    public var stdinOnce: Bool = false
     public var mounts: [EngineMount]
     public var endpoints: [EngineEndpoint] = []
     public var portBindings: [EnginePortBinding] = []
@@ -212,7 +230,7 @@ public struct EngineContainer: Sendable, Codable {
     enum CodingKeys: String, CodingKey {
         case id, name, image, imageID, command, env, workingDir, user, hostname, labels
         case state, created, startedAt, finishedAt, exitCode, autoRemove, memory, nanoCpus
-        case networkMode, tty, openStdin, mounts, endpoints, portBindings, exposedPorts, run, health
+        case networkMode, tty, openStdin, stdinOnce, mounts, endpoints, portBindings, exposedPorts, run, health
     }
 
     public init(
@@ -237,6 +255,7 @@ public struct EngineContainer: Sendable, Codable {
         networkMode: String,
         tty: Bool,
         openStdin: Bool,
+        stdinOnce: Bool = false,
         mounts: [EngineMount],
         endpoints: [EngineEndpoint] = [],
         portBindings: [EnginePortBinding] = [],
@@ -265,6 +284,7 @@ public struct EngineContainer: Sendable, Codable {
         self.networkMode = networkMode
         self.tty = tty
         self.openStdin = openStdin
+        self.stdinOnce = stdinOnce
         self.mounts = mounts
         self.endpoints = endpoints
         self.portBindings = portBindings
@@ -296,6 +316,7 @@ public struct EngineContainer: Sendable, Codable {
         networkMode = try c.decode(String.self, forKey: .networkMode)
         tty = try c.decode(Bool.self, forKey: .tty)
         openStdin = try c.decode(Bool.self, forKey: .openStdin)
+        stdinOnce = try c.decodeIfPresent(Bool.self, forKey: .stdinOnce) ?? false
         mounts = try c.decode([EngineMount].self, forKey: .mounts)
         endpoints = try c.decodeIfPresent([EngineEndpoint].self, forKey: .endpoints) ?? []
         portBindings = try c.decodeIfPresent([EnginePortBinding].self, forKey: .portBindings) ?? []
@@ -305,6 +326,7 @@ public struct EngineContainer: Sendable, Codable {
     }
 
     public var isActive: Bool { state == "running" || state == "paused" }
+    public var isSystem: Bool { run.system == true }
 
     var networkIDs: Set<String> { Set(endpoints.map(\.networkID)) }
 

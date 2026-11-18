@@ -6,7 +6,7 @@ import HelperSupport
 
 struct Doctor: ParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Diagnose the host, daemon socket, and Virtualization support."
+        abstract: "Diagnose the host, daemon socket, Docker CLI/context, and Virtualization support."
     )
 
     func run() throws {
@@ -15,6 +15,10 @@ struct Doctor: ParsableCommand {
         results.append(contentsOf: hostChecks())
         results.append(contentsOf: engineChecks())
         results.append(contentsOf: try socketChecks())
+        results.append(contentsOf: DockerDoctor(env: HostSetupEnvironment()).checks(
+            daemonSocket: try DaemonAPI.socket(),
+            contextSocket: SetupRunner.daemonSocketPath()
+        ))
         results.append(contentsOf: helperChecks())
         Report.print(results)
         print("")
@@ -121,11 +125,7 @@ struct Doctor: ParsableCommand {
         if let dest = try? FileManager.default.destinationOfSymbolicLink(atPath: compat),
             dest == path
         {
-            results.append(CheckResult(status: .ok, title: "Docker socket symlink", detail: "\(compat) → \(dest)"))
-        } else if FileManager.default.fileExists(atPath: compat) {
-            results.append(CheckResult(status: .warn, title: "Docker socket symlink", detail: "\(compat) exists but is not Macker — run `macker setup --force`"))
-        } else {
-            results.append(CheckResult(status: .warn, title: "Docker socket symlink", detail: "\(compat) not linked — run `macker setup`"))
+            results.append(CheckResult(status: .ok, title: "Docker socket symlink", detail: "\(compat) → \(dest) (optional)"))
         }
         return results
     }
@@ -159,5 +159,50 @@ struct Doctor: ParsableCommand {
                 detail: "not installed — sudo macker helper install (optional; needed to curl container IPs)"
             )
         ]
+    }
+}
+
+/// Official Docker client checks, one line each: CLI, Compose plugin, context, API negotiation.
+struct DockerDoctor {
+    let env: SetupEnvironment
+
+    func checks(daemonSocket: String, contextSocket: String) -> [CheckResult] {
+        let probe = DockerToolchainProbe(env: env)
+        let toolchain = probe.toolchain()
+        guard let docker = toolchain.dockerPath else {
+            return [
+                CheckResult(status: .warn, title: "docker CLI", detail: "not found on PATH — install it (e.g. `brew install docker`) to use the official client; `macker` works without it"),
+                CheckResult(status: .warn, title: "docker compose plugin", detail: "skipped (no docker CLI)"),
+            ]
+        }
+        var results: [CheckResult] = [
+            CheckResult(status: .ok, title: "docker CLI", detail: "\(toolchain.dockerVersion ?? "unknown version") at \(docker)")
+        ]
+        if let compose = toolchain.composeVersion {
+            results.append(CheckResult(status: .ok, title: "docker compose plugin", detail: compose))
+        } else {
+            results.append(CheckResult(status: .warn, title: "docker compose plugin", detail: "not installed — `brew install docker-compose` and add its plugin dir to cliPluginsExtraDirs in ~/.docker/config.json"))
+        }
+        let endpoint = "unix://\(contextSocket)"
+        switch probe.contextState(docker: docker, endpoint: endpoint) {
+        case .matches:
+            let active = probe.currentContext(docker: docker) == DockerToolchainProbe.contextName
+            results.append(CheckResult(status: .ok, title: "docker context", detail: "macker → \(endpoint)\(active ? " (active)" : "")"))
+        case .absent:
+            results.append(CheckResult(status: .warn, title: "docker context", detail: "\"macker\" not registered — run `macker setup`"))
+        case .foreign(let host):
+            results.append(CheckResult(status: .warn, title: "docker context", detail: "\"macker\" points at \(host), not \(endpoint) — run `macker setup --force`"))
+        case .unknown(let message):
+            results.append(CheckResult(status: .warn, title: "docker context", detail: message))
+        }
+        let api = probe.negotiatedAPI(docker: docker, endpoint: "unix://\(daemonSocket)")
+        if api.status == 0 {
+            let parts = api.output.split(separator: "/").map(String.init)
+            let detail = parts.count == 2 ? "client \(parts[0]), server max \(parts[1])" : api.output
+            results.append(CheckResult(status: .ok, title: "API version", detail: detail))
+        } else {
+            results.append(CheckResult(status: .fail, title: "API version", detail: "docker could not negotiate with unix://\(daemonSocket): \(api.message)"))
+        }
+        return results
     }
 }

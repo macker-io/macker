@@ -51,6 +51,9 @@ struct NetworkCLITests {
         #expect(config?[1]["Subnet"] == "fd00:20::/64")
         #expect(config?[1]["Gateway"] == "fd00:20::1")
 
+        expectCLIError("IPv6 ip-range is not supported") {
+            _ = try NetworkCreate.parse(["--ip-range", "fd00:20::/80", "n1"]).encodedBody()
+        }
         expectCLIError("only one IPv4 subnet is supported") {
             _ = try NetworkCreate.parse(["--subnet", "172.20.0.0/16", "--subnet", "172.21.0.0/16", "n1"]).encodedBody()
         }

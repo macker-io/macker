@@ -1,7 +1,8 @@
 import ContainerEngine
 import Foundation
 
-/// Minimal Docker Engine API router. Strips an optional `/v1.41` prefix.
+/// Minimal Docker Engine API router. Strips an optional `/v<major>.<minor>` prefix and
+/// records the negotiated version on the request.
 public struct Router: Sendable {
     let engine: EngineManager
 
@@ -9,23 +10,14 @@ public struct Router: Sendable {
         self.engine = engine
     }
 
-    public func handle(_ request: HTTPRequest) async -> HTTPResponse {
-        let (apiVersion, path) = Self.splitAPIVersion(request.path)
-        if let apiVersion {
-            switch DockerAPI.check(apiVersion) {
-            case .supported:
-                break
-            case .tooNew:
-                return Self.jsonError(
-                    status: 400,
-                    message: "client version \(apiVersion) is too new. Maximum supported API version is \(DockerAPI.version)"
-                )
-            case .tooOld:
-                return Self.jsonError(
-                    status: 400,
-                    message: "client version \(apiVersion) is too old. Minimum supported API version is \(DockerAPI.minVersion)"
-                )
-            }
+    public func handle(_ incoming: HTTPRequest) async -> HTTPResponse {
+        let (rawVersion, path) = Self.splitAPIVersion(incoming.path)
+        var request = incoming
+        switch DockerAPIVersionPolicy.resolve(rawVersion) {
+        case .success(let version):
+            request.apiVersion = version
+        case .failure(let error):
+            return Self.jsonError(status: 400, message: error.message)
         }
 
         let method = request.method.uppercased()
@@ -84,6 +76,16 @@ public struct Router: Sendable {
             return await pruneBuildCache(request)
         case ("POST", "/commit"):
             return await commitContainer(request)
+        case ("POST", "/grpc"):
+            let proxy = BuildKitProxy(engine: engine)
+            return HTTPResponse(status: 101, body: .upgrade(HTTPUpgrade(protocolName: "h2c") { proxy.serveGRPC(on: $0) }))
+        case ("POST", "/session"):
+            let proxy = BuildKitProxy(engine: engine)
+            let headers = request.headerList
+            return HTTPResponse(
+                status: 101,
+                body: .upgrade(HTTPUpgrade(protocolName: "h2c") { proxy.serveSession(on: $0, headers: headers) })
+            )
         default:
             if let route = Self.matchNamedContainer(method: method, path: path) {
                 return await handleNamedContainer(route, request: request)
@@ -149,13 +151,19 @@ public struct Router: Sendable {
         ISO8601.parseGoDuration(raw)
     }
 
+    /// Docker `filters` query JSON. The official CLI sends the map form
+    /// `{"label":{"a=b":true}}`; older clients (and `macker`) send `{"label":["a=b"]}`.
+    /// Both decode to `key -> values` (map-form values are the inner keys, sorted).
     static func parseFilters(_ raw: String?) -> [String: [String]] {
-        guard let raw, let data = raw.data(using: .utf8),
-            let decoded = try? JSONDecoder().decode([String: [String]].self, from: data)
-        else {
-            return [:]
+        guard let raw, !raw.isEmpty, let data = raw.data(using: .utf8) else { return [:] }
+        let decoder = JSONDecoder()
+        if let lists = try? decoder.decode([String: [String]].self, from: data) {
+            return lists
         }
-        return decoded
+        if let maps = try? decoder.decode([String: [String: Bool]].self, from: data) {
+            return maps.mapValues { $0.keys.sorted() }
+        }
+        return [:]
     }
 
     /// Docker `--link name:alias` contributes the alias (or the whole value if there is no `:`).

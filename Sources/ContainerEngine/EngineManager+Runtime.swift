@@ -1,5 +1,4 @@
 import Containerization
-import ContainerizationOCI
 import ContainerizationOS
 import Foundation
 
@@ -33,7 +32,8 @@ extension EngineManager {
         try await retainImage(image)
         var manager = try await ensureManager()
         await reclaimContainerRuntime(record.id)
-        for mount in record.mounts where mount.type == "tmpfs" {
+        // tmpfs mounts live in the runtime directory just reset: recreate them empty.
+        for mount in record.mounts where mount.type == "tmpfs" && !mount.source.isEmpty {
             try FileManager.default.createDirectory(atPath: mount.source, withIntermediateDirectories: true)
         }
 
@@ -43,7 +43,10 @@ extension EngineManager {
         let stderrSink = ProcessLogSink(hopping: { [id = record.id] data in
             await self.appendOutput(id: id, data: data, stdout: false)
         })
-        let stdinPipe = (record.openStdin || record.tty) ? ProcessStdin() : nil
+        // An attached client may already have written (or closed) stdin before `start`.
+        let stdinPipe = (record.openStdin || record.tty) ? (containerStdin[record.id] ?? ProcessStdin()) : nil
+        containerStdin[record.id] = stdinPipe
+        outputSinks[record.id] = [stdoutSink, stderrSink]
 
         var prepared = record
         let interfaces: [any Interface]
@@ -62,7 +65,10 @@ extension EngineManager {
         do {
             // Attach virtio-net ourselves. ContainerManager's single `network:` cannot
             // express none / host / multiple networks.
-            let rootfs = try await prepareRootfs(id: record.id, image: image)
+            var rootfs = try await prepareRootfs(id: record.id, image: image)
+            if prepared.run.readonlyRootfs {
+                rootfs.options.append("ro")
+            }
             let created = try await manager.create(
                 record.id,
                 image: image,
@@ -83,6 +89,13 @@ extension EngineManager {
                     config.process.user = .init(username: prepared.user)
                 }
                 config.process.terminal = prepared.tty
+                try Self.applyProcessSecurity(&config.process, run: prepared.run)
+                if prepared.run.privileged {
+                    // Privileged inside the guest kernel only: nothing is masked or read-only.
+                    config.maskedPaths = []
+                    config.readonlyPaths = []
+                }
+                config.useInit = prepared.run.useInit
                 if let stdinPipe {
                     config.process.stdin = stdinPipe
                 }
@@ -91,34 +104,29 @@ extension EngineManager {
                     config.process.stderr = stderrSink
                 }
                 config.hostname = prepared.hostname
+                // An explicit limit sizes the whole MicroVM, so the guest's nproc and
+                // MemTotal match what was asked for (no hidden agent headroom).
                 config.cpus = Self.cpuCount(nanoCpus: prepared.nanoCpus)
+                if prepared.nanoCpus > 0 {
+                    config.cpuOverhead = 0
+                }
                 config.memoryInBytes = prepared.memory > 0 ? UInt64(prepared.memory) : Self.defaultMemoryBytes
-                config.useInit = prepared.run.initProcess
+                if prepared.memory > 0 {
+                    config.memoryOverhead = 0
+                }
                 if !prepared.run.sysctls.isEmpty {
                     config.sysctl = prepared.run.sysctls
-                }
-                if prepared.run.privileged {
-                    config.process.capabilities = .allCapabilities
-                    config.maskedPaths = []
-                    config.readonlyPaths = []
-                }
-                Self.applyCapabilities(
-                    &config.process.capabilities,
-                    add: prepared.run.capAdd,
-                    drop: prepared.run.capDrop
-                )
-                if prepared.run.securityOpt.contains(where: { opt in
-                    opt == "no-new-privileges" || opt == "no-new-privileges:true" || opt == "no-new-privileges=true"
-                }) {
-                    config.process.noNewPrivileges = true
-                }
-                if !prepared.run.ulimits.isEmpty {
-                    config.process.rlimits = Self.rlimits(prepared.run.ulimits)
                 }
                 for mount in prepared.mounts where !mount.source.isEmpty && !mount.destination.isEmpty {
                     var options: [String] = []
                     if !mount.rw {
                         options.append("ro")
+                    }
+                    if mount.type == EngineMount.blockType {
+                        // A Linux filesystem image attached as a disk (overlay-capable,
+                        // unlike virtiofs); only one running VM may use it at a time.
+                        config.mounts.append(.block(format: "ext4", source: mount.source, destination: mount.destination, options: options))
+                        continue
                     }
                     config.mounts.append(.share(source: mount.source, destination: mount.destination, options: options))
                 }
@@ -132,11 +140,20 @@ extension EngineManager {
             containerManager = manager
             snapshotBaseline(record.id)
             try await created.create()
+            try await applyPendingArchives(record.id, to: created)
             try await created.start()
         } catch {
             try? await linux?.stop()
             vms[record.id] = nil
+            await drainOutput(record.id)
+            containerStdin[record.id] = nil
             await reclaimContainerRuntime(record.id)
+            if error.localizedDescription.contains("failed to find target executable") {
+                // Docker's wording; clients map "executable file not found" to exit 127.
+                throw EngineError.runtimeUnavailable(
+                    "failed to create task for container: " + Self.describeExecFailure(error, command: prepared.command)
+                )
+            }
             throw EngineError.runtimeUnavailable("failed to start MicroVM: \(error.localizedDescription)")
         }
 
@@ -145,9 +162,6 @@ extension EngineManager {
             throw EngineError.runtimeUnavailable("failed to start MicroVM")
         }
         vms[record.id] = linux
-        if let stdinPipe {
-            containerStdin[record.id] = stdinPipe
-        }
         recordGuestNics(prepared)
         do {
             try await applySecondaryBridgeAddresses(containers[record.id] ?? prepared)
@@ -185,21 +199,45 @@ extension EngineManager {
         }
     }
 
-    func stopVM(_ id: String, timeoutSeconds: Int, signal: Signal = .term) async {
-        guard let linux = vms[id] else { return }
+    /// Sends `signal`, escalates to SIGKILL after `timeoutSeconds`, tears the VM down, and
+    /// returns the process exit code (128+n for a signal death; 137 if it never reported).
+    @discardableResult
+    func stopVM(_ id: String, timeoutSeconds: Int, signal: Signal = .term) async -> Int {
+        guard let linux = vms[id] else { return 128 + Int(signal.rawValue) }
         waitTasks[id]?.cancel()
         waitTasks[id] = nil
+        var code = 137
         try? await linux.kill(signal)
         do {
-            _ = try await linux.wait(timeoutInSeconds: Int64(max(timeoutSeconds, 1)))
+            code = Int(try await linux.wait(timeoutInSeconds: Int64(max(timeoutSeconds, 1))).exitCode)
         } catch {
             try? await linux.kill(.kill)
-            _ = try? await linux.wait(timeoutInSeconds: 2)
+            if let status = try? await linux.wait(timeoutInSeconds: 2) {
+                code = Int(status.exitCode)
+            }
         }
         await teardownVM(id)
+        return code
+    }
+
+    /// Waits until every byte the guest wrote has reached logs and subscribers, then
+    /// flushes partial lines. Runs before an exit is published.
+    func drainOutput(_ id: String) async {
+        for sink in outputSinks.removeValue(forKey: id) ?? [] {
+            await sink.drain()
+        }
+        if var session = ttySessions[id] {
+            let rest = session.finishBytes()
+            ttySessions[id] = session
+            if !rest.isEmpty {
+                bufferLogOutput(id, data: rest, stdout: true)
+            }
+        }
+        flushLogLines(id)
     }
 
     func teardownVM(_ id: String) async {
+        await drainOutput(id)
         waitTasks[id]?.cancel()
         waitTasks[id] = nil
         containerStdin[id]?.finish()
@@ -225,41 +263,77 @@ extension EngineManager {
     }
 
     func appendOutput(id: String, data: Data, stdout: Bool) {
-        guard !data.isEmpty else { return }
+        guard !data.isEmpty, containers[id] != nil else { return }
         let tty = containers[id]?.tty == true
         let attachData: Data
         let logData: Data
         if tty {
             var session = ttySessions[id] ?? TTYSession()
-            let output = session.ingest(data)
+            let output = session.ingestBytes(data)
             ttySessions[id] = session
             attachData = output.attach
-            logData = Data(output.log.utf8)
+            logData = output.log
         } else {
             attachData = data
             logData = data
         }
-        let timestamp = Date()
-        if !logData.isEmpty, containers[id] != nil {
-            appendLogRecord(id: id, chunk: EngineIOChunk(data: logData, stdout: stdout, timestamp: timestamp))
+        bufferLogOutput(id, data: logData, stdout: stdout)
+        guard !attachData.isEmpty, let subscribers = attachSubscribers[id] else { return }
+        for subscriber in subscribers.values where subscriber.kind == .attach {
+            subscriber.continuation.yield(EngineIOChunk(data: attachData, stdout: stdout))
         }
-        guard let subscribers = attachSubscribers[id] else { return }
-        for subscriber in subscribers.values {
-            let payload: Data
-            if subscriber.kind == .logs, tty {
-                payload = logData
-            } else {
-                payload = attachData
-            }
-            guard !payload.isEmpty else { continue }
-            subscriber.continuation.yield(EngineIOChunk(data: payload, stdout: stdout, timestamp: timestamp))
+    }
+
+    /// Only the final, unterminated line is held back. A long partial is
+    /// emitted rather than letting a newline-free writer grow memory without bound.
+    private func bufferLogOutput(_ id: String, data: Data, stdout: Bool) {
+        guard !data.isEmpty else { return }
+        let pending = pendingLogLines[id]?.removeValue(forKey: stdout)
+        var bytes = pending?.data ?? Data()
+        let now = Date()
+        var time = pending?.timestamp ?? now
+        var startsLine = pending?.startsLogLine ?? true
+        var start = data.startIndex
+        while let newline = data[start...].firstIndex(of: 0x0a) {
+            let end = data.index(after: newline)
+            bytes.append(data[start..<end])
+            emitLogLine(id, chunk: EngineIOChunk(data: bytes, stdout: stdout, timestamp: time, startsLogLine: startsLine))
+            startsLine = true
+            bytes = Data()
+            time = now
+            start = end
+        }
+        bytes.append(data[start...])
+        guard !bytes.isEmpty else { return }
+        let chunk = EngineIOChunk(data: bytes, stdout: stdout, timestamp: time, startsLogLine: startsLine)
+        if bytes.count >= 16 * 1024 {
+            emitLogLine(id, chunk: chunk, endsLine: false)
+            // Keep just the line's time, not the bytes already persisted and sent.
+            pendingLogLines[id, default: [:]][stdout] = EngineIOChunk(data: Data(), stdout: stdout, timestamp: time, startsLogLine: false)
+        } else {
+            pendingLogLines[id, default: [:]][stdout] = chunk
+        }
+    }
+
+    func flushLogLines(_ id: String) {
+        guard let pending = pendingLogLines.removeValue(forKey: id) else { return }
+        for chunk in pending.values.sorted(by: { ($0.timestamp ?? .distantPast) < ($1.timestamp ?? .distantPast) }) {
+            emitLogLine(id, chunk: chunk)
+        }
+    }
+
+    private func emitLogLine(_ id: String, chunk: EngineIOChunk, endsLine: Bool = true) {
+        guard !chunk.data.isEmpty else { return }
+        appendLogRecord(id: id, chunk: chunk, line: true, endsLine: endsLine)
+        for subscriber in (attachSubscribers[id] ?? [:]).values where subscriber.kind == .logs {
+            subscriber.continuation.yield(chunk)
         }
     }
 
     func reclaimContainerRuntime(_ id: String) async {
         await stopPortPublishers(id)
         await releaseInterfaces(id)
-        Self.removeTransientContainerFiles(id, root: containerRoot)
+        Self.resetTransientFiles(id, root: containerRoot)
     }
 
     func pauseVM(_ id: String) async throws {
@@ -303,60 +377,30 @@ extension EngineManager {
         return max(1, Int((nanoCpus + 500_000_000) / 1_000_000_000))
     }
 
-    static func applyCapabilities(_ caps: inout Containerization.LinuxCapabilities, add: [String], drop: [String]) {
-        func parse(_ raw: String) -> [CapabilityName] {
-            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-            if trimmed == "ALL" || trimmed == "CAP_ALL" {
-                return CapabilityName.allCases
-            }
-            let normalized = trimmed.hasPrefix("CAP_") ? trimmed : "CAP_\(trimmed)"
-            if let cap = try? CapabilityName(rawValue: normalized) {
-                return [cap]
-            }
-            return []
+    /// Exec and healthcheck processes get a fresh OCI spec; apply the same guest
+    /// restrictions to them as to PID 1. Privileged exec only widens capabilities.
+    static func applyProcessSecurity(
+        _ process: inout LinuxProcessConfiguration, run: EngineContainerRunConfig, privilegedExec: Bool = false
+    ) throws {
+        process.capabilities = try GuestCapabilities.processCapabilities(
+            privileged: run.privileged || privilegedExec, add: run.capAdd, drop: run.capDrop
+        )
+        if let invalid = run.securityOpt.first(where: { !EngineContainerRunConfig.supportedSecurityOptions.contains($0) }) {
+            throw EngineError.invalidArgument("unsupported security option: \(invalid)")
         }
-
-        for item in drop {
-            let removed = Set(parse(item))
-            guard !removed.isEmpty else { continue }
-            caps.bounding.removeAll { removed.contains($0) }
-            caps.effective.removeAll { removed.contains($0) }
-            caps.inheritable.removeAll { removed.contains($0) }
-            caps.permitted.removeAll { removed.contains($0) }
-            caps.ambient.removeAll { removed.contains($0) }
-        }
-        for item in add {
-            for cap in parse(item) {
-                if !caps.bounding.contains(cap) { caps.bounding.append(cap) }
-                if !caps.effective.contains(cap) { caps.effective.append(cap) }
-                if !caps.permitted.contains(cap) { caps.permitted.append(cap) }
-            }
+        process.noNewPrivileges = !run.securityOpt.isEmpty
+        if !run.ulimits.isEmpty {
+            process.rlimits = try rlimits(run.ulimits)
         }
     }
 
-    static func rlimits(_ items: [EngineUlimit]) -> [LinuxRLimit] {
-        let map: [String: String] = [
-            "as": "RLIMIT_AS",
-            "core": "RLIMIT_CORE",
-            "cpu": "RLIMIT_CPU",
-            "data": "RLIMIT_DATA",
-            "fsize": "RLIMIT_FSIZE",
-            "locks": "RLIMIT_LOCKS",
-            "memlock": "RLIMIT_MEMLOCK",
-            "msgqueue": "RLIMIT_MSGQUEUE",
-            "nice": "RLIMIT_NICE",
-            "nofile": "RLIMIT_NOFILE",
-            "nproc": "RLIMIT_NPROC",
-            "rss": "RLIMIT_RSS",
-            "rtprio": "RLIMIT_RTPRIO",
-            "rttime": "RLIMIT_RTTIME",
-            "sigpending": "RLIMIT_SIGPENDING",
-            "stack": "RLIMIT_STACK",
-        ]
-        return items.compactMap { item in
-            let lower = item.name.lowercased()
-            let key = map[lower] ?? (lower.hasPrefix("rlimit_") ? item.name.uppercased() : "RLIMIT_\(item.name.uppercased())")
-            guard let kind = try? LinuxRLimit.Kind(key) else { return nil }
+    static func rlimits(_ items: [EngineUlimit]) throws -> [LinuxRLimit] {
+        try items.map { item in
+            let name = item.name.uppercased()
+            let key = name.hasPrefix("RLIMIT_") ? name : "RLIMIT_\(name)"
+            guard let kind = try? LinuxRLimit.Kind(key), item.soft <= item.hard else {
+                throw EngineError.invalidArgument("invalid ulimit: \(item.name)")
+            }
             return LinuxRLimit(kind: kind, hard: item.hard, soft: item.soft)
         }
     }

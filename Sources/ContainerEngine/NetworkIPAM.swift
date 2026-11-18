@@ -89,6 +89,13 @@ struct NetworkIPAM: Sendable {
         used.remove(ip)
     }
 
+    /// Releases every lease whose id starts with `prefix` (all endpoints of one container).
+    mutating func release(idsWithPrefix prefix: String) {
+        for id in byID.keys where id.hasPrefix(prefix) {
+            release(id: id)
+        }
+    }
+
     func address(for id: String) -> IPv4Address? {
         byID[id]
     }

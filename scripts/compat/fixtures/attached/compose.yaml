@@ -1,0 +1,8 @@
+services:
+  ticker:
+    image: alpine:3.20
+    command: ["sh", "-c", "while true; do echo tick; sleep 1; done"]
+    stop_grace_period: 1s
+  job:
+    image: alpine:3.20
+    command: ["sh", "-c", "sleep 3; echo job done; exit 4"]

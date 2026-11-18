@@ -18,6 +18,7 @@ extension EngineManager {
         let ociPlatform: Platform
         do {
             reference = try Self.normalizedReference(name: name, tag: effectiveTag)
+            try Self.requireRunnablePlatform(platform)
             ociPlatform = try Self.buildPlatform(platform)
         } catch {
             return Self.failedImageProgress(error)
@@ -145,7 +146,7 @@ extension EngineManager {
         for (digest, members) in groups {
             guard let primary = members.first else { continue }
             let tags = Self.uniqueDisplayTags(members.map(\.reference))
-            let repoDigests = members.map { "\(Self.repository(from: $0.reference))@\(digest)" }
+            let repoDigests = Self.repoDigests(members.map(\.reference), digest: digest)
             let platform = await Self.preferredPlatform(for: primary)
             let config = try? await primary.config(for: platform)
             summaries.append(
@@ -166,10 +167,8 @@ extension EngineManager {
         var result = summaries.sorted { $0.id < $1.id }
         if let refs = filters["reference"], !refs.isEmpty {
             result = result.filter { summary in
-                refs.contains { needle in
-                    summary.repoTags.contains { $0.contains(needle) }
-                        || summary.repoDigests.contains { $0.contains(needle) }
-                        || summary.id.contains(needle)
+                refs.contains { pattern in
+                    FilterMatch.reference(pattern, references: summary.repoTags + summary.repoDigests)
                 }
             }
         }
@@ -209,8 +208,7 @@ extension EngineManager {
         let image = try await resolveImage(name)
         let siblings = try await imageStore.list().filter { $0.digest == image.digest }
         let tags = Self.uniqueDisplayTags(siblings.map(\.reference))
-        let repoDigests = siblings.filter { !Self.isDigestReference($0.reference) }
-            .map { "\(Self.repository(from: $0.reference))@\(image.digest)" }
+        let repoDigests = Self.repoDigests(siblings.map(\.reference), digest: image.digest)
 
         let platform = await Self.preferredPlatform(for: image)
         let config = try? await image.config(for: platform)
@@ -408,6 +406,12 @@ extension EngineManager {
                 other != tag && aliases(for: other).contains(tag)
             }
         }.sorted()
+    }
+
+    /// `name@digest` per repository. A bare-digest reference (an untagged build result) has no
+    /// repository, so it contributes nothing, like Docker's empty `RepoDigests` for it.
+    static func repoDigests(_ references: [String], digest: String) -> [String] {
+        references.filter { !isDigestReference($0) }.map { "\(repository(from: $0))@\(digest)" }
     }
 
     static func isDigestReference(_ reference: String) -> Bool {

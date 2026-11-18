@@ -3,15 +3,37 @@ import NIOCore
 import NIOWebSocket
 
 /// Raw TCP stream after Docker `Upgrade: tcp` hijack.
+///
+/// Inbound bytes are raw stdin (never framed, even without a TTY). A write-side shutdown
+/// from the client is stdin EOF; output keeps flowing until the session ends.
 final class TCPHijackHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = ByteBuffer
     typealias OutboundOut = ByteBuffer
 
+    private enum StdinEvent: Sendable {
+        case data(Data)
+        case closed
+    }
+
     private let session: DockerHijack
+    private let stdin: AsyncStream<StdinEvent>.Continuation
     private var closed = false
 
     init(session: DockerHijack) {
         self.session = session
+        let (events, continuation) = AsyncStream<StdinEvent>.makeStream()
+        self.stdin = continuation
+        // One consumer keeps stdin ordered and puts EOF after the last byte.
+        Task {
+            for await event in events {
+                switch event {
+                case .data(let bytes):
+                    await session.onStdin?(bytes)
+                case .closed:
+                    await session.onStdinClosed?()
+                }
+            }
+        }
     }
 
     func handlerAdded(context: ChannelHandlerContext) {
@@ -20,12 +42,21 @@ final class TCPHijackHandler: ChannelInboundHandler, @unchecked Sendable {
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let buffer = unwrapInboundIn(data)
-        guard let onStdin = session.onStdin else { return }
-        let bytes = Data(buffer.readableBytesView)
-        Task { await onStdin(bytes) }
+        guard session.onStdin != nil else { return }
+        stdin.yield(.data(Data(buffer.readableBytesView)))
+    }
+
+    func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
+        if let event = event as? ChannelEvent, event == .inputClosed {
+            stdin.yield(.closed)
+            stdin.finish()
+            return
+        }
+        context.fireUserInboundEventTriggered(event)
     }
 
     func channelInactive(context: ChannelHandlerContext) {
+        stdin.finish()
         finish()
     }
 

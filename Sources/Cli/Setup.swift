@@ -4,114 +4,196 @@ import Foundation
 
 struct Setup: ParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Configure the shell alias and Docker-compatible socket symlink."
+        abstract: "Register a `macker` Docker context for the official docker CLI and Compose.",
+        discussion: """
+        Creates (or verifies) the Docker context `macker` pointing at the Macker daemon socket,
+        using `docker context create`. The active context is never switched: use
+        `docker --context macker …` or `docker context use macker`. No shell files are edited.
+        """
     )
 
-    @Flag(name: .long, help: "Print the planned changes without writing files.")
-    var dryRun = false
-
-    @Flag(name: .long, help: "Replace an existing /var/run/docker.sock if it does not already point at Macker.")
+    @Flag(name: .long, help: "Point an existing `macker` context that targets another endpoint at Macker (or remove the active context with --uninstall).")
     var force = false
 
+    @Flag(name: .long, help: "Remove the `macker` context (only if it points at Macker).")
+    var uninstall = false
+
+    @Flag(name: .long, help: "Also symlink /var/run/docker.sock to the Macker socket (opt-in; usually needs sudo).")
+    var dockerSocket = false
+
+    @Flag(name: .long, help: "Print the planned changes without making them.")
+    var dryRun = false
+
     func run() throws {
-        print("Macker setup")
-        print("  daemon socket: \(DaemonPaths.defaultSocketPath)")
-        print("  docker socket: \(DaemonPaths.dockerCompatSocketPath)")
-        print("")
-
-        try configureAlias()
-        try configureSymlink()
-
-        print("")
-        print("Next: start the daemon, then run `macker doctor`.")
-        print("Guest kernel/initfs: run `macker fetch-runtime` (or `make fetch-runtime`).")
-        print("Host routes (optional, for curl <container IP>): `sudo macker helper install`.")
-        print("Docker clients can use \(DaemonPaths.defaultHostURL) or, after the symlink, the default Docker socket.")
-    }
-
-    private func configureAlias() throws {
-        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-        let rcURL = rcFile(for: shell)
-        let aliasLine = Self.aliasLine(for: shell)
-        try FileManager.default.createDirectory(
-            at: rcURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
+        let runner = SetupRunner(
+            env: HostSetupEnvironment(),
+            socketPath: SetupRunner.daemonSocketPath(),
+            options: .init(force: force, uninstall: uninstall, dockerSocket: dockerSocket, dryRun: dryRun),
+            print: { Swift.print($0) }
         )
-        let existing = (try? String(contentsOf: rcURL, encoding: .utf8)) ?? ""
-
-        if existing.contains(aliasLine) {
-            print("  [ok  ] alias already present in \(rcURL.path)")
-            return
+        if !runner.run() {
+            throw ExitCode(1)
         }
+    }
+}
 
-        if dryRun {
-            print("  [warn] would append \(aliasLine) to \(rcURL.path)")
-            return
-        }
-
-        var next = existing
-        if !next.isEmpty && !next.hasSuffix("\n") {
-            next.append("\n")
-        }
-        next.append("\n# macker — route `docker` through the Macker CLI\n")
-        next.append(aliasLine)
-        next.append("\n")
-        try next.write(to: rcURL, atomically: true, encoding: .utf8)
-        print("  [ok  ] added \(aliasLine) to \(rcURL.path)")
-        print("         reload the shell or run: source \(rcURL.path)")
+/// `macker setup` logic over an injected ``SetupEnvironment``.
+struct SetupRunner {
+    struct Options: Equatable {
+        var force = false
+        var uninstall = false
+        var dockerSocket = false
+        var dryRun = false
     }
 
-    private func configureSymlink() throws {
-        let fm = FileManager.default
+    let env: SetupEnvironment
+    let socketPath: String
+    let options: Options
+    let print: (String) -> Void
+
+    var endpoint: String { "unix://\(socketPath)" }
+
+    /// `MACKER_HOST`, else the default store's socket. `DOCKER_HOST` is deliberately ignored:
+    /// it usually names the user's *other* engine, which the context must not point at.
+    static func daemonSocketPath(environment: [String: String] = ProcessInfo.processInfo.environment) -> String {
+        if let value = environment["MACKER_HOST"], let path = DaemonPaths.unixSocketPath(from: value) {
+            return path
+        }
+        return DaemonPaths.defaultSocketPath
+    }
+
+    /// Returns `false` when something needs the user's attention (non-zero exit).
+    func run() -> Bool {
+        let probe = DockerToolchainProbe(env: env)
+        print("Macker setup")
+        print("  daemon socket: \(socketPath)")
+        guard let docker = env.which("docker") else {
+            print("  [fail] docker CLI — not found on PATH. Install the Docker CLI (e.g. `brew install docker docker-compose`), then re-run `macker setup`.")
+            return false
+        }
+        var ok = applyContext(probe: probe, docker: docker)
+        if options.dockerSocket {
+            ok = applySocketLink() && ok
+        }
+        reportAliases(probe)
+        if ok, !options.uninstall {
+            print("")
+            print("Use it with:  docker --context macker ps      (or once: docker context use macker)")
+            print("Compose:      docker --context macker compose up -d")
+            print("Check:        macker doctor")
+        }
+        return ok
+    }
+
+    private func applyContext(probe: DockerToolchainProbe, docker: String) -> Bool {
+        let name = DockerToolchainProbe.contextName
+        let state = probe.contextState(docker: docker, endpoint: endpoint)
+        let active = probe.currentContext(docker: docker) == name
+        let plan = DockerContextPlan.plan(
+            state: state,
+            endpoint: endpoint,
+            force: options.force,
+            uninstall: options.uninstall,
+            active: active
+        )
+        switch plan {
+        case .keep:
+            print("  [ok  ] docker context \"\(name)\" → \(endpoint)")
+            return true
+        case .refuse(let message), .refuseRemoval(let message):
+            print("  [fail] \(message)")
+            return false
+        case .nothingToRemove:
+            print("  [ok  ] docker context \"\(name)\" is not registered")
+            return true
+        case .create:
+            return change(
+                "create docker context \"\(name)\" → \(endpoint)",
+                docker,
+                ["context", "create", name, "--description", "Macker MicroVM containers", "--docker", "host=\(endpoint)"]
+            )
+        case .update(let from):
+            return change(
+                "update docker context \"\(name)\": \(from) → \(endpoint)",
+                docker,
+                ["context", "update", name, "--docker", "host=\(endpoint)"]
+            )
+        case .remove:
+            var arguments = ["context", "rm", name]
+            if active {
+                arguments.append("--force")
+            }
+            return change("remove docker context \"\(name)\"", docker, arguments)
+        }
+    }
+
+    private func change(_ summary: String, _ docker: String, _ arguments: [String]) -> Bool {
+        if options.dryRun {
+            print("  [plan] would \(summary)")
+            return true
+        }
+        let result = env.run(docker, arguments, timeoutSeconds: 20)
+        if result.status != 0 {
+            print("  [fail] could not \(summary): \(result.message)")
+            return false
+        }
+        print("  [ok  ] \(summary)")
+        return true
+    }
+
+    /// Opt-in `/var/run/docker.sock` → Macker socket. Never replaces another engine's socket
+    /// without `--force`; `--uninstall` removes it only when it points at Macker.
+    private func applySocketLink() -> Bool {
         let link = DaemonPaths.dockerCompatSocketPath
-        let target = DaemonPaths.defaultSocketPath
-
-        if let dest = try? fm.destinationOfSymbolicLink(atPath: link), dest == target {
-            print("  [ok  ] \(link) already → \(target)")
-            return
-        }
-
-        if fm.fileExists(atPath: link) {
-            if !force {
-                print("  [warn] \(link) already exists; re-run with --force to replace it")
-                print("         or: sudo ln -sfn \(target) \(link)")
-                return
+        let current = env.symlinkDestination(link)
+        if options.uninstall {
+            guard current == socketPath else {
+                print("  [ok  ] \(link) does not point at Macker; left alone")
+                return true
             }
-            if dryRun {
-                print("  [warn] would replace \(link) with a symlink to \(target)")
-                return
+            if options.dryRun {
+                print("  [plan] would remove \(link)")
+                return true
             }
-            try fm.removeItem(atPath: link)
-        } else if dryRun {
-            print("  [warn] would create \(link) → \(target) (may require sudo)")
-            return
+            do {
+                try env.removeItem(link)
+                print("  [ok  ] removed \(link)")
+                return true
+            } catch {
+                print("  [fail] could not remove \(link): \(error.localizedDescription) — run: sudo rm \(link)")
+                return false
+            }
         }
-
+        if current == socketPath {
+            print("  [ok  ] \(link) → \(socketPath)")
+            return true
+        }
+        let exists = env.fileExists(link)
+        if exists, !options.force {
+            print("  [fail] \(link) already exists (\(current ?? "not a symlink")); re-run with --force to replace it")
+            return false
+        }
+        if options.dryRun {
+            print("  [plan] would \(exists ? "replace" : "create") \(link) → \(socketPath)")
+            return true
+        }
         do {
-            try fm.createSymbolicLink(atPath: link, withDestinationPath: target)
-            print("  [ok  ] created \(link) → \(target)")
+            if exists {
+                try env.removeItem(link)
+            }
+            try env.createSymlink(link, to: socketPath)
+            print("  [ok  ] \(link) → \(socketPath)")
+            return true
         } catch {
-            print("  [warn] could not create \(link): \(error.localizedDescription)")
-            print("         run: sudo ln -sfn \(target) \(link)")
+            print("  [fail] could not link \(link): \(error.localizedDescription) — run: sudo ln -sfn \(socketPath) \(link)")
+            return false
         }
     }
 
-    private func rcFile(for shell: String) -> URL {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        switch URL(fileURLWithPath: shell).lastPathComponent {
-        case "bash":
-            return home.appendingPathComponent(".bashrc")
-        case "fish":
-            return home.appendingPathComponent(".config/fish/config.fish")
-        default:
-            return home.appendingPathComponent(".zshrc")
+    /// Old releases appended `alias docker="macker"`; point it out, never edit shell files.
+    private func reportAliases(_ probe: DockerToolchainProbe) {
+        for file in probe.legacyAliases() {
+            print("  [warn] \(file) aliases docker to macker; delete that line so `docker` is the official CLI again")
         }
-    }
-
-    private static func aliasLine(for shell: String) -> String {
-        if URL(fileURLWithPath: shell).lastPathComponent == "fish" {
-            return "alias docker macker"
-        }
-        return #"alias docker="macker""#
     }
 }

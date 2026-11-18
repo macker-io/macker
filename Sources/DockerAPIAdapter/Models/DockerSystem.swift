@@ -29,9 +29,9 @@ public struct DockerVersionResponse: Encodable, Sendable {
     public static func current() -> DockerVersionResponse {
         let details: [String: String] = [
             "ApiVersion": DockerAPI.version,
-            "MinAPIVersion": DockerAPI.minVersion,
-            "Os": "darwin",
-            "Arch": "arm64",
+            "MinAPIVersion": DockerAPI.minimumVersion,
+            "Os": DockerAPI.os,
+            "Arch": DockerAPI.arch,
             "Experimental": "true",
         ]
         return DockerVersionResponse(
@@ -44,11 +44,11 @@ public struct DockerVersionResponse: Encodable, Sendable {
             ],
             Version: DockerAPI.daemonVersion,
             ApiVersion: DockerAPI.version,
-            MinAPIVersion: DockerAPI.minVersion,
+            MinAPIVersion: DockerAPI.minimumVersion,
             GitCommit: "dev",
             GoVersion: "swift-6.2",
-            Os: "darwin",
-            Arch: "arm64",
+            Os: DockerAPI.os,
+            Arch: DockerAPI.arch,
             KernelVersion: ProcessInfo.processInfo.operatingSystemVersionString,
             Experimental: true,
             BuildTime: ISO8601DateFormatter().string(from: Date())
@@ -159,15 +159,17 @@ public struct DockerSystemInfo: Encodable, Sendable {
         self.KernelVersion = engine.kernelVersion
         self.OperatingSystem = engine.operatingSystem
         self.OSVersion = engine.osVersion
-        self.OSType = "darwin"
-        self.Architecture = engine.architecture
+        // Runtime platform (the guest), not the Mac: clients pick images and builders from these.
+        self.OSType = DockerAPI.os
+        self.Architecture = DockerAPI.machine
         self.NCPU = engine.ncpu
         self.MemTotal = engine.memTotal
         self.IndexServerAddress = "https://index.docker.io/v1/"
         self.Name = engine.hostname
         self.Labels = []
         self.ExperimentalBuild = true
-        self.BuilderVersion = "1"
+        // BuildKit (via `/grpc` + `/session`) is the default builder, as on Docker Engine.
+        self.BuilderVersion = "2"
         self.ServerVersion = DockerAPI.daemonVersion
         self.Runtimes = [
             "containerization": .init(path: "Virtualization.framework", runtimeArgs: nil),

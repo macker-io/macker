@@ -93,7 +93,7 @@ struct NetworkCreate: ParsableCommand {
     @Option(help: "Subnet in CIDR format.")
     var subnet: [String] = []
 
-    @Option(help: "IPv4 gateway for the subnet.")
+    @Option(help: "IPv4 or IPv6 gateway for the subnet.")
     var gateway: [String] = []
 
     @Option(name: .customLong("ip-range"), help: "Allocate container IPs from a sub-range.")
@@ -138,7 +138,10 @@ struct NetworkCreate: ParsableCommand {
         let subnet6 = try Self.singleValue(subnet.filter { $0.contains(":") }, what: "IPv6 subnet")
         let gateway4 = try Self.singleValue(gateway.filter { !$0.contains(":") }, what: "IPv4 gateway")
         let gateway6 = try Self.singleValue(gateway.filter { $0.contains(":") }, what: "IPv6 gateway")
-        let ipRange4 = try Self.singleValue(ipRange.filter { !$0.contains(":") }, what: "IPv4 ip-range")
+        guard !ipRange.contains(where: { $0.contains(":") }) else {
+            throw CLIError.io("IPv6 ip-range is not supported")
+        }
+        let ipRange4 = try Self.singleValue(ipRange, what: "IPv4 ip-range")
         var configs: [NetworkCreateBody.IPAM.Config] = []
         if subnet4 != nil || gateway4 != nil || ipRange4 != nil || !auxAddress.isEmpty {
             configs.append(

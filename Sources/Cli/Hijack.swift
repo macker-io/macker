@@ -86,7 +86,9 @@ enum TerminalIO {
 }
 
 enum HijackIO {
-    static func copyStdin(to fd: Int32, mux: Bool, detachKeys: [UInt8]? = nil) {
+    /// Docker hijack stdin: raw bytes in TTY and non-TTY mode alike; at EOF the write side
+    /// is shut down so the daemon closes the process stdin while output keeps flowing.
+    static func copyStdin(to fd: Int32, detachKeys: [UInt8]? = nil) {
         DispatchQueue.global(qos: .userInitiated).async {
             var scanner = DetachScanner(keys: detachKeys ?? [])
             var buf = [UInt8](repeating: 0, count: 4096)
@@ -97,26 +99,19 @@ enum HijackIO {
                 if n < 0 && errno == EINTR { continue }
                 if n <= 0 {
                     let rest = scanner.flush()
-                    if !rest.isEmpty, !writePayload(Data(rest), to: fd, mux: mux) { return }
+                    if !rest.isEmpty, !writeFD(fd, Data(rest)) { return }
                     break
                 }
                 let bytes = Array(buf.prefix(n))
                 let (out, detach) = scanner.ingest(bytes)
-                if !out.isEmpty, !writePayload(Data(out), to: fd, mux: mux) { return }
+                if !out.isEmpty, !writeFD(fd, Data(out)) { return }
                 if detach {
                     _ = Darwin.shutdown(fd, SHUT_RDWR)
                     return
                 }
             }
-            if mux {
-                _ = writeFD(fd, DockerStdio.stdinFrame(Data()))
-            }
+            _ = Darwin.shutdown(fd, SHUT_WR)
         }
-    }
-
-    @discardableResult
-    private static func writePayload(_ data: Data, to fd: Int32, mux: Bool) -> Bool {
-        writeFD(fd, mux ? DockerStdio.stdinFrame(data) : data)
     }
 
     static func writeOutput(_ data: Data, tty: Bool, pending: inout Data) {

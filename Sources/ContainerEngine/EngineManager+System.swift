@@ -4,12 +4,12 @@ import Foundation
 extension EngineManager {
     /// Cheap snapshot for the desktop status item; does not query the image store.
     public func activityCounts() -> (runningContainers: Int, activeBuilds: Int) {
-        (containers.values.count { $0.state == "running" }, activeBuildCount)
+        (containers.values.count { !$0.isSystem && $0.state == "running" }, activeBuildCount)
     }
 
     /// Docker `GET /info` — host and daemon facts.
     public func systemInfo() async -> EngineSystemInfo {
-        let containers = Array(self.containers.values)
+        let containers = self.containers.values.filter { !$0.isSystem }
         let images = (try? await imageStore.list()) ?? []
         let version = ProcessInfo.processInfo.operatingSystemVersion
         return EngineSystemInfo(
@@ -46,7 +46,7 @@ extension EngineManager {
         return EngineDiskUsage(
             layersSize: layersSize,
             images: images,
-            containers: Array(self.containers.values.map(\.summary)),
+            containers: self.containers.values.filter { !$0.isSystem }.map(\.summary),
             volumes: listVolumes()
         )
     }

@@ -4,23 +4,14 @@ import Testing
 @testable import DockerAPIAdapter
 
 struct ContainerOptionsTests {
-    @Test func formatLogsHonorsTailSinceUntil() {
-        let older = "2020-01-01T00:00:00.000000000Z hello"
-        let newer = "2020-01-01T00:00:10.000000000Z world"
-        let text = "\(older)\n\(newer)\n"
-        let since = Date(timeIntervalSince1970: 1_577_836_805)
-        let until = Date(timeIntervalSince1970: 1_577_836_820)
-
-        #expect(Router.formatLogs(text, timestamps: false, tail: "1") == "\(newer)\n")
-        #expect(Router.formatLogs(text, timestamps: false, tail: "all").contains("hello"))
-        #expect(Router.formatLogs(text, timestamps: false, tail: nil, since: since) == "\(newer)\n")
-        #expect(Router.formatLogs(text, timestamps: false, tail: nil, until: since) == "\(older)\n")
-        #expect(
-            Router.formatLogs(text, timestamps: false, tail: nil, since: since, until: until) == "\(newer)\n"
-        )
-        let stamped = Router.formatLogs("plain\n", timestamps: true, tail: nil)
-        #expect(stamped.hasSuffix(" plain\n"))
-        #expect(Router.logTimestamp(stamped.trimmingCharacters(in: .newlines)) != nil)
+    @Test func logChunksKeepStreamAndPrefixLogTime() {
+        let time = Date(timeIntervalSince1970: 1_577_836_800)
+        let err = EngineIOChunk(data: Data("oops\n".utf8), stdout: false, timestamp: time)
+        let framed = Router.framedIOChunk(err, tty: false, stdout: true, stderr: true, timestamps: true)
+        #expect(framed.first == 2)
+        let payload = String(decoding: framed.dropFirst(8), as: UTF8.self)
+        #expect(payload == "\(ISO8601.string(from: time)) oops\n")
+        #expect(Router.framedIOChunk(err, tty: false, stdout: true, stderr: false).isEmpty)
     }
 
     @Test func listFiltersByNameStatusLabelAndUntil() async throws {
@@ -115,6 +106,19 @@ struct ContainerOptionsTests {
         }
     }
 
+    @Test func failedBootRemovesAutoRemoveContainerAndFinishesWaiters() async throws {
+        // The pinned image is missing, so the boot fails without launching a VM.
+        let id = String(repeating: "a", count: 64)
+        var container = stubContainer(id: id, name: "auto", state: "created")
+        container.autoRemove = true
+        try await withSeededEngine([container]) { engine in
+            let removed = try await engine.waitContainer(id, condition: .removed)
+            await #expect(throws: EngineError.self) { _ = try await engine.startContainer(id) }
+            #expect(try await engine.listContainers(all: true).isEmpty)
+            #expect(await EngineManager.first(of: removed, timeoutSeconds: 1) == 0)
+        }
+    }
+
     @Test func unknownSinceFilterThrows() async throws {
         try await withSeededEngine([stubContainer(id: String(repeating: "f", count: 64), name: "only")]) { engine in
             do {
@@ -173,12 +177,16 @@ struct ContainerOptionsTests {
             let tmpfs = runtime.appendingPathComponent("tmpfs")
             let disk = runtime.appendingPathComponent("rootfs.ext4")
             let baseline = runtime.appendingPathComponent("baseline.json")
+            let staged = runtime.appendingPathComponent(EngineManager.pendingArchivesDirectory).appendingPathComponent("copy.tar")
             let marker = Data("preserved".utf8)
             try FileManager.default.createDirectory(at: tmpfs, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: staged.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try marker.write(to: staged)
             try marker.write(to: disk)
             try marker.write(to: baseline)
 
             let restart = EngineManager.restoreContainers(&containers, root: dir)
+            #expect(try Data(contentsOf: staged) == marker)
             #expect(try Data(contentsOf: disk) == marker)
             #expect(try Data(contentsOf: baseline) == marker)
             #expect(!FileManager.default.fileExists(atPath: tmpfs.path))

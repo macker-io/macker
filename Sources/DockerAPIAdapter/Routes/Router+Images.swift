@@ -88,16 +88,35 @@ extension Router {
         guard let fromImage = request.query["fromImage"], !fromImage.isEmpty else {
             return Self.jsonError(status: 400, message: "fromImage or fromSrc query parameter is required")
         }
-        // Docker API: an empty/absent tag on a name-only reference pulls all tags of the repository.
-        let tag = request.query["tag"].flatMap { $0.isEmpty ? nil : $0 }
+        let reference = Self.pullReference(fromImage: fromImage, tag: request.query["tag"])
         return Self.progressStream(
             await engine.pullImage(
-                name: fromImage,
-                tag: tag,
+                name: reference.name,
+                tag: reference.tag,
                 platform: request.query["platform"],
                 registryAuth: request.headers["x-registry-auth"]
             )
         )
+    }
+
+    /// `POST /images/create?fromImage=alpine&tag=sha256:…`: the official client sends a pinned
+    /// digest in `tag` (Docker's daemon treats a `tag` that parses as a digest as `name@digest`).
+    /// An empty/absent tag on a name-only reference means "all tags" and stays `nil`.
+    static func pullReference(fromImage: String, tag: String?) -> (name: String, tag: String?) {
+        guard let tag, !tag.isEmpty else { return (fromImage, nil) }
+        if isDigest(tag) {
+            return (fromImage + "@" + tag, nil)
+        }
+        return (fromImage, tag)
+    }
+
+    /// `algorithm:encoded` per the OCI digest grammar (e.g. `sha256:<64 hex>`).
+    static func isDigest(_ value: String) -> Bool {
+        let parts = value.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+        guard parts.count == 2, !parts[0].isEmpty, parts[1].count >= 32 else { return false }
+        let algorithmOK = parts[0].allSatisfy { $0.isLowercase || $0.isNumber || "+._-".contains($0) }
+        let encodedOK = parts[1].allSatisfy { $0.isLetter || $0.isNumber || "=_-".contains($0) }
+        return algorithmOK && encodedOK
     }
 
     func imageHistory(_ name: String, request: HTTPRequest) async -> HTTPResponse {

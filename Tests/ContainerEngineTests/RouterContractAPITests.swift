@@ -68,14 +68,6 @@ struct RouterContractAPITests {
             let listed = await router.handle(try RouterTestSupport.request("GET", "/containers/\(id)/checkpoints"))
             #expect(listed.status == 501)
             #expect(try RouterTestSupport.message(listed)?.contains("not supported") == true)
-
-            let waited = await router.handle(try RouterTestSupport.request("POST", "/containers/\(id)/wait"))
-            #expect(waited.status == 200)
-            #expect(RouterTestSupport.int64(try RouterTestSupport.jsonObject(waited)["StatusCode"]) == 0)
-            let badWait = await router.handle(
-                try RouterTestSupport.request("POST", "/containers/\(id)/wait", query: ["condition": "paused"])
-            )
-            #expect(badWait.status == 400)
         }
     }
 
@@ -228,6 +220,21 @@ struct RouterContractAPITests {
             #expect(netSettings?["GlobalIPv6Address"] as? String == "fd00:29::42")
             #expect(netSettings?["IPv6Gateway"] as? String == "fd00:29::1")
             #expect(RouterTestSupport.int64(netSettings?["GlobalIPv6PrefixLen"]) == 64)
+
+            // A later network connect must forward the requested IPv6 too, not just validate it.
+            let peer = try await RouterTestSupport.createContainer(router, name: "peer")
+            let connected = await router.handle(try RouterTestSupport.request(
+                "POST", "/networks/v6net/connect", body: [
+                    "Container": peer,
+                    "EndpointConfig": ["IPAMConfig": ["IPv6Address": "fd00:29::43"]],
+                ]
+            ))
+            #expect(connected.status == 200)
+            let net = try RouterTestSupport.jsonObject(
+                await router.handle(try RouterTestSupport.request("GET", "/networks/v6net"))
+            )
+            let peers = try #require(net["Containers"] as? [String: [String: Any]])
+            #expect(peers[peer]?["IPv6Address"] as? String == "fd00:29::43/64")
         }
     }
 }

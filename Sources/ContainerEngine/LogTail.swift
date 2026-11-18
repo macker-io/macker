@@ -11,13 +11,10 @@ struct LogFileSnapshot: Sendable {
         self.end = end
     }
 
-    func read() throws -> Data {
-        try handle.seek(toOffset: 0)
-        return try handle.read(upToCount: Int(end)) ?? Data()
-    }
-
     /// Visit JSONL records from newest to oldest, holding one block and at most one split record.
-    func visitReversed(_ visit: (Data) -> Bool) throws {
+    func visitReversed(includingDelimiter: Bool = false, _ visit: (Data) -> Bool) throws {
+        // The delimiter belongs to the preceding line, including across a block boundary.
+        var hasLF = false
         var cursor = end
         var fragments: [Data] = []
         while cursor > 0 {
@@ -28,13 +25,16 @@ struct LogFileSnapshot: Sendable {
             guard let block = try handle.read(upToCount: count), block.count == count else { return }
             let parts = block.split(separator: 0x0a, omittingEmptySubsequences: false)
             for part in parts.dropFirst().reversed() {
-                let record = Self.join(part, with: fragments)
+                var record = Self.join(part, with: fragments)
+                if includingDelimiter && hasLF { record.append(0x0a) }
+                hasLF = true
                 fragments.removeAll(keepingCapacity: true)
                 if !record.isEmpty, !visit(record) { return }
             }
             if let first = parts.first, !first.isEmpty { fragments.append(first) }
         }
-        let record = Self.join(Data(), with: fragments)
+        var record = Self.join(Data(), with: fragments)
+        if includingDelimiter && hasLF { record.append(0x0a) }
         if !record.isEmpty { _ = visit(record) }
     }
 
@@ -62,6 +62,18 @@ struct LogTail {
     init(count: Int) { self.count = count }
 
     var complete: Bool { slots.count == count && open.isEmpty }
+
+    /// Modern records and Docker json-file entries have explicit line boundaries
+    /// (also for a partial line flushed at exit). Never join them across restarts.
+    mutating func visitLine(_ chunk: EngineIOChunk, endsLine: Bool = true) {
+        let stdout = chunk.stdout
+        seen.remove(stdout)
+        if endsLine { finish(stdout) }
+        guard !chunk.data.isEmpty else { return }
+        if open[stdout] == nil { begin(stdout) }
+        append(chunk.data, stdout: stdout, timestamp: chunk.timestamp)
+        if chunk.startsLogLine { finish(stdout) }
+    }
 
     mutating func visit(_ chunk: EngineIOChunk) {
         guard !chunk.data.isEmpty else { return }

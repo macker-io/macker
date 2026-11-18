@@ -62,6 +62,9 @@ public struct EngineVolumeRequest: Sendable {
 }
 
 public struct EngineMount: Sendable, Codable {
+    /// Daemon-internal ext4 disk image (not a Docker mount type).
+    static let blockType = "ext4-disk"
+
     public var type: String
     public var name: String
     public var source: String

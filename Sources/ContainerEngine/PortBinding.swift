@@ -131,6 +131,28 @@ public struct EnginePortBinding: Sendable, Codable, Equatable {
         return "\(value)/\(proto)"
     }
 
+    /// True when both bindings would claim the same host socket: same protocol and port, and
+    /// the addresses overlap (equal, or either is a wildcard). Ephemeral (`0`) never conflicts.
+    public func conflicts(with other: EnginePortBinding) -> Bool {
+        guard hostPort != 0, hostPort == other.hostPort,
+            protocolName.lowercased() == other.protocolName.lowercased()
+        else { return false }
+        // "" listens on every family; otherwise IPv4 and IPv6 sockets are independent.
+        func isV6(_ ip: String) -> Bool { ip.contains(":") }
+        if !hostIP.isEmpty, !other.hostIP.isEmpty, isV6(hostIP) != isV6(other.hostIP) {
+            return false
+        }
+        let wildcard: Set<String> = ["", "0.0.0.0", "::"]
+        return wildcard.contains(hostIP) || wildcard.contains(other.hostIP) || hostIP == other.hostIP
+    }
+
+    /// Docker's port-allocator wording for a host port already claimed by another container.
+    public var allocatedError: String {
+        let ip = hostIP.isEmpty ? "0.0.0.0" : hostIP
+        let host = ip.contains(":") ? "[\(ip)]" : ip
+        return "Bind for \(host):\(hostPort) failed: port is already allocated"
+    }
+
     public static func uniqued(_ ports: [EnginePortBinding]) -> [EnginePortBinding] {
         merging(ports, [])
     }

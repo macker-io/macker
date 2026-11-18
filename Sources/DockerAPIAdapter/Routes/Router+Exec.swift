@@ -1,7 +1,6 @@
 import ContainerEngine
 import Foundation
 import NIOCore
-import os
 
 extension Router {
     enum NamedExecRoute: Equatable {
@@ -197,30 +196,19 @@ extension Router {
             continuation.finish()
         }
 
-        let demux = session.tty ? nil : StdinDemuxer()
-        let onStdin: (@Sendable (Data) async -> Void)?
+        // Docker stdin is raw bytes in both TTY and non-TTY mode; EOF is a half-close.
+        var onStdin: (@Sendable (Data) async -> Void)?
+        var onStdinClosed: (@Sendable () async -> Void)?
         if stdin {
-            onStdin = { data in
-                if session.tty {
-                    await session.writeStdin(data)
-                    return
-                }
-                guard let demux else { return }
-                let (chunks, closed) = demux.ingest(data)
-                for chunk in chunks {
-                    await session.writeStdin(chunk)
-                }
-                if closed {
-                    await session.close()
-                }
-            }
-        } else {
-            onStdin = nil
+            onStdin = { @Sendable data in await session.writeStdin(data) }
+            onStdinClosed = { @Sendable in await session.closeStdin() }
         }
 
         let upgrade = request.headers["upgrade"]?.lowercased() == "tcp"
         let status: UInt
-        var headers: [(String, String)] = [("Content-Type", "application/vnd.docker.raw-stream")]
+        var headers: [(String, String)] = [
+            ("Content-Type", streamContentType(tty: session.tty, version: request.apiVersion)),
+        ]
         switch kind {
         case .websocket:
             status = 101
@@ -242,22 +230,10 @@ extension Router {
                     kind: kind,
                     output: stream,
                     onStdin: onStdin,
+                    onStdinClosed: onStdinClosed,
                     onClose: { await session.close() }
                 )
             )
         )
-    }
-}
-
-final class StdinDemuxer: @unchecked Sendable {
-    private let lock = OSAllocatedUnfairLock(initialState: Data())
-
-    func ingest(_ data: Data) -> (chunks: [Data], closed: Bool) {
-        lock.withLock { buffer in
-            buffer.append(data)
-            let pulled = DockerStdio.pullFrames(&buffer)
-            let chunks = pulled.frames.compactMap { $0.stream == 0 ? $0.payload : nil }
-            return (chunks, pulled.closed)
-        }
     }
 }

@@ -31,7 +31,7 @@ enum RouterTestSupport {
         switch response.body {
         case .buffer(var buffer):
             return Data(buffer.readBytes(length: buffer.readableBytes) ?? [])
-        case .none, .stream, .hijack:
+        case .none, .stream, .hijack, .upgrade:
             return Data()
         }
     }

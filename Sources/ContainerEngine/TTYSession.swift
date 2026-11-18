@@ -21,6 +21,11 @@ struct TTYSession: Sendable {
     var currentLine: Data { cooker.currentLine }
 
     mutating func ingest(_ data: Data) -> (attach: Data, log: String) {
+        let result = ingestBytes(data)
+        return (result.attach, String(decoding: result.log, as: UTF8.self))
+    }
+
+    mutating func ingestBytes(_ data: Data) -> (attach: Data, log: Data) {
         let stripped = DeviceStatus.strip(data, pending: &pending)
         let attach = collapse.ingest(stripped)
         return (attach, cooker.ingest(attach))
@@ -28,6 +33,10 @@ struct TTYSession: Sendable {
 
     /// Trailing prompt with no newline. Used when loading a saved log file.
     mutating func finish() -> String {
+        String(decoding: finishBytes(), as: UTF8.self)
+    }
+
+    mutating func finishBytes() -> Data {
         cooker.flush()
     }
 
@@ -36,9 +45,13 @@ struct TTYSession: Sendable {
     }
 
     static func cook(_ data: Data) -> String {
+        String(decoding: cookBytes(data), as: UTF8.self)
+    }
+
+    static func cookBytes(_ data: Data) -> Data {
         var session = TTYSession()
-        let log = session.ingest(data).log
-        return log + session.finish()
+        let log = session.ingestBytes(data).log
+        return log + session.finishBytes()
     }
 }
 
@@ -149,7 +162,7 @@ private struct Cooker: Sendable {
 
     var currentLine: Data { Data(line) }
 
-    mutating func ingest(_ data: Data) -> String {
+    mutating func ingest(_ data: Data) -> Data {
         var out = Data()
         for byte in data {
             switch mode {
@@ -206,11 +219,11 @@ private struct Cooker: Sendable {
                 }
             }
         }
-        return String(decoding: out, as: UTF8.self)
+        return out
     }
 
-    mutating func flush() -> String {
-        let text = String(decoding: Data(line), as: UTF8.self)
+    mutating func flush() -> Data {
+        let text = Data(line)
         line = []
         col = 0
         mode = .text
