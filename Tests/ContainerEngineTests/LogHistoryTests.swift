@@ -96,6 +96,46 @@ struct LogHistoryTests {
         }
     }
 
+    @Test func timestampedTailMatchesHistoryWithUnterminatedStreams() async throws {
+        try await withEngine { engine in
+            try await RouterTestSupport.importTagged(engine, repo: "tail-order")
+            let router = Router(engine: engine)
+            let time = Date(timeIntervalSince1970: 1_700_000_000)
+            for records in [
+                [("stdout", true), ("stderr\n", false)],
+                [("out", true), ("err", false), ("put", true)],
+                [("out", true), ("error\n", false), ("put\nlast", true)],
+            ] {
+                let id = try await RouterTestSupport.createContainer(router, image: "tail-order")
+                for (text, stdout) in records {
+                    await engine.appendLogRecord(id: id, chunk: EngineIOChunk(
+                        data: Data(text.utf8), stdout: stdout, timestamp: time
+                    ))
+                }
+
+                func replay(tail: String) async throws -> [(stream: UInt8, payload: Data)] {
+                    let request = try RouterTestSupport.request(
+                        "GET", "/containers/\(id)/logs",
+                        query: ["stdout": "1", "stderr": "1", "timestamps": "1", "tail": tail]
+                    )
+                    let response = await router.handle(request)
+                    #expect(response.status == 200)
+                    var data = RouterTestSupport.data(response)
+                    return DockerStdio.pullFrames(&data).frames
+                }
+
+                let history = try await replay(tail: "all")
+                #expect(history.count >= 2)
+                for count in 1...records.count {
+                    let tail = try await replay(tail: String(count))
+                    let expected = history.suffix(count)
+                    #expect(tail.map(\.stream) == expected.map(\.stream))
+                    #expect(tail.map(\.payload) == expected.map(\.payload))
+                }
+            }
+        }
+    }
+
     @Test func historyJoinsPipeFragmentsAndUsesCaptureTime() {
         let older = Date(timeIntervalSince1970: 1_700_000_000)
         let newer = Date(timeIntervalSince1970: 1_700_000_010)

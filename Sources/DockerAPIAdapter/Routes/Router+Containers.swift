@@ -848,25 +848,29 @@ extension Router {
         return true
     }
 
-    // Pipe read boundaries are not line boundaries. Join fragments within each stream before tailing.
+    // Match LogTail: order lines by the record with their newline (or last byte if
+    // unterminated), while keeping the timestamp of their first byte.
     private static func logLines(_ chunks: [EngineIOChunk]) -> [EngineIOChunk] {
         var lines: [EngineIOChunk] = []
-        var partial: [Bool: (data: Data, date: Date?, order: Int)] = [:]
+        var partial: [Bool: (data: Data, date: Date?, position: Int, record: Int)] = [:]
         for (index, chunk) in chunks.enumerated() where !chunk.data.isEmpty {
-            var pending = partial.removeValue(forKey: chunk.stdout) ?? (Data(), chunk.timestamp, index)
+            var pending = partial.removeValue(forKey: chunk.stdout) ?? (Data(), chunk.timestamp, 0, 0)
             var start = chunk.data.startIndex
             while let newline = chunk.data[start...].firstIndex(of: 0x0a) {
                 let next = chunk.data.index(after: newline)
                 pending.data.append(chunk.data[start..<next])
                 lines.append(EngineIOChunk(data: pending.data, stdout: chunk.stdout, timestamp: pending.date))
-                pending = (Data(), chunk.timestamp, index)
+                pending = (Data(), chunk.timestamp, 0, 0)
                 start = next
             }
             pending.data.append(chunk.data[start...])
-            if !pending.data.isEmpty { partial[chunk.stdout] = pending }
+            if !pending.data.isEmpty {
+                partial[chunk.stdout] = (pending.data, pending.date, lines.count, index)
+            }
         }
-        for (stdout, entry) in partial.sorted(by: { $0.value.order < $1.value.order }) {
-            lines.append(EngineIOChunk(data: entry.data, stdout: stdout, timestamp: entry.date))
+        // Insert from newest to oldest so earlier insertion positions remain valid.
+        for (stdout, entry) in partial.sorted(by: { $0.value.record > $1.value.record }) {
+            lines.insert(EngineIOChunk(data: entry.data, stdout: stdout, timestamp: entry.date), at: entry.position)
         }
         return lines
     }
