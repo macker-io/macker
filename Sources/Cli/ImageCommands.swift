@@ -1,5 +1,6 @@
 import ArgumentParser
 import Foundation
+import MackerTransport
 
 struct Pull: ParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Pull an image from a registry.")
@@ -34,7 +35,7 @@ struct Pull: ParsableCommand {
             path += "&platform=\(DaemonAPI.query(platform))"
         }
         for reference in try DaemonAPI.streamProgress(path: path, quiet: quiet ? .pull : .off) {
-            print(reference)
+            print(ImageReferenceDisplay.shortened(reference))
         }
     }
 }
@@ -146,9 +147,9 @@ struct Images: ParsableCommand {
                 let digest = image.RepoDigests?.first { $0.hasPrefix("\(repo)@") } ?? "<none>"
                 rows.append([
                     ("ID", noTrunc ? image.Id : Format.shortID(image.Id)),
-                    ("Repository", repo),
+                    ("Repository", ImageReferenceDisplay.shortened(repo)),
                     ("Tag", tag),
-                    ("Digest", digest),
+                    ("Digest", ImageReferenceDisplay.shortened(digest)),
                     ("CreatedSince", Format.timeAgo(image.Created ?? 0)),
                     ("CreatedAt", Format.createdAt(image.Created ?? 0)),
                     ("Size", Format.size(image.Size)),

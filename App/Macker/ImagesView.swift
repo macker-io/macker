@@ -1,4 +1,5 @@
 import AppKit
+import MackerTransport
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -108,7 +109,7 @@ struct ImagesView: View {
                 model.performImageOperation(.delete(item.reference))
             }
         } message: { item in
-            Text(item.reference)
+            Text(ImageReferenceDisplay.shortened(item.reference))
         }
         .alert("Image Operation Failed", isPresented: errorPresented) {
             Button("OK") { model.imageError = nil }
@@ -251,7 +252,7 @@ struct ImagesView: View {
         } else if !image.references.isEmpty {
             Menu("Copy Tag") {
                 ForEach(image.references) { reference in
-                    Button(reference.id) { copy(reference.id) }
+                    Button(reference.displayReference) { copy(reference.id) }
                 }
             }
         }
@@ -262,7 +263,7 @@ struct ImagesView: View {
         if image.references.count > 1 {
             Menu("Remove Tag") {
                 ForEach(image.references) { reference in
-                    Button(reference.id, role: .destructive) {
+                    Button(reference.displayReference, role: .destructive) {
                         deletion = Deletion(reference: reference.id, isTag: true)
                     }
                 }

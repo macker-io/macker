@@ -1,6 +1,7 @@
 import ArgumentParser
 import Darwin
 import Foundation
+import MackerTransport
 
 struct Version: ParsableCommand {
     static let configuration = CommandConfiguration(
@@ -293,7 +294,7 @@ struct SystemDf: ParsableCommand {
                 let shared = max(0, image.SharedSize ?? 0)
                 let unique = max(0, image.Size - shared)
                 return [
-                    repo,
+                    ImageReferenceDisplay.shortened(repo),
                     tag,
                     Format.shortID(image.Id),
                     Format.timeAgo(image.Created ?? 0),
@@ -311,7 +312,7 @@ struct SystemDf: ParsableCommand {
             rows: containers.map { container in
                 [
                     Format.shortID(container.Id),
-                    container.Image,
+                    ImageReferenceDisplay.shortened(container.Image),
                     Format.ellipsis(container.Command ?? ""),
                     String(container.Mounts?.count ?? 0),
                     Format.size(0),

@@ -1,4 +1,5 @@
 import Foundation
+import MackerTransport
 
 struct ImageRow: Identifiable {
     struct Reference: Identifiable {
@@ -6,8 +7,11 @@ struct ImageRow: Identifiable {
         let name: String
         let tag: String
 
-        init(_ value: String) {
-            id = value
+        var displayReference: String { ImageReferenceDisplay.shortened(id) }
+
+        init(_ reference: String) {
+            id = reference
+            let value = ImageReferenceDisplay.shortened(reference)
             if let separator = value.lastIndex(of: ":"), !value[separator...].contains("/") {
                 name = String(value[..<separator])
                 tag = String(value[value.index(after: separator)...])
@@ -45,7 +49,7 @@ struct ImageRow: Identifiable {
     var inspectorRow: ResourceRow {
         ResourceRow(id: id, name: name, secondary: "", tertiary: "", details: [
             .init(label: "Image ID", value: id),
-            .init(label: "Tags", value: references.isEmpty ? "None" : references.map(\.id).joined(separator: "\n")),
+            .init(label: "Tags", value: references.isEmpty ? "None" : references.map(\.displayReference).joined(separator: "\n")),
             .init(label: "Size", value: ByteCountFormatter.string(fromByteCount: size, countStyle: .file)),
             .init(label: "Platform", value: platformText),
             .init(label: "Created", value: createdAt?.formatted(date: .abbreviated, time: .shortened) ?? "Unknown"),

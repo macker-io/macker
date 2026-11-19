@@ -2,6 +2,7 @@ import ArgumentParser
 import ContainerEngine
 import Darwin
 import Foundation
+import MackerTransport
 import os
 
 struct ContainerListOptions: ParsableArguments {
@@ -73,7 +74,7 @@ struct Ps: ParsableCommand {
             }
             return [
                 ("ID", options.noTrunc ? container.Id : Format.shortID(container.Id)),
-                ("Image", container.Image),
+                ("Image", ImageReferenceDisplay.shortened(container.Image)),
                 ("Command", options.noTrunc ? container.Command : Format.ellipsis(container.Command, 20)),
                 ("CreatedAt", Format.createdAt(container.Created ?? 0)),
                 ("RunningFor", Format.timeAgo(container.Created ?? 0)),

@@ -1,4 +1,5 @@
 import Foundation
+import MackerTransport
 
 enum ResourceKind: String, CaseIterable, Identifiable {
     case containers, images, networks, volumes
@@ -123,11 +124,12 @@ extension DaemonSnapshot {
                     let host = ip.contains(":") ? "[\(ip)]" : ip
                     return "\(host):\(published) → \(port.PrivatePort)/\(port.Type)"
                 }
+                let image = ImageReferenceDisplay.shortened(container.Image)
                 return ResourceRow(
-                    id: container.Id, name: String(name), secondary: container.Image, tertiary: container.Status,
+                    id: container.Id, name: String(name), secondary: image, tertiary: container.Status,
                     details: [
                         .init(label: "Container ID", value: container.Id),
-                        .init(label: "Image", value: container.Image),
+                        .init(label: "Image", value: image),
                         .init(label: "Status", value: container.Status),
                         .init(label: "Published Ports", value: ports.isEmpty ? "None" : ports.joined(separator: "\n")),
                     ], isRunning: container.State == "running"

@@ -92,6 +92,7 @@ let package = Package(
                 "CliCore",
                 "ContainerEngine",
                 "DockerAPIAdapter",
+                .product(name: "MackerTransport", package: "ClientTransport"),
                 .product(name: "Logging", package: "swift-log"),
             ]
         ),
