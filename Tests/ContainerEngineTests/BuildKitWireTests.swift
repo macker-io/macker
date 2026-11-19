@@ -1,3 +1,4 @@
+import ContainerizationOCI
 import Foundation
 import Testing
 @testable import DockerAPIAdapter
@@ -58,6 +59,30 @@ struct BuildKitWireTests {
         #expect(try BuildKitControl.exporterResponse(response) == ["containerimage.digest": "sha256:aaa", "image.name": "x:1"])
         let edited = try BuildKitControl.rewriteExporterResponse(response, set: ["containerimage.digest": "sha256:bbb"])
         #expect(try BuildKitControl.exporterResponse(edited) == ["containerimage.digest": "sha256:bbb", "image.name": "x:1"])
+    }
+
+    @Test(arguments: [MediaTypes.index, MediaTypes.imageManifest])
+    func localizedResponseUsesTheStoredIndexDescriptor(upstreamMediaType: String) throws {
+        let upstream = Descriptor(mediaType: upstreamMediaType, digest: "sha256:aaa", size: 123)
+        let local = Descriptor(mediaType: MediaTypes.index, digest: "sha256:bbb", size: 456)
+        let response = ProtoWire.encode([
+            ProtoWire.mapEntry("containerimage.digest", upstream.digest, field: 1),
+            ProtoWire.mapEntry("containerimage.descriptor", try JSONEncoder().encode(upstream).base64EncodedString(), field: 1),
+            ProtoWire.mapEntry("containerimage.config.digest", "sha256:config", field: 1),
+            ProtoWire.mapEntry("image.name", "x:1", field: 1),
+            ProtoWire.Field(number: 100, value: .varint(42)),
+        ])
+
+        let localized = try BuildKitControl.localizeExporterResponse(response, upstreamDigest: upstream.digest, local: local)
+        let metadata = try BuildKitControl.exporterResponse(localized)
+        let encodedDescriptor = try #require(metadata["containerimage.descriptor"])
+        let descriptor = try #require(Data(base64Encoded: encodedDescriptor))
+        #expect(try JSONDecoder().decode(Descriptor.self, from: descriptor) == local)
+        #expect(metadata["containerimage.digest"] == local.digest)
+        #expect(metadata["containerimage.config.digest"] == "sha256:config")
+        #expect(metadata["image.name"] == "x:1")
+        #expect(try ProtoWire.decode(localized).last == ProtoWire.Field(number: 100, value: .varint(42)))
+        #expect(try BuildKitControl.localizeExporterResponse(response, upstreamDigest: upstream.digest, local: upstream) == response)
     }
 
     @Test func grpcFramesSplitAcrossReadsAndCarrySessionBytes() throws {

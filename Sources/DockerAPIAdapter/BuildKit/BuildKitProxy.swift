@@ -359,19 +359,11 @@ final class UpstreamStreamRelay: ChannelInboundHandler, @unchecked Sendable {
         let engine = self.engine
         let names = export.names
         context.eventLoop.makeFutureWithTask {
-            try await engine.importBuildKitImage(digest: digest, names: names)
+            let local = try await engine.importBuildKitImage(digest: digest, names: names)
+            return try BuildKitControl.localizeExporterResponse(message.payload, upstreamDigest: digest, local: local)
         }.whenComplete { result in
             switch result {
-            case .success(let localID):
-                var payload = message.payload
-                if localID != digest,
-                    let rewritten = try? BuildKitControl.rewriteExporterResponse(
-                        payload,
-                        set: ["containerimage.digest": localID]
-                    )
-                {
-                    payload = rewritten
-                }
+            case .success(let payload):
                 Self.send(body: GRPCFraming.frame(payload), trailers: trailers, to: peer)
             case .failure(let error):
                 var failed = HPACKHeaders()

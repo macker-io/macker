@@ -398,17 +398,37 @@ case_buildx_local_images() {
   mkdir -p "$ctx"
   printf 'FROM scratch\nCOPY payload /payload\n' >"$ctx/Dockerfile"
   printf 'buildx fixture\n' >"$ctx/payload"
-  x -t 180 d buildx build --builder default --load --platform linux/arm64 -t compat/buildx:single "$ctx"; rc 0
+  # Disable provenance for the single build to exercise manifest-to-index wrapping.
+  x -t 180 d buildx build --builder default --load --platform linux/arm64 --provenance=false --metadata-file "$ctx/single.json" -t compat/buildx:single "$ctx"; rc 0
   x d image inspect compat/buildx:single --format '{{.Os}}/{{.Architecture}}'; rc 0; eq linux/arm64
+  check_buildx_descriptor compat/buildx:single "$ctx/single.json"
   # The default docker driver loads the index without the Docker tar exporter.
-  x -t 180 d buildx build --builder default --platform linux/arm64,linux/amd64 -t compat/buildx:multi "$ctx"; rc 0
+  x -t 180 d buildx build --builder default --platform linux/arm64,linux/amd64 --metadata-file "$ctx/multi.json" -t compat/buildx:multi "$ctx"; rc 0
   x d image inspect compat/buildx:multi --format '{{.Os}}/{{.Architecture}}'; rc 0; eq linux/arm64
+  check_buildx_descriptor compat/buildx:multi "$ctx/multi.json"
   # Docker CLI gates save --platform on API 1.48; Macker exposes the query on 1.44.
   x curl -fsS --unix-socket "$SOCK" -o "$ctx/amd64.tar" 'http://d/v1.44/images/get?names=compat%2Fbuildx%3Amulti&platform=linux%2Famd64'; rc 0
   mkdir -p "$ctx/amd64"
   tar -xf "$ctx/amd64.tar" -C "$ctx/amd64"
   grep -q '"amd64"' "$ctx/amd64/index.json" "$ctx/amd64"/blobs/sha256/* || fail "missing AMD64 manifest"
   x d buildx du --builder default; rc 0
+}
+check_buildx_descriptor() {
+  local image="$1" metadata="$2"
+  x d image inspect "$image" --format '{{.Id}}'; rc 0
+  python3 - "$metadata" "$STORE/content/blobs/sha256" "$(tr -d '\r\n' <"$OUT")" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+metadata, blobs, expected_digest = sys.argv[1:]
+response = json.loads(Path(metadata).read_bytes())
+descriptor = response["containerimage.descriptor"]
+assert descriptor["digest"] == response["containerimage.digest"] == expected_digest, response
+blob = (Path(blobs) / expected_digest.removeprefix("sha256:")).read_bytes()
+assert descriptor["size"] == len(blob), descriptor
+assert descriptor["mediaType"] == json.loads(blob)["mediaType"], descriptor
+PY
 }
 case_buildx_activity() {
   local ctx="$STORE/bx-activity"

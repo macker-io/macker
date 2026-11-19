@@ -99,6 +99,7 @@ let package = Package(
             name: "DockerAPIAdapter",
             dependencies: [
                 "ContainerEngine",
+                .product(name: "ContainerizationOCI", package: "containerization"),
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
                 .product(name: "NIOHTTP2", package: "swift-nio-http2"),

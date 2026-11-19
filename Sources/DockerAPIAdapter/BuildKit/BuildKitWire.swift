@@ -1,3 +1,4 @@
+import ContainerizationOCI
 import Foundation
 
 /// Just enough protobuf and gRPC framing to edit the BuildKit `Control` messages that Docker's
@@ -209,6 +210,15 @@ enum BuildKitControl {
             }
         }
         return result
+    }
+
+    /// The exporter reports a base64-encoded OCI descriptor alongside the image digest.
+    static func localizeExporterResponse(_ payload: Data, upstreamDigest: String, local: Descriptor) throws -> Data {
+        guard local.digest != upstreamDigest else { return payload }
+        return try rewriteExporterResponse(payload, set: [
+            "containerimage.digest": local.digest,
+            "containerimage.descriptor": JSONEncoder().encode(local).base64EncodedString(),
+        ])
     }
 
     /// Replaces map entries in a `SolveResponse`, keeping every other field.

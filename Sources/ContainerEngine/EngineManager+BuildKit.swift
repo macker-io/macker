@@ -26,8 +26,8 @@ extension EngineManager {
     }
 
     /// Copies an image that `buildkitd` exported into its content store (the `image` exporter)
-    /// into the local image store, tags it with `names`, and returns the local image ID.
-    public func importBuildKitImage(digest: String, names: [String]) async throws -> String {
+    /// into the local image store, tags it with `names`, and returns its stored descriptor.
+    public func importBuildKitImage(digest: String, names: [String]) async throws -> Descriptor {
         guard let id = buildKitContainerID(), vms[id] != nil else {
             throw EngineError.runtimeUnavailable("the BuildKit builder is not running")
         }
@@ -115,7 +115,7 @@ extension EngineManager {
                 _ = try await imageStore.tag(existing: image.reference, new: reference)
                 await publishImage(action: "tag", digest: image.digest, name: reference)
             }
-            return image.digest
+            return image.descriptor
         }
     }
 
