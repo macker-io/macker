@@ -163,7 +163,7 @@ struct VolumePrune: ParsableCommand {
         let filters = all ? filter + ["all=true"] : filter
         let result = try DaemonAPI.decode(
             VolumePruneResponse.self,
-            from: DaemonAPI.post(try DaemonAPI.filteredPath("/volumes/prune", filters: filters), timeoutSeconds: 120)
+            from: DaemonAPI.post(try DaemonAPI.filteredPath(DaemonAPI.volumePrunePath, filters: filters), timeoutSeconds: 120)
         )
         if let names = result.volumesDeleted, !names.isEmpty {
             print("Deleted Volumes:")

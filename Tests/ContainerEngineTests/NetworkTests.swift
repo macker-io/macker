@@ -63,6 +63,25 @@ struct NetworkTests {
         }
     }
 
+    @Test func subnetsUseCIDRGatewayAndCannotOverlap() async throws {
+        try await withEngine { engine in
+            let net = try await engine.createNetwork(.init(name: "upper", subnet: "172.18.0.128/25", subnet6: "fd00:10:0:1::/65"))
+            #expect(net.network.gateway == "172.18.0.129")
+            let auto = try await engine.createNetwork(.init(name: "auto", enableIPv6: true))
+            #expect(auto.network.subnet != "172.18.0.0/16")
+            #expect(auto.network.subnet6 != "fd00:10:0:1::/64")
+            for subnet in ["172.18.0.128/25", "172.18.0.0/24", "172.18.0.192/26"] {
+                await #expect(throws: EngineError.self) {
+                    _ = try await engine.createNetwork(.init(name: "overlap", subnet: subnet))
+                }
+            }
+            _ = try await engine.createNetwork(.init(name: "adjacent", subnet: "172.18.0.0/25"))
+            await #expect(throws: EngineError.self) {
+                _ = try await engine.createNetwork(.init(name: "overlap6", subnet6: "fd00:10:0:1::/64"))
+            }
+        }
+    }
+
     @Test func createAllowsIPv6AndRejectsUnsupportedIPAM() async throws {
         try await withEngine { engine in
             let v6 = try await engine.createNetwork(EngineNetworkCreateSpec(name: "v6", enableIPv6: true))

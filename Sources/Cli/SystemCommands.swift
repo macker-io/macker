@@ -472,7 +472,7 @@ struct SystemPrune: ParsableCommand {
     private func pruneVolumes() throws -> Int64 {
         let result = try DaemonAPI.decode(
             VolumePruneResponse.self,
-            from: DaemonAPI.post(try DaemonAPI.filteredPath("/volumes/prune", filters: filter), timeoutSeconds: 120)
+            from: DaemonAPI.post(try DaemonAPI.filteredPath(DaemonAPI.volumePrunePath, filters: filter), timeoutSeconds: 120)
         )
         if let names = result.volumesDeleted, !names.isEmpty {
             print("Deleted Volumes:")

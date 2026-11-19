@@ -711,7 +711,7 @@ extension EngineManager {
         AsyncThrowingStream { $0.finish(throwing: error) }
     }
 
-    public func pruneImages(danglingOnly: Bool, until: Date?, labels: [String] = []) async throws -> EngineImagePruneResult {
+    public func pruneImages(danglingOnly: Bool, until: Date?, labels: [String] = [], excludedLabels: [String] = []) async throws -> EngineImagePruneResult {
         var deleted: [EngineImageDeleteItem] = []
         var reclaimed: Int64 = 0
 
@@ -723,7 +723,13 @@ extension EngineManager {
                 let created = await Self.createdDate(of: primary)
                 if created >= until { continue }
             }
-            if !labels.isEmpty, !FilterMatch.labels(await configLabels(of: primary), specs: labels) { continue }
+            if !labels.isEmpty || !excludedLabels.isEmpty {
+                let platform = await Self.preferredPlatform(for: primary)
+                let actual = try await primary.config(for: platform).config?.labels ?? [:]
+                guard FilterMatch.labels(actual, specs: labels),
+                      !excludedLabels.contains(where: { FilterMatch.labels(actual, specs: [$0]) })
+                else { continue }
+            }
 
             let size = await Self.totalSize(of: primary)
             var leftover = false

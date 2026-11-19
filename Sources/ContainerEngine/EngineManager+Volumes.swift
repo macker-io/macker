@@ -70,9 +70,10 @@ extension EngineManager {
     }
 
     public func deleteVolume(_ name: String, force: Bool) async throws {
+        if force, volumes[name] == nil { return }
         let volume = try resolveVolume(name)
         let refs = volumeRefCount(volume.name)
-        if refs > 0, !force {
+        if refs > 0 {
             throw EngineError.conflict("remove \(volume.name): volume is in use")
         }
         try removeVolumeFiles(volume.name)

@@ -268,6 +268,21 @@ case_images() {
   x d system df; rc 0; out Images
   x d container prune -f; rc 0; x d image prune -f; rc 0; x d system prune -f; rc 0
 }
+case_prune_safety() {
+  x d volume create keep-named; rc 0
+  x d create --name volref -v keep-named:/data -v /scratch $ALPINE true; rc 0
+  x d volume rm -f keep-named; [ "$RC" != 0 ] || fail "removed referenced volume"
+  x d inspect -f '{{range .Mounts}}{{if eq .Destination "/scratch"}}{{.Name}}{{end}}{{end}}' volref; rc 0
+  local anon; anon="$(cat "$OUT")"; [ -n "$anon" ] || fail "missing anonymous volume"
+  x d rm volref; rc 0
+  x "$MACKER" volume prune -f; rc 0
+  x d volume inspect "$anon"; [ "$RC" != 0 ] || fail "anonymous volume survived prune"
+  x d volume inspect keep-named; rc 0
+  x "$MACKER" system prune --volumes -f; rc 0
+  x d volume inspect keep-named; rc 0
+  x "$MACKER" volume prune -af; rc 0
+  x d volume inspect keep-named; [ "$RC" != 0 ] || fail "named volume survived explicit --all"
+}
 case_commit_export() {
   x d run --name ce $ALPINE sh -c 'echo c >/committed'; rc 0
   x d commit ce compat/commit:1; rc 0
@@ -278,7 +293,7 @@ case_commit_export() {
 suite_cli() {
   for c in version_info api_version_policy pull_images run_stdout run_exit_code run_stdin run_config run_tty \
            detached_lifecycle exec logs attach_foreground_signal cp volumes_and_binds networks \
-           run_static_ipv6 env_stop_health_roundtrip unsupported_options_fail_loudly wait_and_events images commit_export; do
+           run_static_ipv6 env_stop_health_roundtrip unsupported_options_fail_loudly wait_and_events images commit_export prune_safety; do
     run_case "$c"
   done
 }

@@ -155,7 +155,13 @@ public struct Router: Sendable {
     /// `{"label":{"a=b":true}}`; older clients (and `macker`) send `{"label":["a=b"]}`.
     /// Both decode to `key -> values` (map-form values are the inner keys, sorted).
     static func parseFilters(_ raw: String?) -> [String: [String]] {
-        guard let raw, !raw.isEmpty, let data = raw.data(using: .utf8) else { return [:] }
+        (try? decodeFilters(raw)) ?? [:]
+    }
+
+    /// Destructive operations must not interpret malformed filters as an unfiltered request.
+    static func decodeFilters(_ raw: String?) throws -> [String: [String]] {
+        guard let raw else { return [:] }
+        let data = Data(raw.utf8)
         let decoder = JSONDecoder()
         if let lists = try? decoder.decode([String: [String]].self, from: data) {
             return lists
@@ -163,7 +169,7 @@ public struct Router: Sendable {
         if let maps = try? decoder.decode([String: [String: Bool]].self, from: data) {
             return maps.mapValues { $0.keys.sorted() }
         }
-        return [:]
+        throw EngineError.invalidArgument("invalid filters JSON")
     }
 
     /// Docker `--link name:alias` contributes the alias (or the whole value if there is no `:`).

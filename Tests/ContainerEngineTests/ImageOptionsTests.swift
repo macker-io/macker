@@ -41,6 +41,52 @@ struct ImageOptionsTests {
         }
     }
 
+    @Test func imageMetadataInheritedUnlessOverridden() async throws {
+        try await withEngine { engine in
+            try await TemporaryDirectory.with("macker-inherit") { work in
+                _ = try await collectDigest(await engine.importImage(
+                    spec: .init(source: "-", repo: "defaults", tag: "v1",
+                                changes: ["LABEL source=image", "LABEL mode=old", "VOLUME /data", "VOLUME /cache"]),
+                    archive: try pack(hello: "a", in: work)
+                ))
+                let id = try await engine.createContainer(.init(
+                    image: "defaults:v1", labels: ["mode": "new"],
+                    volumeRequests: [.init(type: "volume", source: "named", destination: "/data")]
+                )).id
+                let record = try await engine.inspectContainer(id).container
+                #expect(record.labels == ["source": "image", "mode": "new"])
+                #expect(record.mounts.count == 2)
+                #expect(record.mounts.first { $0.destination == "/data" }?.name == "named")
+                #expect(record.mounts.first { $0.destination == "/cache" }?.anonymous == true)
+                try await engine.deleteContainer(id, force: false, removeAnonymousVolumes: true)
+                #expect(await engine.listVolumes().map(\.volume.name) == ["named"])
+            }
+        }
+    }
+
+    @Test func prunePreservesExcludedImagesAndRejectsInvalidFilters() async throws {
+        try await withRouter { router, engine in
+            try await TemporaryDirectory.with("macker-prune-label") { work in
+                for (name, labels) in [("keep", ["group=test", "keep=yes"]), ("drop", ["group=test"]), ("other", ["group=other"])] {
+                    _ = try await collectDigest(await engine.importImage(
+                        spec: .init(source: "-", repo: name, tag: "v1", changes: labels.map { "LABEL " + $0 }),
+                        archive: try pack(hello: name, in: work, file: name)
+                    ))
+                }
+                for invalid in ["invalid json", #"{"dangling":["false"],"typo":["keep"]}"#, #"{"until":["not a date"]}"#] {
+                    let response = await router.handle(try RouterTestSupport.request("POST", "/images/prune", query: ["filters": invalid]))
+                    #expect(response.status == 400)
+                }
+                let filters = #"{"dangling":{"false":true},"label":{"group=test":true},"label!":{"keep=yes":true}}"#
+                let response = await router.handle(try RouterTestSupport.request("POST", "/images/prune", query: ["filters": filters]))
+                #expect(response.status == 200)
+                _ = try await engine.inspectImage(name: "keep:v1")
+                _ = try await engine.inspectImage(name: "other:v1")
+                await #expect(throws: EngineError.self) { _ = try await engine.inspectImage(name: "drop:v1") }
+            }
+        }
+    }
+
     @Test func listImagesBeforeUnknownImageThrows() async throws {
         try await withEngine { engine in
             await #expect(throws: EngineError.self) {

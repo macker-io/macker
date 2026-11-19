@@ -13,6 +13,8 @@ enum Invocation {
 /// Thin Docker Engine API client over the Macker UNIX socket.
 enum DaemonAPI {
     static let apiVersion = "1.41"
+    // Before 1.42, pruning without an "all" filter also deletes named volumes.
+    static let volumePrunePath = "/v1.42/volumes/prune"
     static let clientVersion = ProductVersion.current
     static func socket() throws -> String {
         try DockerGlobalFlags.socketPath()

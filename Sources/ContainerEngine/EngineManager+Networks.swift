@@ -87,6 +87,7 @@ extension EngineManager {
 
         let subnet = try spec.subnet.map { try Self.normalizedSubnet($0) } ?? nextSubnet()
         let cidr = try CIDRv4(subnet)
+        guard !overlaps(cidr) else { throw EngineError.invalidArgument("subnet \(cidr) overlaps an existing network") }
         let gateway = try Self.resolvedGateway(spec.gateway, subnet: cidr)
         let enableIPv6 = spec.enableIPv6 || spec.subnet6 != nil || spec.gateway6 != nil
         let subnet6: String
@@ -94,6 +95,7 @@ extension EngineManager {
         if enableIPv6 {
             let resolved6 = try spec.subnet6.map { try Self.normalizedSubnet6($0) } ?? nextSubnet6()
             let cidr6 = try CIDRv6(resolved6)
+            guard !overlaps(cidr6) else { throw EngineError.invalidArgument("subnet \(cidr6) overlaps an existing network") }
             subnet6 = resolved6
             gateway6 = try Self.resolvedGateway6(spec.gateway6, subnet: cidr6)
         } else {
@@ -905,7 +907,7 @@ extension EngineManager {
         for index in 1...65_535 {
             let hex = String(index, radix: 16)
             let candidate = "fd00:10:0:\(hex)::/64"
-            if networks.values.contains(where: { $0.subnet6 == candidate }) {
+            if try overlaps(CIDRv6(candidate)) {
                 continue
             }
             return candidate
@@ -927,6 +929,7 @@ extension EngineManager {
             }
             return ip.description
         }
+        guard subnet.lower != subnet.upper else { throw EngineError.invalidArgument("no usable IPv6 gateway in subnet") }
         return IPv6Address(subnet.lower.value &+ 1).description
     }
 
@@ -965,10 +968,24 @@ extension EngineManager {
         }.count
     }
 
+    private func overlaps(_ candidate: CIDRv4) -> Bool {
+        networks.values.contains { network in
+            guard let existing = try? CIDRv4(network.subnet) else { return false }
+            return existing.contains(candidate.lower) || candidate.contains(existing.lower)
+        }
+    }
+
+    private func overlaps(_ candidate: CIDRv6) -> Bool {
+        networks.values.contains { network in
+            guard let existing = try? CIDRv6(network.subnet6) else { return false }
+            return existing.contains(candidate.lower) || candidate.contains(existing.lower)
+        }
+    }
+
     private func nextSubnet() throws -> String {
         for octet in 17...31 {
             let candidate = "172.\(octet).0.0/16"
-            if networks.values.contains(where: { $0.subnet == candidate }) {
+            if try overlaps(CIDRv4(candidate)) {
                 continue
             }
             return candidate
@@ -1001,13 +1018,6 @@ extension EngineManager {
         return parts.count == 2 ? Int(parts[1]) ?? 16 : 16
     }
 
-    private static func gateway(for subnet: String) -> String {
-        let ip = subnet.split(separator: "/").first.map(String.init) ?? subnet
-        let parts = ip.split(separator: ".").map(String.init)
-        guard parts.count == 4 else { return "172.17.0.1" }
-        return "\(parts[0]).\(parts[1]).\(parts[2]).1"
-    }
-
     private static func normalizedSubnet(_ raw: String) throws -> String {
         do {
             return try CIDRv4(raw).description
@@ -1030,11 +1040,10 @@ extension EngineManager {
     }
 
     private static func resolvedGateway(_ raw: String?, subnet: CIDRv4) throws -> String {
-        guard let raw, !raw.isEmpty else {
-            return gateway(for: subnet.description)
-        }
+        guard subnet.prefix.length <= 30 else { throw EngineError.invalidArgument("no usable gateway in subnet \(subnet)") }
+        guard let raw, !raw.isEmpty else { return subnet.gateway.description }
         let ip = try parseAddress(raw, what: "gateway")
-        guard subnet.contains(ip) else {
+        guard subnet.contains(ip), ip != subnet.lower, ip != subnet.upper else {
             throw EngineError.invalidArgument("gateway \(raw) is not in subnet \(subnet)")
         }
         return ip.description
@@ -1081,7 +1090,7 @@ extension EngineManager {
             created: Date(),
             labels: [:],
             subnet: subnet,
-            gateway: subnet.isEmpty ? "" : gateway(for: subnet),
+            gateway: subnet.isEmpty ? "" : try resolvedGateway(nil, subnet: CIDRv4(subnet)),
             internalNetwork: false,
             builtin: true
         )

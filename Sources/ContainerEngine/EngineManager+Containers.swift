@@ -121,7 +121,15 @@ extension EngineManager {
         let now = Date()
         let tmpfsRoot = Self.runtimeURL(id: id, root: containerRoot).appendingPathComponent("tmpfs", isDirectory: true)
         let fromVolumes = try volumesFrom(spec.volumesFrom)
-        let mounts = try await resolveMounts(spec.volumeRequests + fromVolumes, tmpfsRoot: tmpfsRoot)
+        var requests = spec.volumeRequests + fromVolumes
+        // System builders supply their own block-backed state, not image-declared shares.
+        if !spec.system {
+            let occupied = Set(requests.map(\.destination))
+            for path in image.volumes where !occupied.contains(path) {
+                requests.append(EngineVolumeRequest(type: "volume", source: "", destination: path, anonymous: true))
+            }
+        }
+        let mounts = try await resolveMounts(requests, tmpfsRoot: tmpfsRoot)
         let attached = try attachCreateEndpoints(spec)
         let exposedPorts = EnginePortBinding.merging(image.exposedPorts, spec.exposedPorts)
         var portBindings = attached.mode == "host" || attached.mode == "none" ? [] : spec.portBindings
@@ -148,7 +156,7 @@ extension EngineManager {
             workingDir: spec.workingDir.isEmpty ? image.workingDir : spec.workingDir,
             user: spec.user.isEmpty ? image.user : spec.user,
             hostname: spec.hostname.isEmpty ? String(id.prefix(12)) : spec.hostname,
-            labels: spec.labels,
+            labels: image.labels.merging(spec.labels) { _, override in override },
             state: "created",
             created: now,
             startedAt: nil,
