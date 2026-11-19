@@ -6,7 +6,7 @@
 # PASS/FAIL and the run continues after failures; exit status is the number of failures.
 #
 #   scripts/compat/run.sh                 # all suites
-#   scripts/compat/run.sh cli             # suites: cli cli2 compose compose2 build setup
+#   scripts/compat/run.sh cli             # suites: cli cli2 compose compose2 build buildx setup
 #   ONLY=run_exit_code scripts/compat/run.sh cli   # one case (substring match)
 #   COMPAT_STORE=/tmp/x CLEAN=1 ...       # fresh store (re-pulls images)
 #
@@ -385,6 +385,61 @@ case_build_compose() {
   x c down --rmi local; rc 0
 }
 suite_build() { for c in build_classic build_default_client build_compose build_compose_default; do run_case "$c"; done; }
+
+# ---- suite: buildx ----------------------------------------------------------
+case_buildx_bootstrap() {
+  x -t 150 d buildx inspect default --bootstrap --timeout 120s; rc 0
+  out "BuildKit version:"
+  grep -qE '^Driver:[[:space:]]+docker$' "$OUT" || fail "expected the default docker driver"
+  grep -qE '^Status:[[:space:]]+running$' "$OUT" || fail "builder did not become ready"
+}
+case_buildx_local_images() {
+  local ctx="$STORE/bx"
+  mkdir -p "$ctx"
+  printf 'FROM scratch\nCOPY payload /payload\n' >"$ctx/Dockerfile"
+  printf 'buildx fixture\n' >"$ctx/payload"
+  x -t 180 d buildx build --builder default --load --platform linux/arm64 -t compat/buildx:single "$ctx"; rc 0
+  x d image inspect compat/buildx:single --format '{{.Os}}/{{.Architecture}}'; rc 0; eq linux/arm64
+  # The default docker driver loads the index without the Docker tar exporter.
+  x -t 180 d buildx build --builder default --platform linux/arm64,linux/amd64 -t compat/buildx:multi "$ctx"; rc 0
+  x d image inspect compat/buildx:multi --format '{{.Os}}/{{.Architecture}}'; rc 0; eq linux/arm64
+  # Docker CLI gates save --platform on API 1.48; Macker exposes the query on 1.44.
+  x curl -fsS --unix-socket "$SOCK" -o "$ctx/amd64.tar" 'http://d/v1.44/images/get?names=compat%2Fbuildx%3Amulti&platform=linux%2Famd64'; rc 0
+  mkdir -p "$ctx/amd64"
+  tar -xf "$ctx/amd64.tar" -C "$ctx/amd64"
+  grep -q '"amd64"' "$ctx/amd64/index.json" "$ctx/amd64"/blobs/sha256/* || fail "missing AMD64 manifest"
+  x d buildx du --builder default; rc 0
+}
+case_buildx_activity() {
+  local ctx="$STORE/bx-activity"
+  mkdir -p "$ctx"
+  printf 'FROM alpine:3.24\nRUN sleep 5\n' >"$ctx/Dockerfile"
+  timeout -s KILL 180 docker buildx build --builder default --no-cache -t compat/buildx:activity "$ctx" >"$OUT" 2>"$ERR" &
+  local build_pid=$! seen=0
+  trap 'kill "$build_pid" 2>/dev/null || true; wait "$build_pid" 2>/dev/null || true' EXIT
+  while kill -0 "$build_pid" 2>/dev/null; do
+    if curl -fsS --max-time 3 --unix-socket "$SOCK" http://d/macker/status | grep -Eq '"activeBuilds"[[:space:]]*:[[:space:]]*1'; then
+      seen=1
+      break
+    fi
+    sleep 0.2
+  done
+  wait "$build_pid" && RC=0 || RC=$?
+  trap - EXIT
+  rc 0
+  [ "$seen" = 1 ] || fail "BuildKit solve was not reported as active"
+  for _ in $(seq 1 20); do
+    if curl -fsS --max-time 3 --unix-socket "$SOCK" http://d/macker/status | grep -Eq '"activeBuilds"[[:space:]]*:[[:space:]]*0'; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "BuildKit activity did not clear after the solve"
+}
+suite_buildx() {
+  docker buildx version >/dev/null || { echo "missing Docker Buildx plugin" >&2; FAIL=$((FAIL+1)); return; }
+  for c in buildx_bootstrap buildx_local_images buildx_activity; do run_case "$c"; done
+}
 
 # ---- suite: cli2 (breadth) --------------------------------------------------
 case_error_codes() {

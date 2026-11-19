@@ -237,6 +237,7 @@ extension EngineManager {
     }
 
     func teardownVM(_ id: String) async {
+        if buildKitReadyID == id { buildKitReadyID = nil }
         await drainOutput(id)
         waitTasks[id]?.cancel()
         waitTasks[id] = nil

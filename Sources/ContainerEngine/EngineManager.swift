@@ -50,6 +50,7 @@ public actor EngineManager {
     var startTasks: [String: (token: UUID, task: Task<Bool, Error>)] = [:]
     /// In-flight boot of the hidden BuildKit builder.
     var buildKitBoot: Task<String, Error>?
+    var buildKitReadyID: String?
     var healthTasks: [String: Task<Void, Never>] = [:]
     var guestNics: [String: [GuestNic]] = [:]
     let restartAfterDaemon: [String]

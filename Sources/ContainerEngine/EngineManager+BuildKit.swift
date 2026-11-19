@@ -39,34 +39,44 @@ extension EngineManager {
             let rootJSON = try Data(contentsOf: root)
             let rootMediaType = Self.mediaType(of: rootJSON)
             var files: [URL] = [root]
-            // index → manifests → (config, layers); configs and layers are leaves.
-            let manifests: [Data]
-            if Self.isIndex(rootMediaType) {
-                var loaded: [Data] = []
-                for child in try Self.childDigests(of: rootJSON) {
-                    let file = try await copyBuildKitBlob(id, contentRoot: contentRoot, digest: child, into: blobs)
-                    files.append(file)
-                    loaded.append(try Data(contentsOf: file))
-                }
-                manifests = loaded
-            } else if Self.isManifest(rootMediaType) {
-                manifests = [rootJSON]
-            } else {
-                throw EngineError.exportFailed("BuildKit exported an unknown object (\(rootMediaType)) for \(digest)")
-            }
+            var repairedIndex: Index?
             var platform: Platform?
-            for manifest in manifests {
-                let children = try Self.childDigests(of: manifest)
-                for (index, child) in children.enumerated() {
-                    let file = try await copyBuildKitBlob(id, contentRoot: contentRoot, digest: child, into: blobs)
-                    files.append(file)
-                    if index == 0, platform == nil,
-                        let config = try? JSONDecoder().decode(ImageConfigPlatform.self, from: Data(contentsOf: file)),
-                        let architecture = config.architecture, let os = config.os
-                    {
-                        platform = Platform(arch: architecture, os: os, variant: config.variant)
+            if Self.isIndex(rootMediaType) {
+                let index = try JSONDecoder().decode(Index.self, from: rootJSON)
+                var retained: [Descriptor] = []
+                for child in index.manifests {
+                    do {
+                        let file = try await copyBuildKitBlob(id, contentRoot: contentRoot, digest: child.digest, into: blobs)
+                        let json = try Data(contentsOf: file)
+                        let payload = try await copyBuildKitManifest(id, contentRoot: contentRoot, json: json, into: blobs)
+                        files += [file] + payload
+                        retained.append(child)
+                    } catch is MissingBuildKitBlob where Self.isBuildKitAttestation(child) {
+                        // Optional provenance/SBOM content can disappear from the builder's
+                        // store. Do not register a descriptor dangling from the local index.
+                        continue
                     }
                 }
+                if retained.count != index.manifests.count {
+                    var filtered = index
+                    filtered.manifests = retained
+                    guard !retained.isEmpty else {
+                        throw EngineError.exportFailed("BuildKit exported no complete manifests")
+                    }
+                    repairedIndex = filtered
+                    files.removeFirst()
+                }
+            } else if Self.isManifest(rootMediaType) {
+                let payload = try await copyBuildKitManifest(id, contentRoot: contentRoot, json: rootJSON, into: blobs)
+                files += payload
+                if let configFile = payload.first,
+                    let config = try? JSONDecoder().decode(ImageConfigPlatform.self, from: Data(contentsOf: configFile)),
+                    let architecture = config.architecture, let os = config.os
+                {
+                    platform = Platform(arch: architecture, os: os, variant: config.variant)
+                }
+            } else {
+                throw EngineError.exportFailed("BuildKit exported an unknown object (\(rootMediaType)) for \(digest)")
             }
 
             let contentStore = try LocalContentStore(path: imageStore.path.appendingPathComponent("content"))
@@ -74,12 +84,18 @@ extension EngineManager {
             let box = DescriptorBox()
             let rootSize = Int64(rootJSON.count)
             let wrapPlatform = platform
+            let filteredIndex = repairedIndex
             try await contentStore.ingest { dir in
                 let writer = try ContentWriter(for: dir)
                 for file in sources {
                     _ = try writer.create(from: file)
                 }
                 let rootDescriptor = Descriptor(mediaType: rootMediaType, digest: digest, size: rootSize)
+                if let filteredIndex {
+                    let result = try writer.create(from: filteredIndex)
+                    box.set(Descriptor(mediaType: rootMediaType, digest: result.digest.digestString, size: result.size))
+                    return
+                }
                 if Self.isIndex(rootMediaType) {
                     box.set(rootDescriptor)
                     return
@@ -111,11 +127,12 @@ extension EngineManager {
 
     /// Boots (or reuses) the builder. Concurrent callers share one boot.
     private func ensureBuildKit() async throws -> String {
-        if let id = buildKitContainerID(), containers[id]?.state == "running", vms[id] != nil {
-            return id
-        }
+        // A running VM does not mean buildkitd is ready; all callers join the probe.
         if let pending = buildKitBoot {
             return try await pending.value
+        }
+        if let id = buildKitContainerID(), buildKitReadyID == id, containers[id]?.state == "running", vms[id] != nil {
+            return id
         }
         let task = Task { try await self.bootBuildKit() }
         buildKitBoot = task
@@ -134,6 +151,7 @@ extension EngineManager {
             _ = try await startContainer(id)
         }
         try await waitForBuildKit(id)
+        buildKitReadyID = id
         return id
     }
 
@@ -212,25 +230,54 @@ extension EngineManager {
         return path
     }
 
+    static func isBuildKitAttestation(_ descriptor: Descriptor) -> Bool {
+        descriptor.annotations?["vnd.docker.reference.type"] == "attestation-manifest"
+            || descriptor.artifactType == "application/vnd.docker.attestation.manifest.v1+json"
+    }
+
+    private func copyBuildKitManifest(_ id: String, contentRoot: String, json: Data, into dir: URL) async throws -> [URL] {
+        guard Self.isManifest(Self.mediaType(of: json)) else {
+            throw EngineError.exportFailed("expected a BuildKit image manifest")
+        }
+        var files: [URL] = []
+        for digest in try Self.childDigests(of: json) {
+            files.append(try await copyBuildKitBlob(id, contentRoot: contentRoot, digest: digest, into: dir))
+        }
+        return files
+    }
+
+    private struct MissingBuildKitBlob: LocalizedError {
+        let digest: String
+        var errorDescription: String? { "BuildKit blob \(digest) was not available" }
+    }
+
     private func copyBuildKitBlob(_ id: String, contentRoot: String, digest: String, into dir: URL) async throws -> URL {
-        let parts = digest.split(separator: ":", maxSplits: 1).map(String.init)
-        guard parts.count == 2, parts[1].allSatisfy(\.isHexDigit) else {
+        let parts = digest.split(separator: ":", maxSplits: 1)
+        guard parts.count == 2, parts[0] == "sha256", parts[1].utf8.count == 64,
+            parts[1].utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) })
+        else {
             throw EngineError.invalidArgument("invalid digest \(digest)")
         }
-        let destination = dir.appendingPathComponent(parts[1])
+        let destination = dir.appendingPathComponent(String(parts[1]))
         if FileManager.default.fileExists(atPath: destination.path) {
             return destination
         }
         // The state disk is mounted in the container's mount namespace only, so read the
         // blob through the container rather than the VM-level copy channel.
-        let fd = try await execSocket(id, command: ["cat", "\(contentRoot)/blobs/\(parts[0])/\(parts[1])"])
-        try await Self.drain(fd: fd, to: destination)
-        let actual = try TarArchive.sha256(of: destination)
-        guard parts[0] != "sha256" || actual == digest || "sha256:" + actual == digest else {
-            try? FileManager.default.removeItem(at: destination)
-            throw EngineError.exportFailed("BuildKit blob \(digest) is missing or corrupt")
+        var actual = ""
+        for attempt in 0..<3 {
+            try Task.checkCancellation()
+            let fd = try await execSocket(id, command: ["cat", "\(contentRoot)/blobs/sha256/\(parts[1])"])
+            try await Self.drain(fd: fd, to: destination)
+            actual = try TarArchive.sha256(of: destination)
+            if actual == digest || "sha256:" + actual == digest { return destination }
+            try FileManager.default.removeItem(at: destination)
+            if attempt < 2 { try await Task.sleep(for: .milliseconds(100 * (attempt + 1))) }
         }
-        return destination
+        if actual == "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" {
+            throw MissingBuildKitBlob(digest: digest)
+        }
+        throw EngineError.exportFailed("BuildKit blob \(digest) is corrupt (received \(actual))")
     }
 
     /// Reads `fd` to EOF into `file`, then closes `fd`.
@@ -253,7 +300,12 @@ extension EngineManager {
                         continuation.resume(throwing: EngineError.exportFailed("read failed: \(String(cString: strerror(errno)))"))
                         return
                     }
-                    out.write(Data(buffer[0..<n]))
+                    do {
+                        try out.write(contentsOf: Data(buffer[0..<n]))
+                    } catch {
+                        continuation.resume(throwing: error)
+                        return
+                    }
                 }
                 continuation.resume()
             }

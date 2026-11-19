@@ -29,6 +29,9 @@ docker build ──buildx "docker" driver──► mackerd  POST /grpc     (h2c)
 
 ## Limits
 
-- Platform: the builder runs `linux/arm64` only. `--platform linux/amd64` builds fail (no x86_64 emulation).
+- The default worker advertises `linux/arm64`. Some BuildKit images can emulate AMD64 during a build; this does not imply Macker can run the resulting AMD64 container. A multi-platform index can be imported with the default `docker` driver and `-t`, or exported with `-o type=oci`. Explicit multi-platform `--load` is rejected by Buildx's Docker exporter on this API version; omit it to use the default import path.
+- Local import keeps available provenance/SBOM manifests. If BuildKit reports an attestation but its blob is no longer available, Macker omits that attestation and reports the resulting local index digest. Missing image layers or configs still fail the build.
+- A fresh store may need to download the builder image and boot a MicroVM, which can exceed Buildx's default 20-second inspection timeout. Use `docker buildx inspect default --bootstrap --timeout 120s` on first use. Concurrent requests share the same readiness probe.
+- Run `COMPAT_STORE="$(mktemp -d /tmp/macker-bx.XXXXXX)" scripts/compat/run.sh buildx` for the official-client smoke suite after signing the daemon (`make app`) and staging runtime assets (`make fetch-runtime`). The **Buildx Smoke** workflow can run this suite on a trusted Apple Silicon runner labeled `macker-vm`.
 - `FROM` resolves through the registry, not Macker's local store: an image that only exists locally (built with the classic builder, or loaded) cannot be used as a base by a BuildKit build. Push it, or build the base with BuildKit too.
 - Builders created with `docker buildx create --driver docker-container` start, but their state volume is a virtiofs share, on which BuildKit's overlayfs snapshots mount read-only, so builds fail with `read-only file system`. Use the default builder.

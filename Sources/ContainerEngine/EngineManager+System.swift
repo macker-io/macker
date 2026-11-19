@@ -7,6 +7,14 @@ extension EngineManager {
         (containers.values.count { !$0.isSystem && $0.state == "running" }, activeBuildCount)
     }
 
+    public func beginBuildKitSolve() {
+        activeBuildCount += 1
+    }
+
+    public func endBuildKitSolve() {
+        activeBuildCount -= 1
+    }
+
     /// Docker `GET /info` — host and daemon facts.
     public func systemInfo() async -> EngineSystemInfo {
         let containers = self.containers.values.filter { !$0.isSystem }

@@ -184,6 +184,17 @@ final class ClientStreamRelay: ChannelInboundHandler, @unchecked Sendable {
         case .headers(let headers):
             if call.path.isEmpty {
                 call.path = headers.headers.first(name: ":path") ?? ""
+                if call.isSolve {
+                    let engine = self.engine
+                    context.eventLoop.makeFutureWithTask {
+                        await engine.beginBuildKitSolve()
+                    }.whenSuccess {
+                        // The client stream outlives Solve until the local import completes.
+                        context.channel.closeFuture.whenComplete { _ in
+                            Task { await engine.endBuildKitSolve() }
+                        }
+                    }
+                }
             }
             forward(payload, to: peer, context: context)
         case .data(let frame):
