@@ -24,3 +24,5 @@ jobs:
         run: swift --version
       - name: Test
         run: make test
+      - name: Isolated CLI installer regression
+        run: scripts/test-install-prefix.sh

@@ -23,7 +23,7 @@ usage() {
 usage: install.sh [VERSION] [--uninstall] [--no-service]
 
   VERSION     release without the leading v (default: newest GitHub release)
-  --uninstall remove $PREFIX, PATH shims, and the LaunchAgent
+  --uninstall remove Macker package files, PATH entry, and the LaunchAgent
   --no-service  do not install or start the LaunchAgent
 EOF
 }
@@ -92,20 +92,51 @@ remove_profile_line() {
   [ -f "$file" ] || return 0
   grep -F "macker — CLI prefix" "$file" >/dev/null 2>&1 || return 0
   tmp="$(mktemp)"
-  awk '
-    /# macker — CLI prefix/ { skip=1; next }
-    skip && /^export PATH=.*\.macker\/bin/ { skip=0; next }
-    { skip=0; print }
+  awk -v line="export PATH=\"${PREFIX_ABS}/bin:\$PATH\"" '
+    pending {
+      if ($0 == line) { pending=0; next }
+      print "# macker — CLI prefix"
+      pending=0
+    }
+    $0 == "# macker — CLI prefix" { pending=1; next }
+    { print }
+    END { if (pending) print "# macker — CLI prefix" }
   ' "$file" >"$tmp"
   mv "$tmp" "$file"
 }
 
+# Only the two wrappers and private Macker directories belong to the CLI package.
+check_prefix() {
+  for path in bin libexec share bin/macker bin/mackerd libexec/macker share/macker; do
+    if [ -L "$PREFIX/$path" ]; then
+      echo "refusing linked install target: $PREFIX/$path" >&2; return 1
+    fi
+  done
+  if [ -f "$PREFIX/share/macker/.cli-install" ] ||
+     { [ -x "$PREFIX/libexec/macker/mackerd" ] &&
+       [ -f "$PREFIX/share/macker/launchd/io.macker.daemon.plist.in" ] &&
+       [ -f "$PREFIX/share/macker/runtime/RuntimePin.json" ]; }; then
+    return 0 # Marked install, or the legacy packaged layout.
+  fi
+  for path in bin/macker bin/mackerd libexec/macker share/macker; do
+    if [ -e "$PREFIX/$path" ]; then
+      echo "refusing to replace unowned install target: $PREFIX/$path" >&2; return 1
+    fi
+  done
+  [ "$UNINSTALL" != "1" ] || { echo "no Macker installation in $PREFIX" >&2; return 1; }
+}
+
 uninstall() {
-  stop_service
-  rm -rf "$PREFIX"
+  check_prefix
+  PREFIX_ABS="$(CDPATH= cd -- "$PREFIX" && pwd)"
+  if [ -f "$PLIST" ] && [ "$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$PLIST" 2>/dev/null || true)" = "$PREFIX_ABS/libexec/macker/mackerd" ]; then
+    stop_service
+  fi
+  rm -f "$PREFIX/bin/macker" "$PREFIX/bin/mackerd"
+  rm -rf "$PREFIX/libexec/macker" "$PREFIX/share/macker"
   remove_profile_line "$HOME/.zshrc"
   remove_profile_line "$HOME/.bashrc"
-  echo "removed $PREFIX"
+  echo "removed Macker package files from $PREFIX"
 }
 
 if [ "$UNINSTALL" = "1" ]; then
@@ -160,11 +191,21 @@ curl -fsSL "${BASE}/SHA256SUMS" -o "${WORKDIR}/SHA256SUMS"
   awk -v name="$TARBALL" '$2 == name { print }' SHA256SUMS | shasum -a 256 -c -
 )
 
-mkdir -p "$PREFIX"
-rm -rf "$PREFIX/bin" "$PREFIX/libexec" "$PREFIX/share"
-tar -C "$PREFIX" -xzf "${WORKDIR}/${TARBALL}"
-# Downloads from a browser/curl pick up quarantine; drop it on our prefix.
-xattr -dr com.apple.quarantine "$PREFIX" 2>/dev/null || true
+check_prefix
+stage="$WORKDIR/prefix"
+mkdir "$stage"
+tar -C "$stage" -xzf "${WORKDIR}/${TARBALL}"
+for path in bin/macker bin/mackerd libexec/macker/mackerd libexec/macker/macker share/macker/runtime/RuntimePin.json; do
+  [ -f "$stage/$path" ] || { echo "incomplete CLI package: $path" >&2; exit 1; }
+done
+mv "$stage/LICENSE" "$stage/share/macker/LICENSE"
+touch "$stage/share/macker/.cli-install"
+xattr -dr com.apple.quarantine "$stage" 2>/dev/null || true
+mkdir -p "$PREFIX/bin" "$PREFIX/libexec" "$PREFIX/share"
+rm -rf "$PREFIX/libexec/macker" "$PREFIX/share/macker"
+for path in libexec/macker share/macker bin/macker bin/mackerd; do
+  mv -f "$stage/$path" "$PREFIX/$path"
+done
 chmod 755 "$PREFIX/bin/macker" "$PREFIX/bin/mackerd"
 chmod 755 "$PREFIX/libexec/macker/macker" "$PREFIX/libexec/macker/mackerd"
 if [ -x "$PREFIX/libexec/macker/macker-helper" ]; then
@@ -243,5 +284,6 @@ echo "next:"
 echo "  ${PREFIX_ABS}/bin/macker doctor"
 echo "  ${PREFIX_ABS}/bin/macker run --rm alpine echo hello"
 echo "optional: sudo ${PREFIX_ABS}/bin/macker helper install"
+echo "Compose project: macker compose up -d --build (no Docker CLI needed)"
 echo "official docker CLI: run 'macker setup', then 'docker --context macker ...' (your active context is not changed)"
 echo "uninstall: curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/install.sh | bash -s -- --uninstall"
