@@ -129,7 +129,6 @@ extension EngineManager {
                 requests.append(EngineVolumeRequest(type: "volume", source: "", destination: path, anonymous: true))
             }
         }
-        let mounts = try await resolveMounts(requests, tmpfsRoot: tmpfsRoot)
         let attached = try attachCreateEndpoints(spec)
         let exposedPorts = EnginePortBinding.merging(image.exposedPorts, spec.exposedPorts)
         var portBindings = attached.mode == "host" || attached.mode == "none" ? [] : spec.portBindings
@@ -146,7 +145,7 @@ extension EngineManager {
         for extra in spec.extraHosts {
             _ = try EngineExtraHost.parse(extra)
         }
-        let record = EngineContainer(
+        var record = EngineContainer(
             id: id,
             name: name,
             image: spec.image,
@@ -169,7 +168,7 @@ extension EngineManager {
             tty: spec.tty,
             openStdin: spec.openStdin,
             stdinOnce: spec.stdinOnce,
-            mounts: mounts,
+            mounts: [],
             endpoints: attached.endpoints,
             portBindings: portBindings,
             exposedPorts: exposedPorts,
@@ -198,7 +197,20 @@ extension EngineManager {
                 system: spec.system ? true : nil
             )
         )
-        try persistContainer(record)
+        var createdAnonymous: [String] = []
+        do {
+            record.mounts = try await resolveMounts(requests, tmpfsRoot: tmpfsRoot, createdAnonymous: &createdAnonymous)
+            // A network may have been removed while volume creation published its events.
+            for endpoint in attached.endpoints { _ = try resolveNetwork(endpoint.networkID) }
+            try persistContainer(record)
+        } catch {
+            // A reused anonymous volume is not ours to roll back. deleteVolume also
+            // protects a newly-created volume if another container already references it.
+            for name in createdAnonymous where volumes[name]?.anonymous == true {
+                try? await deleteVolume(name, force: false)
+            }
+            throw error
+        }
         containers[id] = record
         await publish(containerEvent("create", record))
         var warnings = attached.warnings

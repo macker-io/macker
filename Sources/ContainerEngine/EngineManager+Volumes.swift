@@ -105,13 +105,14 @@ extension EngineManager {
         return (deleted, reclaimed)
     }
 
-    func resolveMounts(_ requests: [EngineVolumeRequest], tmpfsRoot: URL? = nil) async throws -> [EngineMount] {
+    func resolveMounts(
+        _ requests: [EngineVolumeRequest], tmpfsRoot: URL, createdAnonymous: inout [String]
+    ) async throws -> [EngineMount] {
         var mounts: [EngineMount] = []
         for request in requests {
             if request.type == "tmpfs" {
-                let root = tmpfsRoot ?? FileManager.default.temporaryDirectory
                 let leaf = request.destination.replacingOccurrences(of: "/", with: "_")
-                let dir = root.appendingPathComponent(leaf.isEmpty ? "tmpfs" : leaf, isDirectory: true)
+                let dir = tmpfsRoot.appendingPathComponent(leaf.isEmpty ? "tmpfs" : leaf, isDirectory: true)
                 try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
                 mounts.append(
                     EngineMount(
@@ -142,6 +143,7 @@ extension EngineManager {
             if request.anonymous || request.source.isEmpty {
                 let created = try await createVolume(EngineVolumeCreateSpec(anonymous: true))
                 name = created.volume.name
+                createdAnonymous.append(name)
                 anonymous = true
             } else if volumes[request.source] == nil {
                 let created = try await createVolume(EngineVolumeCreateSpec(name: request.source))
