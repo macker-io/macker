@@ -77,6 +77,13 @@ CLI prefix layout (`docs/packaging.md`): `bin/macker` + `bin/mackerd` are exec w
 
 ## Compose compatibility testing
 
+Release packaging stages checksum-pinned Darwin arm64 Compose and Buildx binaries before signing. For a SwiftPM debug CLI, run `make macker compose-tools` to stage the same providers beside the executable. To exercise the packaged entry point on a MicroVM host without relying on Docker clients on PATH:
+
+```bash
+make cli
+scripts/smoke-compose.sh
+```
+
 [PR CI](../.github/workflows/test.yml) runs `make test`. It does not run the official Docker CLI or boot a MicroVM. To test Compose against a signed local daemon, install the [tested client versions](cli.md#official-docker-cli-and-compose) and run from the repo root:
 
 ```bash

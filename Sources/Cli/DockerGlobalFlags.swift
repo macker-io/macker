@@ -23,6 +23,10 @@ public enum DockerGlobalFlags {
         var index = 1
         while index < arguments.count {
             let arg = arguments[index]
+            if arg == "compose" {
+                kept.append(contentsOf: arguments[index...])
+                break
+            }
             if arg == "--" || !arg.hasPrefix("-") || arg == "-" {
                 kept.append(contentsOf: rewriteNetworkBooleans(rewriteHelpShortFlag(Array(arguments[index...]))))
                 break

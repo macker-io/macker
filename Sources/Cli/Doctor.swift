@@ -172,7 +172,7 @@ struct DockerDoctor {
         guard let docker = toolchain.dockerPath else {
             return [
                 CheckResult(status: .warn, title: "docker CLI", detail: "not found on PATH — install it (e.g. `brew install docker`) to use the official client; `macker` works without it"),
-                CheckResult(status: .warn, title: "docker compose plugin", detail: "skipped (no docker CLI)"),
+                CheckResult(status: .warn, title: "docker compose plugin", detail: "optional external plugin skipped; packaged macker compose is independent"),
             ]
         }
         var results: [CheckResult] = [
@@ -181,7 +181,7 @@ struct DockerDoctor {
         if let compose = toolchain.composeVersion {
             results.append(CheckResult(status: .ok, title: "docker compose plugin", detail: compose))
         } else {
-            results.append(CheckResult(status: .warn, title: "docker compose plugin", detail: "not installed — `brew install docker-compose` and add its plugin dir to cliPluginsExtraDirs in ~/.docker/config.json"))
+            results.append(CheckResult(status: .warn, title: "docker compose plugin", detail: "optional for docker compose; use macker compose with the packaged CLI instead"))
         }
         let endpoint = "unix://\(contextSocket)"
         switch probe.contextState(docker: docker, endpoint: endpoint) {

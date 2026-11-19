@@ -100,6 +100,10 @@ build_prefix() {
   write_wrapper "$BIN_WRAP/mackerd" mackerd
   write_plist "$SHARE/launchd/io.macker.daemon.plist.in"
 
+  ./scripts/stage-compose-tools.sh "$LIBEXEC/compose-tools"
+  cp "$REPO_ROOT/scripts/compose-NOTICE" "$SHARE/compose-NOTICE"
+  cp "$REPO_ROOT/LICENSE" "$SHARE/compose-LICENSE"
+
   sign_macho_tree "$LIBEXEC"
   echo "signed libexec with $(sign_identity)"
 

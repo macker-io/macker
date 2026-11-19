@@ -2,11 +2,13 @@
 
 Compared against the [Docker Engine CLI](https://docs.docker.com/reference/cli/docker/). This document lists the Docker-compatible commands Macker ships, then the options that are still missing or accepted without matching Docker’s behavior.
 
-Not compared: Macker-only commands (`setup`, `fetch-runtime`, `doctor`, `status`, `helper`). The `macker` CLI does not ship Compose, Swarm, buildx, checkpoint, plugins, secrets, or configs; Compose and buildx work through the official `docker` CLI and its plugins (below). Unsupported management commands are recognized; see below.
+Not compared: Macker-only commands (`setup`, `fetch-runtime`, `doctor`, `status`, `helper`). The CLI package ships `macker compose` with private Compose and Buildx binaries. There is no standalone `macker buildx` command. Swarm, checkpoint, engine plugins, secrets and configs are not implemented. Unsupported management commands are recognized; see below.
 
 ## Official `docker` CLI and Compose
 
-The official `docker compose` plugin reads your `compose.yaml` and manages the project; Macker runs the containers through the Docker Engine API. Tested with Docker CLI 29.8.2 and Compose 5.5.0. To use Macker for one project without changing your active Docker context:
+`macker compose` runs the packaged upstream Compose client with Macker’s Unix socket. Project options, arguments, terminal streams and exit codes pass through to Compose. Use `macker -H unix:///path/to/macker.sock compose …` for an explicit endpoint. Its client state (including Buildx and client-side registry configuration) lives under `~/.macker/compose`, or `<dir>/compose` with `macker --config <dir>`. It honors `macker context use` when no host override is set. It ignores the ambient Docker context and does not edit `~/.docker`.
+
+Alternatively, the official `docker compose` plugin reads your `compose.yaml` and manages the project; Macker runs the containers through the Docker Engine API. Tested with Docker CLI 29.8.2 and Compose 5.5.0. To use Macker for one project without changing your active Docker context:
 
 ```bash
 macker setup                         # creates the `macker` context; never switches the active one

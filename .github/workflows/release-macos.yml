@@ -109,6 +109,7 @@ jobs:
           test -f "$TARBALL"
           echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
           codesign -dv --verbose=4 dist/cli/libexec/macker/mackerd
+          PATH=/usr/bin:/bin dist/cli/bin/macker --config "$RUNNER_TEMP/macker-client" compose version
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

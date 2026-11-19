@@ -59,6 +59,18 @@ echo hello | macker exec -i web cat
 
 Official `nginx` has no `wget` / `curl` — `cat` the static files, or `exec` into `alpine`.
 
+## Compose
+
+From a directory with a `compose.yaml`:
+
+```bash
+macker compose up -d --build
+macker compose logs
+macker compose down
+```
+
+The CLI package includes Docker Compose and its Buildx build provider. No Docker Desktop, separate Docker CLI/plugins, or `macker setup` is needed. This does not install a `docker` command or change your Docker context.
+
 ## Official `docker` CLI and Compose
 
 The official `docker` CLI (29.x) and `docker compose` plugin work against Macker (Docker Engine API 1.24–1.44). Register the context once:
