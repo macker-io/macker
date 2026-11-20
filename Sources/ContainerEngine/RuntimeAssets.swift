@@ -59,6 +59,23 @@ enum RuntimeAssets {
         return Kernel(path: path, platform: .linuxArm)
     }
 
+    static func k3sKernel() throws -> Kernel {
+        guard ProcessInfo.processInfo.environment["MACKER_EXPERIMENTAL_K3S"] == "1" else {
+            throw EngineError.runtimeUnavailable("K3s requires MACKER_EXPERIMENTAL_K3S=1 on the daemon")
+        }
+        if let override = envURL("MACKER_K3S_KERNEL") {
+            guard isUsableFile(override) else {
+                throw EngineError.runtimeUnavailable("MACKER_K3S_KERNEL is not a regular file: \(override.path)")
+            }
+            return Kernel(path: override, platform: .linuxArm)
+        }
+        let bundled = RuntimePin.bundledRuntimeDirectories().map { $0.appendingPathComponent("vmlinux-k3s") }
+        guard let path = firstExisting(bundled) else {
+            throw EngineError.runtimeUnavailable("K3s kernel not found. Set MACKER_K3S_KERNEL or install a CLI package with vmlinux-k3s.")
+        }
+        return Kernel(path: path, platform: .linuxArm)
+    }
+
     static func initfsMount(storePath: URL) throws -> Mount {
         guard let path = firstExisting(initfsCandidates(storePath: storePath)) else {
             throw EngineError.runtimeUnavailable(

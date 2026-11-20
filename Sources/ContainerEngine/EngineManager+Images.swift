@@ -910,7 +910,7 @@ extension EngineManager {
         return url
     }
 
-    private static func runTar(_ arguments: [String]) throws {
+    static func runTar(_ arguments: [String]) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
         process.arguments = arguments

@@ -31,10 +31,32 @@ public struct Router: Sendable {
         case ("GET", "/info"):
             return await info()
         case ("POST", "/macker/k3s/start"):
-            do { return Self.jsonOK(try await engine.startK3s()) } catch { return Self.engineError(error) }
+            do { return Self.jsonOK(try await engine.startK3s(wait: request.query["wait"] == "1")) } catch { return Self.engineError(error) }
+        case ("GET", "/macker/k3s/status"):
+            return Self.jsonOK(await engine.k3sStatus())
+        case ("DELETE", "/macker/k3s"):
+            guard request.query["confirm"] == "1" else {
+                return Self.jsonError(status: 400, message: "K3s reset requires explicit confirmation")
+            }
+            do {
+                try await engine.resetK3s()
+                return HTTPResponse(status: 204)
+            } catch { return Self.engineError(error) }
         case ("POST", "/macker/k3s/stop"):
             do {
                 try await engine.stopK3s()
+                return HTTPResponse(status: 204)
+            } catch { return Self.engineError(error) }
+        case ("POST", "/macker/k3s/images/sync"):
+            struct SyncRequest: Decodable {
+                let imageID: String?
+                let tags: [String]
+            }
+            guard let sync = try? JSONDecoder().decode(SyncRequest.self, from: request.body) else {
+                return Self.jsonError(status: 400, message: "expected build image ID and tags")
+            }
+            do {
+                try await engine.syncK3sImage(digest: sync.imageID, tags: sync.tags)
                 return HTTPResponse(status: 204)
             } catch { return Self.engineError(error) }
         case ("POST", "/macker/k3s/kubeconfig"):

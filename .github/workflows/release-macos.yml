@@ -27,7 +27,36 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  k3s-kernel:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build K3s guest kernel
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential flex libelf-dev libssl-dev xz-utils
+          kata=$(python3 -c 'import json; print(json.load(open("Sources/ContainerEngine/RuntimePin.json"))["kata"])')
+          archive="kata-static-${kata}-arm64.tar.xz"
+          curl -fsSL --retry 3 "https://github.com/kata-containers/kata-containers/releases/download/${kata}/${archive}" -o "$RUNNER_TEMP/$archive"
+          mkdir "$RUNNER_TEMP/kata"
+          tar -xf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/kata"
+          base="$RUNNER_TEMP/kata/opt/kata/share/kata-containers/vmlinux.container"
+          test -f "$base"
+          bash scripts/build-k3s-kernel-linux.sh "$base" "$RUNNER_TEMP/k3s-kernel"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: k3s-kernel
+          path: ${{ runner.temp }}/k3s-kernel/
+          if-no-files-found: error
+          compression-level: 0
+
   build-and-release:
+    needs: k3s-kernel
     runs-on: macos-26
     timeout-minutes: 90
     env:
@@ -98,15 +127,26 @@ jobs:
             -k "$KEYCHAIN_PASSWORD" \
             "$KEYCHAIN_PATH"
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: k3s-kernel
+          path: ${{ runner.temp }}/k3s-kernel
+
       - name: Build, sign, and notarize CLI
         id: build
         env:
           VERSION: ${{ steps.version.outputs.version }}
           NOTARIZE: "1"
         run: |
+          export MACKER_K3S_KERNEL="$RUNNER_TEMP/k3s-kernel/vmlinux"
+          test -s "$MACKER_K3S_KERNEL"
+          test -s "$RUNNER_TEMP/k3s-kernel/k3s-kernel-source.tar"
           make dist
+          mv "$RUNNER_TEMP/k3s-kernel/k3s-kernel-source.tar" dist/
+          (cd dist && shasum -a 256 k3s-kernel-source.tar >> SHA256SUMS)
           TARBALL="dist/macker-${VERSION}-darwin-arm64.tar.gz"
           test -f "$TARBALL"
+          tar -xOf "$TARBALL" share/macker/runtime/vmlinux-k3s | cmp - "$MACKER_K3S_KERNEL"
           echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
           codesign -dv --verbose=4 dist/cli/libexec/macker/mackerd
           PATH=/usr/bin:/bin dist/cli/bin/macker --config "$RUNNER_TEMP/macker-client" compose version
@@ -121,6 +161,7 @@ jobs:
           files: |
             ${{ steps.build.outputs.tarball }}
             dist/SHA256SUMS
+            dist/k3s-kernel-source.tar
             scripts/install.sh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

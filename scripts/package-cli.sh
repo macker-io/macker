@@ -91,6 +91,9 @@ build_prefix() {
   done
 
   cp .runtime/vmlinux .runtime/initfs.ext4 "$RUNTIME/"
+  if [ -n "${MACKER_K3S_KERNEL:-}" ]; then
+    cp "$MACKER_K3S_KERNEL" "$RUNTIME/vmlinux-k3s"
+  fi
   cp "$PIN" "$RUNTIME/RuntimePin.json"
   cp "$ENTITLEMENTS" "$SHARE/mackerd.entitlements"
   printf '%s\n' "$VERSION" >"$SHARE/VERSION"

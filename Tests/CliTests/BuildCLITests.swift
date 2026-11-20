@@ -32,6 +32,17 @@ struct BuildCLITests {
         #expect(labels["env"] as? String == "test")
     }
 
+    @Test func k3sSyncRequiresAnExplicitTag() throws {
+        #expect(try !Build.parse([]).syncK3s)
+        #expect(throws: (any Error).self) {
+            var build = try Build.parse(["--k3s"])
+            try build.validate()
+        }
+        var build = try Build.parse(["--k3s", "-t", "demo:dev"])
+        try build.validate()
+        #expect(build.syncK3s)
+    }
+
     @Test func encodedQueryRejectsUnsupportedNetwork() throws {
         expectCLIError("network mode container:abc is not implemented") {
             _ = try Build.parse(["--network", "container:abc", "."]).encodedQuery(dockerfile: "Dockerfile")

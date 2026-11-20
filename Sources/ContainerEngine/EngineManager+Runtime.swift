@@ -30,7 +30,8 @@ extension EngineManager {
     func bootContainer(_ record: EngineContainer) async throws {
         let image = try await resolveContainerImage(record)
         try await retainImage(image)
-        var manager = try await ensureManager()
+        let isK3s = Self.isK3sContainer(record)
+        var manager = try await ensureManager(isK3s: isK3s)
         await reclaimContainerRuntime(record.id)
         // tmpfs mounts live in the runtime directory just reset: recreate them empty.
         for mount in record.mounts where mount.type == "tmpfs" && !mount.source.isEmpty {
@@ -137,7 +138,7 @@ extension EngineManager {
                 }
             }
             linux = created
-            containerManager = manager
+            if !isK3s { containerManager = manager }
             snapshotBaseline(record.id)
             try await created.create()
             try await applyPendingArchives(record.id, to: created)
@@ -355,12 +356,14 @@ extension EngineManager {
         }
     }
 
-    private func ensureManager() async throws -> ContainerManager {
-        if let containerManager {
+    private func ensureManager(isK3s: Bool) async throws -> ContainerManager {
+        if !isK3s, let containerManager {
             return containerManager
         }
+        // The K3s manager is local to this boot and must not replace the default one.
+        let k3sKernel = try isK3s ? RuntimeAssets.k3sKernel() : nil
         _ = try await RuntimeAssets.prepare(store: imageStore)
-        let kernel = try RuntimeAssets.kernel(storePath: imageStore.path)
+        let kernel = try k3sKernel ?? RuntimeAssets.kernel(storePath: imageStore.path)
         let initfs = try RuntimeAssets.initfsMount(storePath: imageStore.path)
         // NICs are attached per container in `bootContainer` (`networking: false`).
         let manager = try ContainerManager(
@@ -369,7 +372,7 @@ extension EngineManager {
             imageStore: imageStore,
             network: nil
         )
-        containerManager = manager
+        if !isK3s { containerManager = manager }
         return manager
     }
 

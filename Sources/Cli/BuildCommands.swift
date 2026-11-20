@@ -38,6 +38,9 @@ struct Build: ParsableCommand {
     @Flag(name: [.customShort("q"), .long], help: "Only print the image ID.")
     var quiet = false
 
+    @Flag(name: .customLong("k3s"), help: "Sync the tagged build result to the running local K3s node.")
+    var syncK3s = false
+
     @Option(help: "Write the image ID to the file.")
     var iidfile: String?
 
@@ -105,6 +108,12 @@ struct Build: ParsableCommand {
     @Argument(help: "Build context directory.")
     var path: String = "."
 
+    func validate() throws {
+        if syncK3s && tag.isEmpty {
+            throw ValidationError("--k3s requires at least one --tag")
+        }
+    }
+
     func run() throws {
         let context = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
         let dockerfile = try Self.contextRelativeDockerfile(file, context: context)
@@ -125,6 +134,16 @@ struct Build: ParsableCommand {
                 throw CLIError.io("build did not produce an image ID")
             }
             try imageID.write(toFile: iidfile, atomically: true, encoding: .utf8)
+        }
+        if syncK3s {
+            guard let imageID, !imageID.isEmpty else {
+                throw CLIError.io("build did not produce an image ID to sync to K3s")
+            }
+            do {
+                try K3s.syncImage(digest: imageID, tags: tag)
+            } catch {
+                throw CLIError.io("image was built locally, but K3s sync failed: \(error.localizedDescription)")
+            }
         }
     }
 

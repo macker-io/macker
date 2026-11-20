@@ -4,7 +4,10 @@ import Foundation
 extension EngineManager {
     /// Runs a command in the guest and captures stdout. Does not create a Docker exec instance.
     /// Pass `privileged: true` for network admin operations (`ip addr` add/del).
-    func runGuest(_ idOrName: String, command: [String], privileged: Bool = false) async throws -> (code: Int, stdout: String) {
+    func runGuest(
+        _ idOrName: String, command: [String], privileged: Bool = false, timeoutSeconds: Int = 8,
+        stdin: (any ReaderStream)? = nil
+    ) async throws -> (code: Int, stdout: String) {
         let container = try requireRunningForExec(idOrName)
         guard let linux = vms[container.id] else {
             throw EngineError.conflict("Container \(container.id) has no running MicroVM")
@@ -19,6 +22,7 @@ extension EngineManager {
                 config.arguments = command
                 config.environmentVariables = Self.mergedEnvironment(container.env, tty: false)
                 config.terminal = false
+                if let stdin { config.stdin = stdin }
                 config.stdout = stdout
                 config.stderr = stderr
                 if privileged {
@@ -31,7 +35,7 @@ extension EngineManager {
         }
         let code: Int
         do {
-            code = try await Self.waitGuest(process, seconds: 8)
+            code = try await Self.waitGuest(process, seconds: timeoutSeconds)
         } catch {
             try? await process.kill(.kill)
             _ = try? await process.wait()
@@ -39,6 +43,7 @@ extension EngineManager {
             throw error
         }
         try? await process.delete()
+        await stdout.drain()
         let text = String(decoding: collector.snapshot(), as: UTF8.self)
         return (code, text)
     }
@@ -110,6 +115,8 @@ extension EngineManager {
             }
             group.addTask {
                 try await Task.sleep(for: .seconds(seconds))
+                // Unblock the wait task before leaving the task group.
+                try? await process.kill(.kill)
                 throw EngineError.runtimeUnavailable("timed out waiting for guest command")
             }
             let result = try await group.next()!
