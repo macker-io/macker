@@ -6,7 +6,7 @@ import Foundation
 struct K3s: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "k3s", abstract: "Manage the experimental local K3s node.",
-        subcommands: [Start.self, Status.self, Stop.self, Kubeconfig.self, Image.self, Reset.self]
+        subcommands: [Start.self, Status.self, Stop.self, Kubeconfig.self, Kubectl.self, Image.self, Reset.self]
     )
 
     struct Start: ParsableCommand {
@@ -79,19 +79,26 @@ struct K3s: ParsableCommand {
         var path: String
 
         func run() throws {
-            let config = try DaemonAPI.decode(String.self, from: DaemonAPI.post("/macker/k3s/kubeconfig", timeoutSeconds: 15))
-            let fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
-            guard fd >= 0 else {
-                throw CLIError.io("cannot create kubeconfig: \(String(cString: strerror(errno)))")
-            }
-            let file = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
-            do {
-                try file.write(contentsOf: Data(config.utf8))
-                try file.close()
-            } catch {
-                try? file.close()
-                throw error
-            }
+            try K3s.writeKubeconfig(K3s.fetchKubeconfig(), to: path)
+        }
+    }
+
+    static func fetchKubeconfig() throws -> String {
+        try DaemonAPI.decode(String.self, from: DaemonAPI.post("/macker/k3s/kubeconfig", timeoutSeconds: 15))
+    }
+
+    static func writeKubeconfig(_ config: String, to path: String) throws {
+        let fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard fd >= 0 else {
+            throw CLIError.io("cannot create kubeconfig: \(String(cString: strerror(errno)))")
+        }
+        let file = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        do {
+            try file.write(contentsOf: Data(config.utf8))
+            try file.close()
+        } catch {
+            try? file.close()
+            throw error
         }
     }
 }

@@ -8,9 +8,10 @@ macker="${MACKER:-$root/dist/cli/bin/macker}"
 # Exercise the normal kernel selection alongside K3s, even if the caller
 # previously ran the daemon-wide kernel override experiment.
 unset MACKER_KERNEL
-for tool in kubectl lsof timeout; do
+for tool in lsof timeout; do
   command -v "$tool" >/dev/null || { echo "Missing $tool" >&2; exit 1; }
 done
+test_timeout=$(command -v timeout)
 store=$(mktemp -d /tmp/macker-k3s.XXXXXX)
 export DOCKER_HOST="unix://$store/macker.sock"
 unset DOCKER_CONTEXT DOCKER_API_VERSION
@@ -19,7 +20,7 @@ pid=$!
 cleanup() {
   local status=$?
   if [[ "$status" != 0 && -f "$store/kubeconfig" ]]; then
-    timeout 5 kubectl --kubeconfig "$store/kubeconfig" get pods -A -o wide --request-timeout=3s >&2 || true
+    env PATH=/usr/bin:/bin "$test_timeout" 15 "$macker" -H "$DOCKER_HOST" kubectl get pods -A -o wide --request-timeout=3s >&2 || true
   fi
   kill -TERM "$pid" 2>/dev/null || true
   wait "$pid" || true
@@ -42,7 +43,12 @@ for ((i=0; i<100; i++)); do
 done
 [[ -S "$store/macker.sock" ]] || { echo 'Test daemon did not open its socket' >&2; exit 1; }
 m() { local limit=$1; shift; timeout "$limit" "$macker" -H "$DOCKER_HOST" k3s "$@"; }
-k() { local limit=$1; shift; timeout "$limit" kubectl --kubeconfig "$store/kubeconfig" "$@"; }
+k() {
+  local limit=$1; shift
+  # Exercise the packaged client and ensure ambient kubeconfig is ignored.
+  env PATH=/usr/bin:/bin KUBECONFIG="$store/nonexistent" "$test_timeout" "$((limit + 10))" \
+    "$macker" -H "$DOCKER_HOST" kubectl "$@"
+}
 start_cluster() {
   local endpoint binding port listeners i
   endpoint=$(m 460 start --wait)

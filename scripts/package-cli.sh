@@ -106,6 +106,9 @@ build_prefix() {
   ./scripts/stage-compose-tools.sh "$LIBEXEC/compose-tools"
   cp "$REPO_ROOT/scripts/compose-NOTICE" "$SHARE/compose-NOTICE"
   cp "$REPO_ROOT/LICENSE" "$SHARE/compose-LICENSE"
+  ./scripts/stage-kubectl.sh "$LIBEXEC/k3s-tools"
+  cp "$REPO_ROOT/LICENSE" "$SHARE/kubectl-LICENSE"
+  cp "$REPO_ROOT/scripts/kubectl-NOTICE" "$SHARE/kubectl-NOTICE"
 
   sign_macho_tree "$LIBEXEC"
   echo "signed libexec with $(sign_identity)"

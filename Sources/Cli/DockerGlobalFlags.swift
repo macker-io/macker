@@ -23,7 +23,7 @@ public enum DockerGlobalFlags {
         var index = 1
         while index < arguments.count {
             let arg = arguments[index]
-            if arg == "compose" {
+            if arg == "compose" || arg == "kubectl" || arguments[index...].starts(with: ["k3s", "kubectl"]) {
                 kept.append(contentsOf: arguments[index...])
                 break
             }

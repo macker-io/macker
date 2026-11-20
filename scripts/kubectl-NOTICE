@@ -1,0 +1,5 @@
+The Macker CLI package redistributes kubectl (https://kubernetes.io/),
+part of Kubernetes (https://github.com/kubernetes/kubernetes), under
+the Apache License 2.0. See kubectl-LICENSE.
+
+Copyright The Kubernetes Authors.

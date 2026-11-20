@@ -1,4 +1,4 @@
-.PHONY: help app macker compose-tools helper sign run fetch-runtime reset cli dist install bundle pkg check sync-runtime sync-runtime-latest test smoke
+.PHONY: help app macker compose-tools kubectl-tools helper sign run fetch-runtime reset cli dist install bundle pkg check sync-runtime sync-runtime-latest test smoke
 
 # VERSION=1.2.3 make dist
 # CERT_NAME='Developer ID Application: …' NOTARIZE=1 VERSION=1.2.3 make dist
@@ -11,6 +11,7 @@ help:
 	@echo "app                   build and ad-hoc sign the debug daemon"
 	@echo "macker                build the CLI and macker-helper"
 	@echo "compose-tools         stage Compose + Buildx for the debug CLI"
+	@echo "kubectl-tools         stage kubectl for the debug CLI"
 	@echo "helper                build macker-helper"
 	@echo "run                   build, sign, and start the debug daemon"
 	@echo "fetch-runtime         download the pinned kernel + vminit into the daemon store"
@@ -36,6 +37,9 @@ macker: helper
 
 compose-tools:
 	./scripts/stage-compose-tools.sh "$$(swift build --show-bin-path)/compose-tools"
+
+kubectl-tools:
+	./scripts/stage-kubectl.sh "$$(swift build --show-bin-path)/k3s-tools"
 
 helper:
 	swift build --product macker-helper

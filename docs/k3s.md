@@ -11,7 +11,7 @@ DOCKER_CONTEXT=orbstack scripts/build-k3s-probe-kernel.sh
 MACKER_K3S_KERNEL="$PWD/.build/k3s-probe/vmlinux" scripts/smoke-k3s.sh
 ```
 
-The build script takes the configuration embedded in the packaged Kata 3.17.0 kernel and builds upstream Linux 6.12.28 with `BRIDGE_NETFILTER` and the legacy `physdev` match built in. It verifies the kernel source checksum and writes only to the chosen output directory. The daemon pulls the official `rancher/k3s:v1.34.3-k3s1` image on first start. The smoke script requires host `kubectl`, `lsof`, and `timeout`; it drives the lifecycle through the Macker CLI without Docker and compares the running K3s and ordinary container kernel versions on the same daemon.
+The build script takes the configuration embedded in the packaged Kata 3.17.0 kernel and builds upstream Linux 6.12.28 with `BRIDGE_NETFILTER` and the legacy `physdev` match built in. It verifies the kernel source checksum and writes only to the chosen output directory. The daemon pulls the official `rancher/k3s:v1.34.3-k3s1` image on first start. The smoke script requires `lsof` and `timeout`, but no system `kubectl`; it drives the lifecycle through the Macker CLI without Docker and compares the running K3s and ordinary container kernel versions on the same daemon.
 
 ## What the probe established
 
@@ -26,12 +26,27 @@ Start the daemon with `MACKER_EXPERIMENTAL_K3S=1`. The tagged macOS CLI release 
 ```sh
 macker -H unix:///path/to/test/macker.sock k3s start --wait
 macker -H unix:///path/to/test/macker.sock k3s status
-macker -H unix:///path/to/test/macker.sock k3s kubeconfig ./macker-k3s.yaml
-kubectl --kubeconfig ./macker-k3s.yaml get nodes
+macker -H unix:///path/to/test/macker.sock kubectl get nodes
 macker -H unix:///path/to/test/macker.sock k3s stop
 ```
 
 `start` alone reports MicroVM startup. `start --wait` checks both the Kubernetes API and node readiness; a readiness timeout does not stop the VM. `status` reports the current state and loopback endpoint if running. `kubeconfig` writes an admin credential file with mode `0600` and never overwrites an existing file; use a new path to refresh it after restart.
+
+`macker kubectl` (also available as `macker k3s kubectl`) uses the selected daemon and a temporary private kubeconfig. It prefers the `kubectl` on PATH if its client is within one minor version of the pinned server (1.34); otherwise it uses the package's checksum-verified Darwin ARM64 client (v1.34.3). It never replaces a system executable or changes the default Kubernetes context. For a debug CLI, run `make kubectl-tools` to stage the same client. If you don't already have a standalone `kubectl`, you can link the packaged binary into a directory on PATH. For the default installation prefix (`~/.macker`):
+
+```sh
+if ! command -v kubectl >/dev/null 2>&1; then
+  mkdir -p "$HOME/.local/bin"
+  ln -s "$HOME/.macker/libexec/macker/k3s-tools/kubectl" "$HOME/.local/bin/kubectl"
+fi
+```
+
+Make sure `~/.local/bin` is on PATH, or choose another user-owned directory that already is. This invokes plain upstream `kubectl`, not the Macker wrapper. To target Macker explicitly without changing your default context:
+
+```sh
+macker k3s kubeconfig ./macker-k3s.yaml
+kubectl --kubeconfig ./macker-k3s.yaml get nodes
+```
 
 `stop` retains cluster state in `k3s/state.ext4` under the daemon store. To permanently remove the stopped cluster, run `macker k3s reset --confirm` against the same daemon. This deletes cluster objects, PVC data on the cluster disk and K3s's image cache, but does not delete Macker images or host-side kubeconfig files.
 
