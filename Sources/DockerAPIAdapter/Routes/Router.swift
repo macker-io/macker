@@ -30,6 +30,15 @@ public struct Router: Sendable {
             return Self.version()
         case ("GET", "/info"):
             return await info()
+        case ("POST", "/macker/k3s/start"):
+            do { return Self.jsonOK(try await engine.startK3s()) } catch { return Self.engineError(error) }
+        case ("POST", "/macker/k3s/stop"):
+            do {
+                try await engine.stopK3s()
+                return HTTPResponse(status: 204)
+            } catch { return Self.engineError(error) }
+        case ("POST", "/macker/k3s/kubeconfig"):
+            do { return Self.jsonOK(try await engine.readK3sKubeconfig()) } catch { return Self.engineError(error) }
         case ("GET", "/macker/status"):
             return await mackerStatus()
         case ("GET", "/events"):

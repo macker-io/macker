@@ -96,6 +96,10 @@ extension EngineManager {
     }
 
     public func createContainer(_ spec: EngineContainerCreateSpec) async throws -> EngineContainerCreateResult {
+        try await createContainer(spec, systemMounts: [])
+    }
+
+    func createContainer(_ spec: EngineContainerCreateSpec, systemMounts: [EngineMount]) async throws -> EngineContainerCreateResult {
         // Reject invalid host settings before creating mounts, volumes, or network leases.
         try Self.validateResources(memory: spec.memory, nanoCpus: spec.nanoCpus)
         _ = try GuestCapabilities.resolve(privileged: spec.privileged, add: spec.capAdd, drop: spec.capDrop)
@@ -199,7 +203,7 @@ extension EngineManager {
         )
         var createdAnonymous: [String] = []
         do {
-            record.mounts = try await resolveMounts(requests, tmpfsRoot: tmpfsRoot, createdAnonymous: &createdAnonymous)
+            record.mounts = try await resolveMounts(requests, tmpfsRoot: tmpfsRoot, createdAnonymous: &createdAnonymous) + systemMounts
             // A network may have been removed while volume creation published its events.
             for endpoint in attached.endpoints { _ = try resolveNetwork(endpoint.networkID) }
             try persistContainer(record)

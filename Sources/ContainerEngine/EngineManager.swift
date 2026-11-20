@@ -51,6 +51,7 @@ public actor EngineManager {
     /// In-flight boot of the hidden BuildKit builder.
     var buildKitBoot: Task<String, Error>?
     var buildKitReadyID: String?
+    var k3sChanging = false
     var healthTasks: [String: Task<Void, Never>] = [:]
     var guestNics: [String: [GuestNic]] = [:]
     let restartAfterDaemon: [String]
