@@ -5,7 +5,7 @@ import Foundation
 struct FetchRuntime: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "fetch-runtime",
-        abstract: "Download the pinned guest kernel and vminit into the daemon store."
+        abstract: "Download the pinned guest kernel and vminit into the daemon store (stop the daemon first)."
     )
 
     @Option(name: .shortAndLong, help: "Also copy vmlinux and initfs.ext4 here for packaging.")
@@ -20,11 +20,7 @@ struct FetchRuntime: ParsableCommand {
         print("")
 
         let status = try RunSync.call {
-            let engine = try EngineManager()
-            if let output {
-                return try await engine.stageRuntime(to: URL(fileURLWithPath: output, isDirectory: true))
-            }
-            return try await engine.prepareRuntime()
+            try await RuntimeAssets.fetch(output: output.map { URL(fileURLWithPath: $0, isDirectory: true) })
         }
         if let kernel = status.kernelPath {
             print("  [ok  ] kernel \(kernel)")

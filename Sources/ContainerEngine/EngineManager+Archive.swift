@@ -107,7 +107,7 @@ extension EngineManager {
         let resolved = try ArchivePath.normalize(path)
         let rootfs = Self.runtimeURL(id: container.id, root: containerRoot).appendingPathComponent("rootfs.ext4")
         if !FileManager.default.fileExists(atPath: rootfs.path) {
-            _ = try await prepareRootfs(id: container.id, image: try await resolveImage(container.image))
+            _ = try await prepareRootfs(id: container.id, image: try await resolveContainerImage(container))
         }
         return try await withExtractedRootfs(container) { root in
             let item = resolved.path == "/" ? root : root.appendingPathComponent(String(resolved.path.dropFirst()))

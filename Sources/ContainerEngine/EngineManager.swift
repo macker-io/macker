@@ -81,6 +81,10 @@ public actor EngineManager {
 
     /// Validates that this Mac can host MicroVMs via Virtualization.framework.
     public func checkEnvironment() async throws -> EnvironmentReport {
+        try Self.checkHostEnvironment()
+    }
+
+    public static func checkHostEnvironment() throws -> EnvironmentReport {
         let version = ProcessInfo.processInfo.operatingSystemVersion
         guard version.majorVersion >= 15 else {
             throw EngineError.unsupportedHost(

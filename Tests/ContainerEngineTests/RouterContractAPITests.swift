@@ -147,6 +147,32 @@ struct RouterContractAPITests {
         }
     }
 
+    @Test func invalidPruneFiltersPreserveEligibleResources() async throws {
+        try await withRouter { router, engine in
+            try await RouterTestSupport.importTagged(engine, repo: "fixture")
+            let container = try await RouterTestSupport.createContainer(router, image: "fixture")
+            _ = try await engine.createVolume(.init(name: "keep"))
+            let network = await router.handle(try RouterTestSupport.request("POST", "/networks/create", body: ["Name": "keepnet"]))
+            try #require(network.status == 201)
+            let dangling = try await TemporaryDirectory.with("prune-image") { work in
+                try await collectDigest(await engine.importImage(spec: .init(source: "-"), archive: try pack(hello: "untagged", in: work)))
+            }
+            for (route, invalidValue) in [("/containers/prune", #"{"until":["bad"]}"#),
+                                          ("/networks/prune", #"{"label!":[]}"#),
+                                          ("/v1.41/volumes/prune", #"{"all":["typo"]}"#),
+                                          ("/build/prune", #"{"id":[""]}"#)] {
+                for raw in ["bad json", #"{"unknown":["x"]}"#, invalidValue] {
+                    let response = await router.handle(try RouterTestSupport.request("POST", route, query: ["all": "1", "filters": raw]))
+                    #expect(response.status == 400, "\(route) accepted \(raw)")
+                }
+            }
+            _ = try await engine.inspectContainer(container)
+            _ = try await engine.inspectNetwork("keepnet")
+            _ = try await engine.inspectVolume("keep")
+            _ = try await engine.inspectImage(name: dangling)
+        }
+    }
+
     @Test func pruneNetworksAndBuildCache() async throws {
         try await withRouter { router, _ in
             _ = await router.handle(

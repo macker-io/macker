@@ -112,5 +112,96 @@ struct VolumeTests {
             #expect(remaining.map(\.volume.name) == ["keep"])
         }
     }
+
+    @Test func autoRemoveExitRemovesOnlyUnreferencedAnonymousVolumes() async throws {
+        try await TemporaryDirectory.with("macker-autoremove-volumes") { store in
+            let engine = try EngineManager(storePath: store)
+            try await RouterTestSupport.importTagged(engine, repo: "base", tag: "v1")
+            try await TemporaryDirectory.with("macker-autoremove-declared") { work in
+                _ = try await collectDigest(await engine.importImage(
+                    spec: .init(source: "-", repo: "declared", tag: "v1", changes: ["VOLUME /declared"]),
+                    archive: try pack(hello: "d", in: work)
+                ))
+            }
+
+            let donor = try await engine.createContainer(.init(
+                image: "base:v1",
+                volumeRequests: [
+                    .init(type: "volume", source: "", destination: "/shared-anon", anonymous: true),
+                    .init(type: "volume", source: "donor-named", destination: "/donor-named"),
+                ]
+            ))
+            let donorMounts = try await engine.inspectContainer(donor.id).container.mounts
+            let sharedAnon = try #require(donorMounts.first { $0.destination == "/shared-anon" }?.name)
+
+            let ephemeral = try await engine.createContainer(.init(
+                image: "declared:v1",
+                autoRemove: true,
+                volumeRequests: [
+                    .init(type: "volume", source: "", destination: "/ephemeral-anon", anonymous: true),
+                    .init(type: "volume", source: "kept-named", destination: "/kept-named"),
+                ],
+                volumesFrom: [donor.id]
+            ))
+            var running = try await engine.inspectContainer(ephemeral.id).container
+            let ephemeralAnon = try #require(running.mounts.first { $0.destination == "/ephemeral-anon" }?.name)
+            let declaredAnon = try #require(running.mounts.first { $0.destination == "/declared" }?.name)
+            running.state = "running"
+            await engine.saveContainer(running)
+
+            let removed = try await engine.waitContainer(ephemeral.id, condition: .removed)
+            await engine.handleVMExit(id: ephemeral.id, code: 0, action: "die")
+            #expect(await EngineManager.first(of: removed, timeoutSeconds: 2) == 0)
+            await #expect(throws: EngineError.self) {
+                _ = try await engine.inspectContainer(ephemeral.id)
+            }
+
+            let kept = Set([sharedAnon, "donor-named", "kept-named"])
+            let gone = Set([ephemeralAnon, declaredAnon])
+            #expect(Set(await engine.listVolumes().map(\.volume.name)) == kept)
+            let volumesRoot = store.appendingPathComponent("volumes")
+            let onDisk = Set(try FileManager.default.contentsOfDirectory(atPath: volumesRoot.path))
+            #expect(onDisk == kept)
+            for name in gone {
+                #expect(!FileManager.default.fileExists(atPath: volumesRoot.appendingPathComponent(name).path))
+            }
+            for name in kept {
+                #expect(FileManager.default.fileExists(atPath: volumesRoot.appendingPathComponent(name).path))
+            }
+            #expect(try await engine.inspectContainer(donor.id).container.state == "created")
+        }
+    }
+
+    @Test func nonAutoRemoveExitRetainsAnonymousVolumesUntilExplicitRemoveWithVolumes() async throws {
+        try await TemporaryDirectory.with("macker-non-rm-volumes") { store in
+            let engine = try EngineManager(storePath: store)
+            try await RouterTestSupport.importTagged(engine, repo: "keepvol", tag: "v1")
+            let created = try await engine.createContainer(.init(
+                image: "keepvol:v1",
+                volumeRequests: [
+                    .init(type: "volume", source: "", destination: "/anon", anonymous: true),
+                    .init(type: "volume", source: "named-keep", destination: "/named"),
+                ]
+            ))
+            var running = try await engine.inspectContainer(created.id).container
+            let anon = try #require(running.mounts.first { $0.destination == "/anon" }?.name)
+            running.state = "running"
+            await engine.saveContainer(running)
+
+            await engine.handleVMExit(id: created.id, code: 0, action: "die")
+            let exited = try await engine.inspectContainer(created.id).container
+            #expect(exited.state == "exited")
+
+            let afterExit = Set(await engine.listVolumes().map(\.volume.name))
+            #expect(afterExit == Set([anon, "named-keep"]))
+            let volumesRoot = store.appendingPathComponent("volumes")
+            #expect(Set(try FileManager.default.contentsOfDirectory(atPath: volumesRoot.path)) == afterExit)
+
+            try await engine.deleteContainer(created.id, force: false, removeAnonymousVolumes: true)
+            #expect(Set(await engine.listVolumes().map(\.volume.name)) == ["named-keep"])
+            #expect(!FileManager.default.fileExists(atPath: volumesRoot.appendingPathComponent(anon).path))
+            #expect(FileManager.default.fileExists(atPath: volumesRoot.appendingPathComponent("named-keep").path))
+        }
+    }
 }
 

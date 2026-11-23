@@ -415,11 +415,12 @@ struct Create: ParsableCommand {
         }
         let networks = try Self.networks(options)
         let restart = try options.restart.map { try EngineRestartPolicy.parse($0) } ?? .none
+        let parsedVolumes = try Self.volumes(options.volume)
         var host = CreateBody.HostConfig(
             AutoRemove: autoRemove ? true : nil,
             Memory: nil,
             NanoCpus: options.cpus.map { Int64(($0 * 1_000_000_000).rounded()) },
-            Binds: options.volume.isEmpty ? nil : options.volume,
+            Binds: parsedVolumes.binds,
             Mounts: try Self.mounts(options.mount),
             Tmpfs: options.tmpfs.isEmpty ? nil : Dictionary(uniqueKeysWithValues: options.tmpfs.map { ($0.split(separator: ":").first.map(String.init) ?? $0, "") }),
             VolumesFrom: options.volumesFrom.isEmpty ? nil : options.volumesFrom,
@@ -459,6 +460,7 @@ struct Create: ParsableCommand {
             Tty: options.tty ? true : nil,
             OpenStdin: options.interactive ? true : nil,
             StdinOnce: stdinOnce ? true : nil,
+            Volumes: parsedVolumes.volumes,
             ExposedPorts: exposed.isEmpty ? nil : exposed,
             Healthcheck: try Self.healthcheck(options),
             StopSignal: options.stopSignal,
@@ -607,6 +609,26 @@ struct Create: ParsableCommand {
         )
     }
 
+    /// Split `-v` into Docker `Config.Volumes` (anonymous single destinations) and `HostConfig.Binds`.
+    private static func volumes(_ specs: [String]) throws -> (volumes: [String: CreateBody.Empty]?, binds: [String]?) {
+        var volumes: [String: CreateBody.Empty] = [:]
+        var binds: [String] = []
+        for raw in specs {
+            if raw.contains(":") {
+                // Preserve bind specs verbatim; daemon validates HostConfig.Binds.
+                binds.append(raw)
+            } else {
+                guard raw.hasPrefix("/") else {
+                    throw CLIError.io(
+                        "invalid volume specification: '\(raw)': invalid mount config for type \"volume\": invalid mount path: '\(raw)' mount path must be absolute"
+                    )
+                }
+                volumes[raw] = .init()
+            }
+        }
+        return (volumes.isEmpty ? nil : volumes, binds.isEmpty ? nil : binds)
+    }
+
     private static func mounts(_ specs: [String]) throws -> [CreateBody.Mount]? {
         guard !specs.isEmpty else { return nil }
         return try specs.map { spec in
@@ -671,6 +693,7 @@ private struct CreateBody: Encodable {
     var Tty: Bool?
     var OpenStdin: Bool?
     var StdinOnce: Bool?
+    var Volumes: [String: Empty]?
     var ExposedPorts: [String: Empty]?
     var Healthcheck: Healthcheck?
     var StopSignal: String?

@@ -407,7 +407,24 @@ struct SystemPrune: ParsableCommand {
     @Flag(help: "Prune anonymous unused volumes.")
     var volumes = false
 
+    /// Never broaden a system-wide filter when an individual resource cannot apply it.
+    static func includesBuildCache(filters: [String], volumes: Bool) throws -> Bool {
+        var cache = true
+        for filter in filters {
+            switch filter.prefix(while: { $0 != "=" }) {
+            case "until":
+                guard !volumes else { throw CLIError.io("volume prune does not support the until filter") }
+            case "label", "label!":
+                cache = false
+            default:
+                throw CLIError.io("unsupported system prune filter: \(filter)")
+            }
+        }
+        return cache
+    }
+
     func run() throws {
+        let includeCache = try Self.includesBuildCache(filters: filter, volumes: volumes)
         var warning = "This will remove:\n"
         warning += "  - all stopped containers\n"
         warning += "  - all networks not used by at least one container\n"
@@ -417,7 +434,7 @@ struct SystemPrune: ParsableCommand {
         if volumes {
             warning += "  - all anonymous volumes not used by at least one container\n"
         }
-        warning += "  - all unused build cache"
+        warning += includeCache ? "  - all unused build cache" : "  (build cache is kept: label filters do not apply)"
         guard Prompt.confirm(warning, force: force) else { return }
 
         var reclaimed: Int64 = 0
@@ -427,7 +444,7 @@ struct SystemPrune: ParsableCommand {
         if volumes {
             reclaimed += try pruneVolumes()
         }
-        reclaimed += try pruneBuildCache()
+        if includeCache { reclaimed += try pruneBuildCache() }
         print("Total reclaimed space: \(Format.size(reclaimed))")
     }
 

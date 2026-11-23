@@ -467,7 +467,7 @@ extension EngineManager {
             await handleVMExit(id: container.id, code: 137, action: "kill")
         }
         let remaining = try? resolveContainer(container.id)
-        let anonymous = (remaining ?? container).mounts.filter(\.anonymous).map(\.name)
+        let mounts = (remaining ?? container).mounts
         await teardownVM(container.id)
         let code = (remaining ?? container).exitCode
         finishAttachSubscribers(container.id)
@@ -475,11 +475,16 @@ extension EngineManager {
         await forgetContainer(container.id)
         notifyWaiters(id: container.id, code: code, removed: true)
         if removeAnonymousVolumes {
-            for name in anonymous where !name.isEmpty {
-                try? await deleteVolume(name, force: true)
-            }
+            await removeAnonymousMounts(mounts)
         }
         await publish(containerEvent("destroy", remaining ?? container))
+    }
+
+    /// Deletes anonymous mounts that no other container still references (`deleteVolume` / refCount).
+    private func removeAnonymousMounts(_ mounts: [EngineMount]) async {
+        for name in mounts.filter(\.anonymous).map(\.name) where !name.isEmpty {
+            try? await deleteVolume(name, force: true)
+        }
     }
 
     public func pruneContainers(filters: [String: [String]] = [:]) async throws -> (deleted: [String], spaceReclaimed: Int64) {
@@ -670,6 +675,8 @@ extension EngineManager {
         }
         if container.autoRemove {
             await forgetContainer(id)
+            // Match `docker run --rm`: drop now-unreferenced anonymous volumes with the container.
+            await removeAnonymousMounts(container.mounts)
         } else {
             saveContainer(container)
         }

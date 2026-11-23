@@ -67,6 +67,15 @@ public enum FSInventory {
         current: [String: FSEntry],
         timestamps: Bool = true
     ) -> [EngineFSChange] {
+        diff(baseline: baseline, current: current, timestamps: timestamps) { _, _ in true }
+    }
+
+    static func diff(
+        baseline: [String: FSEntry],
+        current: [String: FSEntry],
+        timestamps: Bool,
+        equalFileContents: (String, Int64) throws -> Bool
+    ) rethrows -> [EngineFSChange] {
         var changes: [EngineFSChange] = []
         for path in Set(baseline.keys).union(current.keys).sorted() where path != "/" {
             switch (baseline[path], current[path]) {
@@ -76,6 +85,10 @@ public enum FSInventory {
                 changes.append(EngineFSChange(path: path, kind: .delete))
             case (let left?, let right?) where changed(left, right, timestamps: timestamps):
                 changes.append(EngineFSChange(path: path, kind: .modify))
+            case (let left?, .some) where left.kind == .file && left.size > 0:
+                if try !equalFileContents(path, left.size) {
+                    changes.append(EngineFSChange(path: path, kind: .modify))
+                }
             default:
                 break
             }
@@ -168,6 +181,26 @@ public enum FSInventory {
             entries[rel] = entry
         }
         return entries
+    }
+
+    /// Compare the extracted regular file against the immutable image, not the active VM disk.
+    static func equalFileContents(path: String, size: Int64, root: URL, image: EXT4.EXT4Reader) throws -> Bool {
+        let handle = try FileHandle(forReadingFrom: hostURL(root: root, path: path))
+        defer { try? handle.close() }
+        var offset: Int64 = 0
+        while offset < size {
+            let count = Int(min(1 << 20, size - offset))
+            guard let chunk = try handle.read(upToCount: count), !chunk.isEmpty else {
+                throw EngineError.exportFailed("incomplete snapshot file: \(path)")
+            }
+            let original = try image.readFile(at: FilePath(path), offset: UInt64(offset), count: chunk.count, followSymlinks: false)
+            guard original.count == chunk.count else {
+                throw EngineError.exportFailed("incomplete image file: \(path)")
+            }
+            if original != chunk { return false }
+            offset += Int64(chunk.count)
+        }
+        return true
     }
 
     public static func walkEXT4(_ url: URL) throws -> [String: FSEntry] {

@@ -162,6 +162,6 @@ These commands exist so `docker` aliased to `macker` does not report an unknown 
 
 `checkpoint` returns 501 `checkpoint is not supported on this runtime` after the container is resolved. A missing container is 404.
 
-`context` is stored under `~/.macker` (`~/.docker` when the binary is invoked as `docker`). `--host` / `-H`, `--context` / `-c`, and `--config` before the subcommand select the daemon. `MACKER_HOST` and `DOCKER_HOST` still override the current context. Only `unix://` endpoints are supported.
+`context` is stored under `~/.macker` (`~/.docker` when the binary is invoked as `docker`). `--host` / `-H`, `--context` / `-c`, and `--config` before the subcommand select the daemon. For daemon requests, an explicit `--context` overrides both `MACKER_HOST` and `DOCKER_HOST`. A missing context fails instead of falling back. Do not combine `--host` and `--context`. Without either flag, `MACKER_HOST`, then `DOCKER_HOST`, takes precedence over the current context. Only Unix sockets are supported.
 
 `manifest inspect` fetches the registry manifest through `GET /distribution/{name}/json`. Manifest lists (`create`, `annotate`, `push`, `rm`) are not implemented. `trust` commands are recognized; signing is not implemented. `trust inspect` still resolves the registry descriptor and reports no signatures. `system dial-stdio` proxies the selected UNIX socket over stdin and stdout.

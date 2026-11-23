@@ -1,5 +1,6 @@
 import Containerization
 import ContainerizationError
+import Darwin
 import Foundation
 
 /// Guest kernel + initfs locations used to boot a MicroVM.
@@ -18,7 +19,22 @@ public struct RuntimeStatus: Sendable {
 ///
 /// The daemon store (`~/Library/Application Support/io.macker.daemon`) is the
 /// runtime location. `.runtime` is only a packaging cache.
-enum RuntimeAssets {
+public enum RuntimeAssets {
+    /// Probe boot files without creating an image store or reading container state.
+    public static func inspectFiles(storePath: URL = DaemonPaths.storeDirectory) -> RuntimeStatus {
+        inspect(storePath: storePath, vminitPresent: false)
+    }
+
+    /// Standalone runtime setup must not open an image store owned by a running daemon.
+    public static func fetch(storePath: URL = DaemonPaths.storeDirectory, output: URL? = nil) async throws -> RuntimeStatus {
+        let lock = try DaemonInstanceLock.acquire(storeDirectory: storePath)
+        defer { lock.release() }
+        let store = try ImageStore(path: storePath)
+        let status = try await prepare(store: store)
+        if let output { try stage(status: status, to: output) }
+        return status
+    }
+
     static var vminitReference: String {
         let env = ProcessInfo.processInfo.environment["MACKER_VMINIT"]?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -205,11 +221,23 @@ enum RuntimeAssets {
         guard let initfs = status.initfsPath else {
             throw EngineError.runtimeUnavailable("initfs is not available to stage")
         }
+        let kernelSource = URL(fileURLWithPath: kernel)
+        let initfsSource = URL(fileURLWithPath: initfs)
+        let kernelDest = output.appendingPathComponent("vmlinux")
+        let initfsDest = output.appendingPathComponent("initfs.ext4")
+        // Fail both destinations before mutating either (e.g. directory at vmlinux).
+        try preflightReplaceFile(at: kernelDest, with: kernelSource)
+        try preflightReplaceFile(at: initfsDest, with: initfsSource)
+        let pin = RuntimePin.jsonURL
+        let pinDest = pin.map { _ in output.appendingPathComponent("RuntimePin.json") }
+        if let pin, let pinDest {
+            try preflightReplaceFile(at: pinDest, with: pin)
+        }
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
-        try replaceFile(at: output.appendingPathComponent("vmlinux"), with: URL(fileURLWithPath: kernel))
-        try replaceFile(at: output.appendingPathComponent("initfs.ext4"), with: URL(fileURLWithPath: initfs))
-        if let pin = RuntimePin.jsonURL {
-            try replaceFile(at: output.appendingPathComponent("RuntimePin.json"), with: pin)
+        try replaceFile(at: kernelDest, with: kernelSource)
+        try replaceFile(at: initfsDest, with: initfsSource)
+        if let pin, let pinDest {
+            try replaceFile(at: pinDest, with: pin)
         }
     }
 
@@ -259,10 +287,11 @@ enum RuntimeAssets {
         isRegularFile(url.resolvingSymlinksInPath())
     }
 
+    /// True only for a regular file inode (`S_IFREG`). FIFOs/sockets/devices are not.
     private static func isRegularFile(_ url: URL) -> Bool {
-        if isSymlink(url) { return false }
-        var isDir: ObjCBool = false
-        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) && !isDir.boolValue
+        var info = stat()
+        guard lstat(url.path, &info) == 0 else { return false }
+        return (info.st_mode & S_IFMT) == S_IFREG
     }
 
     private static func isSymlink(_ url: URL) -> Bool {
@@ -275,14 +304,62 @@ enum RuntimeAssets {
         }
     }
 
-    /// Copies the resolved regular file. `copyItem` of a symlink would recreate the broken link.
-    private static func replaceFile(at destination: URL, with source: URL) throws {
+    /// True when `url` is a directory inode (not a symlink). Never treat links as directories here.
+    private static func isRealDirectory(_ url: URL) -> Bool {
+        var info = stat()
+        guard lstat(url.path, &info) == 0 else { return false }
+        return (info.st_mode & S_IFMT) == S_IFDIR
+    }
+
+    /// Same file after resolving symlink parents / aliases (path or device+inode).
+    private static func sameResolvedFile(_ a: URL, _ b: URL) -> Bool {
+        let ra = a.resolvingSymlinksInPath().standardizedFileURL
+        let rb = b.resolvingSymlinksInPath().standardizedFileURL
+        if ra.path == rb.path { return true }
+        var sa = stat(), sb = stat()
+        guard stat(ra.path, &sa) == 0, stat(rb.path, &sb) == 0 else { return false }
+        return sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino
+    }
+
+    private static func preflightReplaceFile(at destination: URL, with source: URL) throws {
         let resolved = source.resolvingSymlinksInPath()
         guard isRegularFile(resolved) else {
             throw EngineError.runtimeUnavailable("refusing to install non-regular file \(source.path)")
         }
-        try removeIfPresent(destination)
-        try FileManager.default.copyItem(at: resolved, to: destination)
+        if isRealDirectory(destination) {
+            throw EngineError.runtimeUnavailable("refusing to replace directory at \(destination.path)")
+        }
+    }
+
+    /// Stages a regular-file copy, then atomically replaces the destination.
+    /// Same source/destination is a no-op. Never deletes an existing directory.
+    private static func replaceFile(at destination: URL, with source: URL) throws {
+        try preflightReplaceFile(at: destination, with: source)
+        let resolved = source.resolvingSymlinksInPath()
+        // Symlink-parent aliases of the same inode must not delete-then-copy.
+        if sameResolvedFile(resolved, destination) {
+            return
+        }
+
+        let parent = destination.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        let staging = parent.appendingPathComponent(".macker-stage-\(UUID().uuidString)")
+        do {
+            try FileManager.default.copyItem(at: resolved, to: staging)
+            guard isRegularFile(staging) else {
+                throw EngineError.runtimeUnavailable("install produced a non-regular file at \(staging.path)")
+            }
+            if isRealDirectory(destination) {
+                throw EngineError.runtimeUnavailable("refusing to replace directory at \(destination.path)")
+            }
+            // `rename` replaces a file or symlink atomically; directories were rejected above.
+            if rename(staging.path, destination.path) != 0 {
+                throw POSIXError(.init(rawValue: errno) ?? .EIO)
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: staging)
+            throw error
+        }
         guard isRegularFile(destination) else {
             throw EngineError.runtimeUnavailable("install produced a symlink at \(destination.path)")
         }

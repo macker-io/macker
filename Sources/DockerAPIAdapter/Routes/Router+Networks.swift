@@ -112,7 +112,7 @@ extension Router {
 
     func pruneNetworks(_ request: HTTPRequest) async -> HTTPResponse {
         do {
-            let result = try await engine.pruneNetworks(filters: Self.parseFilters(request.query["filters"]))
+            let result = try await engine.pruneNetworks(filters: Self.pruneFilters(request.query["filters"], allowed: ["until", "label", "label!"]))
             return Self.jsonOK(DockerNetworkPruneResponse(NetworksDeleted: result.deleted))
         } catch {
             return Self.engineError(error)

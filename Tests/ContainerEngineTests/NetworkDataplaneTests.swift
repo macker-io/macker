@@ -607,6 +607,42 @@ struct NetworkDataplaneTests {
         #expect(binding.containerPort == 80)
         #expect(binding.psDisplay == "[::1]:8080->80/tcp")
     }
+
+    @Test func sourceOwnershipPolicyHelpers() throws {
+        #expect(BridgeDataplane.allowsIPv4Source(ownerContainerID: "a", ingressContainerID: "a"))
+        #expect(!BridgeDataplane.allowsIPv4Source(ownerContainerID: "a", ingressContainerID: "b"))
+        #expect(!BridgeDataplane.allowsIPv4Source(ownerContainerID: nil, ingressContainerID: "a"))
+
+        let assigned = IPv6Key(try IPv6Address("fd00:29::2"))
+        let unspecified = IPv6Key(high: 0, low: 0)
+        let linkLocal = IPv6Key(try IPv6Address("fe80::1"))
+        let unassignedULA = IPv6Key(try IPv6Address("fd00:29::99"))
+
+        #expect(BridgeDataplane.allowsIPv6Source(
+            assigned, ownerContainerID: "a", ingressContainerID: "a", isControlSolicitation: false
+        ))
+        #expect(BridgeDataplane.allowsIPv6Source(
+            assigned, ownerContainerID: "a", ingressContainerID: "a", isControlSolicitation: true
+        ))
+        #expect(!BridgeDataplane.allowsIPv6Source(
+            assigned, ownerContainerID: "a", ingressContainerID: "b", isControlSolicitation: true
+        ))
+        #expect(BridgeDataplane.allowsIPv6Source(
+            unspecified, ownerContainerID: nil, ingressContainerID: "a", isControlSolicitation: true
+        ))
+        #expect(BridgeDataplane.allowsIPv6Source(
+            linkLocal, ownerContainerID: nil, ingressContainerID: "a", isControlSolicitation: true
+        ))
+        #expect(!BridgeDataplane.allowsIPv6Source(
+            unspecified, ownerContainerID: nil, ingressContainerID: "a", isControlSolicitation: false
+        ))
+        #expect(!BridgeDataplane.allowsIPv6Source(
+            linkLocal, ownerContainerID: nil, ingressContainerID: "a", isControlSolicitation: false
+        ))
+        #expect(!BridgeDataplane.allowsIPv6Source(
+            unassignedULA, ownerContainerID: nil, ingressContainerID: "a", isControlSolicitation: true
+        ))
+    }
 }
 
 private func icmpEcho(type: UInt8, src: IPv4Address, dst: IPv4Address) -> IPv4Packet {

@@ -76,7 +76,7 @@ extension Router {
 
     func pruneVolumes(_ request: HTTPRequest) async -> HTTPResponse {
         do {
-            var filters = Self.parseFilters(request.query["filters"])
+            var filters = try Self.pruneFilters(request.query["filters"], allowed: ["all", "label", "label!"])
             // Before API 1.42 prune removed named volumes too; 1.42 made that opt-in (`all`).
             if !request.apiVersion.atLeast("1.42"), filters["all"] == nil {
                 filters["all"] = ["true"]

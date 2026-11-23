@@ -26,6 +26,32 @@ struct PortPublisherTests {
         try await roundTrip(protocolName: "tcp")
     }
 
+    /// Client write-half close must reach upstream as EOF while the reverse relay stays up
+    /// so a response generated only after EOF still returns through the publisher.
+    @Test func tcpHalfCloseKeepsReverseRelayAlive() async throws {
+        let upstream = try LoopbackEOFResponder()
+        defer { upstream.close() }
+
+        let publisher = PortPublisher()
+        let key = "tcp-halfclose:0"
+        let hostPort = try await publisher.publish(
+            key: key,
+            hostIP: "127.0.0.1",
+            hostPort: 0,
+            containerIP: "127.0.0.1",
+            containerPort: upstream.port,
+            protocolName: "tcp"
+        )
+        defer { publisher.unpublish(keysMatching: key) }
+
+        let request = Data("half-close-request".utf8)
+        let reply = try LoopbackEOFResponder.exchangeAfterWriteShutdown(
+            port: hostPort,
+            payload: request
+        )
+        #expect(reply == Data("after-eof:\(String(decoding: request, as: UTF8.self))".utf8))
+    }
+
     private func roundTrip(protocolName: String) async throws {
         let echo = try LoopbackEcho(protocolName: protocolName)
         defer { echo.close() }
@@ -185,12 +211,132 @@ private final class LoopbackEcho: @unchecked Sendable {
         Darwin.close(client)
     }
 
-    private static func loopback(port: Int) -> sockaddr_in {
+    fileprivate static func loopback(port: Int) -> sockaddr_in {
         var addr = sockaddr_in()
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port = in_port_t(UInt16(port).bigEndian)
         addr.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
         return addr
+    }
+}
+
+/// Upstream that replies only after the peer half-closes writes (EOF). Exercises the
+/// publisher's TCP half-close path without a MicroVM or host service.
+private final class LoopbackEOFResponder: @unchecked Sendable {
+    let port: Int
+    private let source: DispatchSourceRead
+    private let queue = DispatchQueue(label: "io.macker.test.eof-responder")
+
+    init() throws {
+        let fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
+        guard fd >= 0 else { throw POSIXError(.EPROTONOSUPPORT) }
+        var reuse: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+
+        var addr = LoopbackEcho.loopback(port: 0)
+        let bound = withUnsafePointer(to: &addr) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bound == 0 else {
+            Darwin.close(fd)
+            throw POSIXError(.EADDRINUSE)
+        }
+        guard listen(fd, 1) == 0 else {
+            Darwin.close(fd)
+            throw POSIXError(.ECONNREFUSED)
+        }
+
+        var assigned = sockaddr_in()
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let named = withUnsafeMutablePointer(to: &assigned) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                getsockname(fd, $0, &len)
+            }
+        }
+        guard named == 0 else {
+            Darwin.close(fd)
+            throw POSIXError(.EINVAL)
+        }
+        port = Int(UInt16(bigEndian: assigned.sin_port))
+
+        let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
+        source.setEventHandler {
+            Self.acceptAndRespondAfterEOF(fd)
+        }
+        source.setCancelHandler {
+            Darwin.close(fd)
+        }
+        source.resume()
+        self.source = source
+    }
+
+    func close() {
+        source.cancel()
+    }
+
+    /// Send `payload`, shut down the write half, then read the response produced after EOF.
+    static func exchangeAfterWriteShutdown(port: Int, payload: Data) throws -> Data {
+        let fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
+        guard fd >= 0 else { throw POSIXError(.EPROTONOSUPPORT) }
+        defer { Darwin.close(fd) }
+
+        var timeout = timeval(tv_sec: 2, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+
+        var addr = LoopbackEcho.loopback(port: port)
+        let connected = withUnsafePointer(to: &addr) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard connected == 0 else { throw POSIXError(.ECONNREFUSED) }
+        guard payload.withUnsafeBytes({ send(fd, $0.baseAddress, payload.count, 0) }) == payload.count else {
+            throw POSIXError(.EIO)
+        }
+        guard shutdown(fd, SHUT_WR) == 0 else { throw POSIXError(.EIO) }
+
+        var buffer = [UInt8](repeating: 0, count: 2048)
+        var collected = Data()
+        while true {
+            let n = recv(fd, &buffer, buffer.count, 0)
+            if n > 0 {
+                collected.append(contentsOf: buffer.prefix(n))
+                continue
+            }
+            if n == 0 { break }
+            throw POSIXError(.ETIMEDOUT)
+        }
+        guard !collected.isEmpty else { throw POSIXError(.ETIMEDOUT) }
+        return collected
+    }
+
+    private static func acceptAndRespondAfterEOF(_ listenFd: Int32) {
+        var peer = sockaddr_in()
+        var peerLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let client = withUnsafeMutablePointer(to: &peer) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                accept(listenFd, $0, &peerLen)
+            }
+        }
+        guard client >= 0 else { return }
+        defer { Darwin.close(client) }
+
+        var buffer = [UInt8](repeating: 0, count: 2048)
+        var request = Data()
+        while true {
+            let n = recv(client, &buffer, buffer.count, 0)
+            if n > 0 {
+                request.append(contentsOf: buffer.prefix(n))
+                continue
+            }
+            // n == 0 is peer write-half close (EOF); negative is error.
+            guard n == 0 else { return }
+            break
+        }
+        let reply = Data("after-eof:\(String(decoding: request, as: UTF8.self))".utf8)
+        _ = reply.withUnsafeBytes { send(client, $0.baseAddress, reply.count, 0) }
     }
 }

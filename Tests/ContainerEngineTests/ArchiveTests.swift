@@ -71,6 +71,55 @@ struct ArchiveTests {
         }
     }
 
+    @Test func directoryCopyMergesWithoutRemovingLocalFiles() throws {
+        try TemporaryDirectory.with("macker-merge") { work in
+            let src = work.appendingPathComponent("src/tree")
+            let dest = work.appendingPathComponent("dest/tree")
+            for dir in [src, dest] {
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            }
+            try Data([1]).write(to: dest.appendingPathComponent("keep"))
+            try Data([2]).write(to: dest.appendingPathComponent("update"))
+            try Data([3]).write(to: src.appendingPathComponent("update"))
+            try ArchivePath.moveEntries([src], into: dest.deletingLastPathComponent())
+            #expect(try Data(contentsOf: dest.appendingPathComponent("keep")) == Data([1]))
+            #expect(try Data(contentsOf: dest.appendingPathComponent("update")) == Data([3]))
+        }
+    }
+
+    @Test func mergeDoesNotTraverseNestedDestinationSymlink() throws {
+        try TemporaryDirectory.with("macker-merge-link") { work in
+            let fm = FileManager.default
+            let src = work.appendingPathComponent("src/tree")
+            let dest = work.appendingPathComponent("dest")
+            let external = work.appendingPathComponent("external")
+            for dir in [src, dest, external] {
+                try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            }
+            try Data([1]).write(to: src.appendingPathComponent("item"))
+            try fm.createSymbolicLink(at: dest.appendingPathComponent("tree"), withDestinationURL: external)
+            #expect(throws: EngineError.self) {
+                try ArchivePath.moveEntries([src], into: dest)
+            }
+            #expect(try fm.contentsOfDirectory(atPath: external.path).isEmpty)
+        }
+    }
+
+    @Test func offlineCopyUsesCreationImageAfterRetag() async throws {
+        try await withEngine { engine in
+            try await RouterTestSupport.importTagged(engine, repo: "pinned", hello: "A")
+            let id = try await engine.createContainer(.init(image: "pinned")).id
+            try await RouterTestSupport.importTagged(engine, repo: "pinned", hello: "B")
+            let archive = try await engine.getArchive(id, path: "/hello.txt")
+            try TemporaryDirectory.with("macker-pinned") { work in
+                let tar = work.appendingPathComponent("out.tar")
+                try archive.tar.write(to: tar)
+                try TarArchive.extract(tar, to: work)
+                #expect(try String(contentsOf: work.appendingPathComponent("hello.txt"), encoding: .utf8) == "A")
+            }
+        }
+    }
+
     @Test func matchArchiveRoutes() {
         #expect(Router.matchNamedContainer(method: "GET", path: "/containers/abc/archive") == .archive("abc"))
         #expect(Router.matchNamedContainer(method: "HEAD", path: "/containers/abc/archive") == .archive("abc"))

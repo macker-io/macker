@@ -203,6 +203,40 @@ public struct Router: Sendable {
         throw EngineError.invalidArgument("invalid filters JSON")
     }
 
+    /// Validate each predicate before handing a destructive request to the engine.
+    static func pruneFilters(_ raw: String?, allowed: Set<String>) throws -> [String: [String]] {
+        let filters = try decodeFilters(raw)
+        for (key, values) in filters {
+            guard allowed.contains(key), !values.isEmpty, values.allSatisfy({ !$0.isEmpty }) else {
+                throw EngineError.invalidArgument("invalid prune filter: \(key)")
+            }
+            switch key {
+            case "until":
+                guard values.count == 1, let date = parseTimestamp(values[0]), date.timeIntervalSince1970.isFinite else {
+                    throw EngineError.invalidArgument("invalid until filter")
+                }
+            case "all", "dangling":
+                guard values.count == 1, ["false", "0", "true", "1"].contains(values[0]) else {
+                    throw EngineError.invalidArgument("invalid \(key) filter")
+                }
+            case "label", "label!":
+                guard !values.contains(where: { $0.hasPrefix("=") }) else {
+                    throw EngineError.invalidArgument("empty label key")
+                }
+            case "id":
+                for id in values {
+                    let hex = id.hasPrefix("sha256:") ? id.dropFirst(7) : id[...]
+                    guard (1...64).contains(hex.count), hex.allSatisfy({ $0.isASCII && $0.isHexDigit }) else {
+                        throw EngineError.invalidArgument("invalid build cache ID")
+                    }
+                }
+            default:
+                break
+            }
+        }
+        return filters
+    }
+
     /// Docker `--link name:alias` contributes the alias (or the whole value if there is no `:`).
     static func endpointAliases(_ config: DockerEndpointConfig?) -> [String] {
         var aliases = config?.Aliases ?? []

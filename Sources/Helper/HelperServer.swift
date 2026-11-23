@@ -3,11 +3,25 @@ import Foundation
 import HelperSupport
 
 enum HelperServer {
+    /// Hard cap on simultaneous client handlers (descriptor + thread budget).
+    static let maxConcurrentConnections = 8
+    /// Absolute monotonic budget to finish reading one request line.
+    static let requestReadTimeoutSeconds: TimeInterval = 5
+    /// Bounds `write` / `sendmsg` on the accepted client socket.
+    static let responseSendTimeoutSeconds: TimeInterval = 5
+
     static func run() throws -> Never {
         guard geteuid() == 0 else {
             throw HelperError.notRoot
         }
         let hostNet = HostNet()
+        let mutationLock = NSLock()
+        let admission = HelperConnectionAdmission(limit: maxConcurrentConnections)
+        let workQueue = DispatchQueue(
+            label: "io.macker.helper.connections",
+            qos: .userInitiated,
+            attributes: .concurrent
+        )
         let fd = try HelperChannel.bindListen(socketPath: HelperPaths.socketPath)
         log("listening on \(HelperPaths.socketPath)")
         while true {
@@ -15,24 +29,62 @@ enum HelperServer {
             if client < 0 {
                 continue
             }
-            handle(client, hostNet: hostNet)
-            Darwin.close(client)
+            guard admission.tryAcquire() else {
+                log("rejecting connection: at capacity (\(maxConcurrentConnections))")
+                Darwin.close(client)
+                continue
+            }
+            // Absolute budget starts at admission, before queue scheduling delay.
+            let readDeadline = HelperReadDeadline.after(requestReadTimeoutSeconds)
+            do {
+                try HelperChannel.setSendTimeout(client, seconds: responseSendTimeoutSeconds)
+            } catch {
+                log(error.localizedDescription)
+                Darwin.close(client)
+                admission.release()
+                continue
+            }
+            workQueue.async {
+                defer {
+                    Darwin.close(client)
+                    admission.release()
+                }
+                handle(
+                    client,
+                    hostNet: hostNet,
+                    mutationLock: mutationLock,
+                    readDeadline: readDeadline
+                )
+            }
         }
     }
 
-    private static func handle(_ fd: Int32, hostNet: HostNet) {
+    private static func handle(
+        _ fd: Int32,
+        hostNet: HostNet,
+        mutationLock: NSLock,
+        readDeadline: HelperReadDeadline
+    ) {
         var pendingFD: Int32 = -1
         defer {
             if pendingFD >= 0 { Darwin.close(pendingFD) }
         }
         let response: HelperResponse
         do {
-            let data = try HelperChannel.readLine(fd)
+            let data = try HelperChannel.readLine(fd, deadline: readDeadline)
             let command = try JSONDecoder().decode(HelperRequest.self, from: data).validated()
             if command != .ping {
                 try authorize(uid: HelperChannel.peerUID(fd))
             }
-            let attached = try hostNet.apply(command)
+            let attached: (fd: Int32, name: String)?
+            if command == .ping {
+                attached = try hostNet.apply(command)
+            } else {
+                // Serialize privileged network mutations; reads/admission stay concurrent.
+                mutationLock.lock()
+                defer { mutationLock.unlock() }
+                attached = try hostNet.apply(command)
+            }
             if command != .ping {
                 log("\(describe(command)) iface=\(attached?.name ?? interface(of: command) ?? "-")")
             }

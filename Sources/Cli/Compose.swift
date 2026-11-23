@@ -24,17 +24,12 @@ struct Compose: ParsableCommand {
         }
 
         // Do not let the official client's ambient Docker context redirect this command.
-        let endpoint: String
-        if let host = DockerGlobalFlags.host {
-            endpoint = try DockerGlobalFlags.unixSocket(host)
-        } else if let context = DockerGlobalFlags.context {
-            endpoint = try DockerGlobalFlags.unixSocket(ContextStore.load(context).host)
-        } else {
-            var env = ProcessInfo.processInfo.environment
+        var env = ProcessInfo.processInfo.environment
+        if DockerGlobalFlags.context == nil {
             env.removeValue(forKey: "DOCKER_CONTEXT")
             env.removeValue(forKey: "DOCKER_CONFIG")
-            endpoint = try DockerGlobalFlags.socketPath(environment: env)
         }
+        let endpoint = try DockerGlobalFlags.socketPath(environment: env)
 
         // Compose discovers Buildx through DOCKER_CONFIG/cli-plugins, not PATH.
         // Keep its writable state separate from both the installation and ~/.docker.

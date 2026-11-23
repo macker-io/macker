@@ -172,24 +172,9 @@ extension Router {
 
     func pruneImages(_ request: HTTPRequest) async -> HTTPResponse {
         do {
-            let filters = try Self.decodeFilters(request.query["filters"])
-            for (key, values) in filters {
-                guard ["dangling", "until", "label", "label!"].contains(key),
-                      !values.isEmpty, values.allSatisfy({ !$0.isEmpty })
-                else { throw EngineError.invalidArgument("invalid image prune filter: \(key)") }
-            }
-            let labelSpecs = (filters["label"] ?? []) + (filters["label!"] ?? [])
-            guard !labelSpecs.contains(where: { $0.hasPrefix("=") }) else {
-                throw EngineError.invalidArgument("empty label key")
-            }
+            let filters = try Self.pruneFilters(request.query["filters"], allowed: ["dangling", "until", "label", "label!"])
             let flags = filters["dangling"] ?? ["true"]
-            guard flags.count == 1, ["false", "0", "true", "1"].contains(flags[0]) else {
-                throw EngineError.invalidArgument("invalid dangling filter")
-            }
             let until = filters["until"]?.first.flatMap(Self.parseTimestamp)
-            if let values = filters["until"], values.count != 1 || until == nil {
-                throw EngineError.invalidArgument("invalid until filter")
-            }
             let result = try await engine.pruneImages(
                 danglingOnly: flags[0] == "true" || flags[0] == "1", until: until,
                 labels: filters["label"] ?? [], excludedLabels: filters["label!"] ?? []

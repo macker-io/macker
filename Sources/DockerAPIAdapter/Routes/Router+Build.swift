@@ -27,7 +27,7 @@ extension Router {
         do {
             let result = try await engine.pruneBuildCache(
                 all: Self.queryFlag(request.query["all"]),
-                filters: Self.parseFilters(request.query["filters"])
+                filters: Self.pruneFilters(request.query["filters"], allowed: ["id", "until"])
             )
             return Self.jsonOK(DockerBuildPruneResponse(result))
         } catch {

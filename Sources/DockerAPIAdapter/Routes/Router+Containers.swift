@@ -279,7 +279,7 @@ extension Router {
 
     func pruneContainers(_ request: HTTPRequest) async -> HTTPResponse {
         do {
-            let result = try await engine.pruneContainers(filters: Self.parseFilters(request.query["filters"]))
+            let result = try await engine.pruneContainers(filters: Self.pruneFilters(request.query["filters"], allowed: ["until", "label", "label!"]))
             return HTTPResponse(
                 status: 200,
                 headers: [("Content-Type", "application/json")],

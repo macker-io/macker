@@ -82,8 +82,12 @@ fi
 uid="$(id -u)"
 gui="gui/${uid}"
 
-stop_service() {
+bootout_service() {
   launchctl bootout "$gui/${LABEL}" >/dev/null 2>&1 || true
+}
+
+stop_service() {
+  bootout_service
   rm -f "$PLIST"
 }
 
@@ -129,7 +133,10 @@ check_prefix() {
 uninstall() {
   check_prefix
   PREFIX_ABS="$(CDPATH= cd -- "$PREFIX" && pwd)"
-  if [ -f "$PLIST" ] && [ "$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$PLIST" 2>/dev/null || true)" = "$PREFIX_ABS/libexec/macker/mackerd" ]; then
+  # --no-service / MACKER_NO_SERVICE: leave LaunchAgent alone even if it matches.
+  if [ "$NO_SERVICE" != "1" ] &&
+     [ -f "$PLIST" ] &&
+     [ "$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$PLIST" 2>/dev/null || true)" = "$PREFIX_ABS/libexec/macker/mackerd" ]; then
     stop_service
   fi
   rm -f "$PREFIX/bin/macker" "$PREFIX/bin/mackerd"
@@ -148,6 +155,14 @@ if [ "$macos_major" -lt 26 ]; then
   echo "warning: bridge/host networking needs macOS 26+ (found $(sw_vers -productVersion))" >&2
 fi
 
+require_python3() {
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "python3 is required to install Macker" >&2
+    exit 1
+  fi
+}
+
+# latest_version + LaunchAgent serialization use python3 (plistlib) — only when invoked.
 latest_version() {
   python3 - "$REPO" <<'PY'
 import json, sys, urllib.request
@@ -173,6 +188,7 @@ PY
 }
 
 if [ -z "$VERSION" ]; then
+  require_python3
   VERSION="$(latest_version)"
 fi
 VERSION="${VERSION#v}"
@@ -202,44 +218,85 @@ mv "$stage/LICENSE" "$stage/share/macker/LICENSE"
 touch "$stage/share/macker/.cli-install"
 xattr -dr com.apple.quarantine "$stage" 2>/dev/null || true
 mkdir -p "$PREFIX/bin" "$PREFIX/libexec" "$PREFIX/share"
-rm -rf "$PREFIX/libexec/macker" "$PREFIX/share/macker"
-for path in libexec/macker share/macker bin/macker bin/mackerd; do
-  mv -f "$stage/$path" "$PREFIX/$path"
-done
-chmod 755 "$PREFIX/bin/macker" "$PREFIX/bin/mackerd"
-chmod 755 "$PREFIX/libexec/macker/macker" "$PREFIX/libexec/macker/mackerd"
-if [ -x "$PREFIX/libexec/macker/macker-helper" ]; then
-  chmod 755 "$PREFIX/libexec/macker/macker-helper"
-fi
-
 PREFIX_ABS="$(CDPATH= cd -- "$PREFIX" && pwd)"
 
+# Serialize with plistlib so PREFIX_ABS XML metacharacters (& < > " ') stay well-formed.
 write_plist() {
-  mkdir -p "$HOME/Library/LaunchAgents"
-  cat >"$PLIST" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>Label</key>
-	<string>${LABEL}</string>
-	<key>ProgramArguments</key>
-	<array>
-		<string>${PREFIX_ABS}/libexec/macker/mackerd</string>
-	</array>
-	<key>RunAtLoad</key>
-	<true/>
-	<key>KeepAlive</key>
-	<true/>
-</dict>
-</plist>
-EOF
+  dest="$1"
+  program="${PREFIX_ABS}/libexec/macker/mackerd"
+  python3 - "$dest" "$LABEL" "$program" <<'PY'
+import plistlib
+import sys
+
+dest, label, program = sys.argv[1:]
+payload = {
+    "Label": label,
+    "ProgramArguments": [program],
+    "RunAtLoad": True,
+    "KeepAlive": True,
+}
+with open(dest, "wb") as fh:
+    plistlib.dump(payload, fh, fmt=plistlib.FMT_XML)
+PY
 }
 
+restore_service_plist() {
+  backup="$1"
+  if [ -n "$backup" ] && [ -f "$backup" ]; then
+    if ! mv -f "$backup" "$PLIST"; then
+      echo "failed to restore prior LaunchAgent plist (backup left at $backup)" >&2
+      return 1
+    fi
+    if ! launchctl bootstrap "$gui" "$PLIST"; then
+      echo "restored LaunchAgent plist but failed to load prior ${LABEL}" >&2
+      return 1
+    fi
+    launchctl enable "$gui/${LABEL}" 2>/dev/null || true
+    launchctl kickstart -k "$gui/${LABEL}" 2>/dev/null || true
+    return 0
+  fi
+  rm -f "$PLIST"
+  return 1
+}
+
+# Install an already-prepared+linted staged plist. Does not write or lint.
 start_service() {
-  stop_service
-  write_plist
-  launchctl bootstrap "$gui" "$PLIST"
+  staged="$1"
+  mkdir -p "$HOME/Library/LaunchAgents"
+  backup=""
+  if [ -f "$PLIST" ]; then
+    # Backup stays outside WORKDIR so EXIT trap cannot lose the sole copy.
+    backup="$(mktemp "${TMPDIR:-/tmp}/macker-plist-bak.XXXXXX")"
+    if ! cp "$PLIST" "$backup"; then
+      echo "failed to backup LaunchAgent plist" >&2
+      return 1
+    fi
+  fi
+  bootout_service
+  if ! mv -f "$staged" "$PLIST"; then
+    rm -f "$staged"
+    if [ -n "$backup" ] && [ -f "$backup" ]; then
+      if ! restore_service_plist "$backup"; then
+        echo "failed to install LaunchAgent plist" >&2
+        return 1
+      fi
+    fi
+    echo "failed to install LaunchAgent plist" >&2
+    return 1
+  fi
+  if ! launchctl bootstrap "$gui" "$PLIST"; then
+    if [ -n "$backup" ] && [ -f "$backup" ]; then
+      if ! restore_service_plist "$backup"; then
+        echo "failed to load LaunchAgent ${LABEL}" >&2
+        return 1
+      fi
+    else
+      rm -f "$PLIST"
+    fi
+    echo "failed to load LaunchAgent ${LABEL}" >&2
+    return 1
+  fi
+  rm -f "$backup"
   launchctl enable "$gui/${LABEL}" 2>/dev/null || true
   launchctl kickstart -k "$gui/${LABEL}" 2>/dev/null || true
 }
@@ -270,8 +327,38 @@ ensure_path() {
   echo "added ${bin} to PATH in $rc (open a new terminal)"
 }
 
+# Prepare + lint LaunchAgent BEFORE live rm/mv so a bad plist cannot replace
+# a working daemon payload. Staged file lives under WORKDIR (EXIT trap).
+STAGED_PLIST=""
 if [ "$NO_SERVICE" != "1" ]; then
-  start_service
+  require_python3
+  STAGED_PLIST="$WORKDIR/LaunchAgent.plist.staged"
+  rm -f "$STAGED_PLIST"
+  if ! write_plist "$STAGED_PLIST"; then
+    rm -f "$STAGED_PLIST"
+    echo "failed to write LaunchAgent plist" >&2
+    exit 1
+  fi
+  if ! plutil -lint "$STAGED_PLIST" >/dev/null; then
+    rm -f "$STAGED_PLIST"
+    echo "invalid LaunchAgent plist for prefix: $PREFIX_ABS" >&2
+    exit 1
+  fi
+fi
+
+# Live payload swap — only after plist prepare/lint succeeded (or --no-service).
+rm -rf "$PREFIX/libexec/macker" "$PREFIX/share/macker"
+for path in libexec/macker share/macker bin/macker bin/mackerd; do
+  mv -f "$stage/$path" "$PREFIX/$path"
+done
+chmod 755 "$PREFIX/bin/macker" "$PREFIX/bin/mackerd"
+chmod 755 "$PREFIX/libexec/macker/macker" "$PREFIX/libexec/macker/mackerd"
+if [ -x "$PREFIX/libexec/macker/macker-helper" ]; then
+  chmod 755 "$PREFIX/libexec/macker/macker-helper"
+fi
+
+if [ "$NO_SERVICE" != "1" ]; then
+  start_service "$STAGED_PLIST"
   echo "LaunchAgent ${LABEL} loaded"
 else
   echo "start the daemon: ${PREFIX_ABS}/bin/mackerd"

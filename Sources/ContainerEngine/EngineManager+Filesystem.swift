@@ -75,14 +75,19 @@ extension EngineManager {
         container.mounts.map(\.destination).filter { !$0.isEmpty && $0 != "/" }
     }
 
-    func loadBaseline(_ container: EngineContainer) async throws -> [String: FSEntry] {
+    private func savedBaseline(_ container: EngineContainer) -> [String: FSEntry]? {
         let url = baselineURL(container.id)
         if let data = try? Data(contentsOf: url),
             let entries = try? JSONDecoder().decode([String: FSEntry].self, from: data)
         {
             return entries
         }
-        return try await unpackImageBaseline(container)
+        return nil
+    }
+
+    private func loadBaseline(_ container: EngineContainer) async throws -> [String: FSEntry] {
+        if let entries = savedBaseline(container) { return entries }
+        return try await withImageDisk(container) { try FSInventory.walkEXT4($0) }
     }
 
     func withExtractedRootfs<T>(_ container: EngineContainer, _ body: (URL) async throws -> T) async throws -> T {
@@ -110,20 +115,33 @@ extension EngineManager {
 
     /// A live rootfs can only be read through the guest's tar, which carries no
     /// timestamps, so mtimes stay out of the comparison.
-    private func extractedChanges(_ container: EngineContainer, root: URL) async throws -> [EngineFSChange] {
-        FSInventory.diff(
-            baseline: try await loadBaseline(container),
-            current: FSInventory.walkDirectory(root, excluding: mountDestinations(container)),
-            timestamps: false
-        )
+    func extractedChanges(_ container: EngineContainer, root: URL) async throws -> [EngineFSChange] {
+        let mounts = mountDestinations(container)
+        let saved = savedBaseline(container)
+        return try await withImageDisk(container) { disk in
+            let baseline = try saved ?? FSInventory.walkEXT4(disk)
+            let image = try EXT4.EXT4Reader(blockDevice: FilePath(disk.path))
+            func visible(_ path: String) -> Bool {
+                !mounts.contains(path) && !FSInventory.isExcluded(path, mounts: mounts)
+            }
+            return try FSInventory.diff(
+                baseline: baseline.filter { visible($0.key) },
+                current: FSInventory.walkDirectory(root, excluding: mounts).filter { visible($0.key) },
+                timestamps: false
+            ) { path, size in
+                try FSInventory.equalFileContents(path: path, size: size, root: root, image: image)
+            }
+        }
     }
 
-    private func unpackImageBaseline(_ container: EngineContainer) async throws -> [String: FSEntry] {
+    private func withImageDisk<T>(_ container: EngineContainer, _ body: (URL) throws -> T) async throws -> T {
         let image = try await resolveContainerImage(container)
+        let cached = unpackedCacheDirectory(digest: image.digest).appendingPathComponent("rootfs.ext4")
+        if FileManager.default.fileExists(atPath: cached.path) { return try body(cached) }
         return try await withScratch("macker-image-baseline") { work in
             let dest = work.appendingPathComponent("rootfs.ext4")
             _ = try await EXT4Unpacker(capacityInBytes: Self.defaultRootfsBytes).unpack(image, for: .current, at: dest)
-            return try FSInventory.walkEXT4(dest)
+            return try body(dest)
         }
     }
 

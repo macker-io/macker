@@ -245,8 +245,8 @@ enum DaemonAPI {
     static func filtersJSON(_ filters: [String]) throws -> String {
         var map: [String: [String]] = [:]
         for raw in filters {
-            let parts = raw.split(separator: "=", maxSplits: 1)
-            guard parts.count == 2, !parts[0].isEmpty else {
+            let parts = raw.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty else {
                 throw CLIError.io("invalid filter \"\(raw)\"")
             }
             map[String(parts[0]), default: []].append(String(parts[1]))

@@ -181,11 +181,37 @@ public enum ArchivePath {
     }
 
     public static func replaceItem(at dest: URL, with source: URL) throws {
-        try FileManager.default.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if FileManager.default.fileExists(atPath: dest.path) {
-            try FileManager.default.removeItem(at: dest)
+        let fm = FileManager.default
+        let parent = dest.deletingLastPathComponent()
+        try fm.createDirectory(at: parent, withIntermediateDirectories: true)
+        var existing = stat()
+        guard lstat(dest.path, &existing) == 0 else {
+            guard errno == ENOENT else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
+            try fm.moveItem(at: source, to: dest)
+            return
         }
-        try FileManager.default.moveItem(at: source, to: dest)
+
+        let sourceType = try fm.attributesOfItem(atPath: source.path)[.type] as? FileAttributeType
+        let destIsDirectory = existing.st_mode & S_IFMT == S_IFDIR
+        if destIsDirectory || sourceType == .typeDirectory {
+            guard destIsDirectory && sourceType == .typeDirectory else {
+                throw EngineError.invalidArgument("cannot overwrite a directory with a non-directory or vice versa: \(dest.path)")
+            }
+            try moveEntries(entries(in: source), into: dest)
+            return
+        }
+
+        // Replace leaves atomically, including dangling links. Never unlink the old
+        // file before a cross-volume copy has finished.
+        if rename(source.path, dest.path) != 0 {
+            guard errno == EXDEV else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
+            let staging = parent.appendingPathComponent(".macker-cp-\(UUID().uuidString)")
+            try fm.createDirectory(at: staging, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            defer { try? fm.removeItem(at: staging) }
+            let local = staging.appendingPathComponent("item")
+            try fm.moveItem(at: source, to: local)
+            guard rename(local.path, dest.path) == 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
+        }
     }
 
     public static func moveEntries(_ items: [URL], into directory: URL) throws {

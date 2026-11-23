@@ -166,6 +166,106 @@ struct ImageOptionsTests {
         }
     }
 
+    @Test func digestPrefixHelpersPreferUniquePrefixAndRejectSuffix() throws {
+        let first = "sha256:deadbeef" + String(repeating: "0", count: 56)
+        let second = "sha256:cafebabe" + String(repeating: "1", count: 56)
+        let shared = "sha256:abcd" + String(repeating: "0", count: 60)
+        let sibling = "sha256:abce" + String(repeating: "1", count: 60)
+        let suffix = String(EngineManager.digestHex(first).suffix(12))
+
+        #expect(try EngineManager.resolveDigestPrefix("deadbeef", in: [first, second, first]) == first)
+        #expect(try EngineManager.resolveDigestPrefix(EngineManager.digestHex(first), in: [first]) == first)
+        #expect(suffix == String(repeating: "0", count: 12))
+        #expect(try EngineManager.resolveDigestPrefix(suffix, in: [first, second]) == nil)
+        #expect(throws: EngineError.self) {
+            _ = try EngineManager.resolveDigestPrefix("abc", in: [shared, sibling])
+        }
+        #expect(EngineManager.digestIDPrefix("alpine") == nil)
+        #expect(EngineManager.digestIDPrefix("sha256:deadbeef") == "deadbeef")
+    }
+
+    @Test func sha256RepositoryTagIsNotTreatedAsDigestID() async throws {
+        try await withEngine { engine in
+            try await TemporaryDirectory.with("macker-sha256-tag") { work in
+                let digest = try await collectDigest(
+                    await engine.importImage(
+                        spec: EngineImportSpec(source: "-", repo: "sha256", tag: "stable"),
+                        archive: try pack(hello: "named\n", in: work)
+                    )
+                )
+                try await engine.tagImage(name: "sha256:stable", repo: "sha256", tag: "also")
+                #expect(try await !engine.resolveImageLookup("sha256:stable").byID)
+                let untagged = try await engine.deleteImage(name: "sha256:stable")
+                #expect(untagged.count == 1)
+                #expect(untagged[0].untagged != nil)
+                #expect(untagged[0].deleted == nil)
+                #expect(try await engine.inspectImage(name: "sha256:also").id == digest)
+            }
+        }
+    }
+
+    @Test func exactSha256HexRepositoryTagClassifiesByActualDigestMatch() async throws {
+        try await withEngine { engine in
+            try await TemporaryDirectory.with("macker-sha256-hex-tag") { work in
+                let digest = try await collectDigest(
+                    await engine.importImage(
+                        spec: EngineImportSpec(source: "-", repo: "sha256", tag: "seed"),
+                        archive: try pack(hello: "hex-tag\n", in: work)
+                    )
+                )
+                let fakeHex = "aaaaaaaa" + String(repeating: "b", count: 56)
+                #expect(fakeHex.count == 64)
+                #expect(EngineManager.digestHex(digest) != fakeHex)
+                #expect(EngineManager.isDigestReference("sha256:\(fakeHex)"))
+
+                try await engine.tagImage(name: "sha256:seed", repo: "sha256", tag: fakeHex)
+                let named = "sha256:\(fakeHex)"
+                let lookup = try await engine.resolveImageLookup(named)
+                #expect(lookup.image.digest == digest)
+                #expect(!lookup.byID)
+
+                // Full digest and short ID keep byID / multi-tag protection.
+                #expect(try await engine.resolveImageLookup(digest).byID)
+                let short = String(EngineManager.digestHex(digest).prefix(12))
+                #expect(try await engine.resolveImageLookup(short).byID)
+
+                try await engine.tagImage(name: named, repo: "sha256", tag: "keep")
+                let untagged = try await engine.deleteImage(name: named)
+                #expect(untagged.count == 1)
+                #expect(untagged[0].untagged != nil)
+                #expect(untagged[0].deleted == nil)
+                #expect(try await engine.inspectImage(name: "sha256:keep").id == digest)
+
+                await #expect(throws: EngineError.self) {
+                    _ = try await engine.deleteImage(name: short)
+                }
+            }
+        }
+    }
+
+    @Test func shortImageIDRoundTripsAndProtectsMultiTagDelete() async throws {
+        try await withEngine { engine in
+            try await TemporaryDirectory.with("macker-short-id") { work in
+                let digest = try await collectDigest(
+                    await engine.importImage(
+                        spec: EngineImportSpec(source: "-", repo: "short", tag: "v1"),
+                        archive: try pack(hello: "short-id\n", in: work)
+                    )
+                )
+                try await engine.tagImage(name: "short:v1", repo: "short", tag: "v2")
+                let short = String(EngineManager.digestHex(digest).prefix(12))
+                #expect(try await engine.inspectImage(name: short).id == digest)
+                #expect(try await engine.resolveImageLookup(short).byID)
+
+                await #expect(throws: EngineError.self) {
+                    _ = try await engine.deleteImage(name: short)
+                }
+                let removed = try await engine.deleteImage(name: short, force: true)
+                #expect(removed.contains { $0.deleted == digest })
+            }
+        }
+    }
+
     @Test func sameRepositoryMatchesHubAliases() {
         #expect(EngineManager.sameRepository("alpine", "docker.io/library/alpine"))
         #expect(EngineManager.sameRepository("alpine:3.19", "docker.io/library/alpine:latest"))

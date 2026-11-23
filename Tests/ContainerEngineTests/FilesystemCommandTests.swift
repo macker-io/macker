@@ -22,6 +22,23 @@ struct FilesystemCommandTests {
         ])
     }
 
+    @Test func liveDiffChecksBytesBeyondFirstChunkWithoutRelyingOnMtime() async throws {
+        try await withEngine { engine in
+            let prefix = String(repeating: "a", count: 1 << 20)
+            try await RouterTestSupport.importTagged(engine, repo: "live-diff", hello: prefix + "A")
+            let id = try await engine.createContainer(.init(image: "live-diff")).id
+            let container = try await engine.inspectContainer(id).container
+            try await TemporaryDirectory.with("macker-live-diff") { root in
+                let file = root.appendingPathComponent("hello.txt")
+                try (prefix + "A").write(to: file, atomically: true, encoding: .utf8)
+                try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: file.path)
+                #expect(try await engine.extractedChanges(container, root: root).isEmpty)
+                try (prefix + "B").write(to: file, atomically: false, encoding: .utf8)
+                #expect(try await engine.extractedChanges(container, root: root) == [.init(path: "/hello.txt", kind: .modify)])
+            }
+        }
+    }
+
     @Test func directoryMtimeDoesNotCountAsModify() {
         let baseline = ["/var": FSEntry(kind: .directory, size: 0, mode: 0o755, mtime: 1)]
         let current = ["/var": FSEntry(kind: .directory, size: 0, mode: 0o755, mtime: 50)]
@@ -173,9 +190,12 @@ struct FilesystemCommandTests {
     }
 
     @Test func digestReferencesAreHiddenFromRepoTags() {
-        #expect(EngineManager.isDigestReference("sha256:abc"))
+        let digest = "sha256:" + String(repeating: "a", count: 64)
+        #expect(EngineManager.isDigestReference(digest))
+        #expect(!EngineManager.isDigestReference("sha256:stable"))
         #expect(!EngineManager.isDigestReference("docker.io/library/alpine:latest"))
-        #expect(EngineManager.uniqueDisplayTags(["sha256:abc", "alpine:latest"]) == ["alpine:latest"])
-        #expect(EngineManager.uniqueDisplayTags(["sha256:abc"]).isEmpty)
+        #expect(EngineManager.uniqueDisplayTags([digest, "alpine:latest"]) == ["alpine:latest"])
+        #expect(EngineManager.uniqueDisplayTags([digest]).isEmpty)
+        #expect(EngineManager.uniqueDisplayTags(["sha256:stable"]) == ["sha256:stable"])
     }
 }

@@ -62,12 +62,8 @@ struct Doctor: ParsableCommand {
 
     private func engineChecks() -> [CheckResult] {
         do {
-            let (report, runtime) = try RunSync.call {
-                let engine = try EngineManager()
-                let report = try await engine.checkEnvironment()
-                let runtime = await engine.runtimeStatus()
-                return (report, runtime)
-            }
+            let report = try EngineManager.checkHostEnvironment()
+            let runtime = RuntimeAssets.inspectFiles()
             var checks = [
                 CheckResult(
                     status: report.isVirtualizationSupported ? .ok : .fail,
@@ -82,10 +78,8 @@ struct Doctor: ParsableCommand {
             }
             if let initfs = runtime.initfsPath {
                 checks.append(CheckResult(status: .ok, title: "initfs", detail: initfs))
-            } else if runtime.vminitPresent {
-                checks.append(CheckResult(status: .ok, title: "initfs", detail: runtime.vminitReference))
             } else {
-                checks.append(CheckResult(status: .warn, title: "initfs / vminit", detail: "missing — first start pulls \(runtime.vminitReference)"))
+                checks.append(CheckResult(status: .warn, title: "initfs", detail: "not unpacked — first start prepares \(runtime.vminitReference)"))
             }
             return checks
         } catch {

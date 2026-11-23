@@ -1,6 +1,36 @@
 import Darwin
 import Foundation
 
+/// Absolute monotonic deadline for a helper request read (not an inactivity/idle timer).
+/// Built from `DispatchTime`, which is mach continuous time on Apple platforms.
+public struct HelperReadDeadline: Sendable {
+    public let deadline: DispatchTime
+
+    public init(deadline: DispatchTime) {
+        self.deadline = deadline
+    }
+
+    public static func after(_ seconds: TimeInterval) -> HelperReadDeadline {
+        let millis = max(1, Int((seconds * 1_000).rounded(.up)))
+        return HelperReadDeadline(deadline: DispatchTime.now() + .milliseconds(millis))
+    }
+
+    public var isExpired: Bool {
+        DispatchTime.now() >= deadline
+    }
+
+    /// Remaining wait budget in milliseconds; `0` when expired.
+    public var remainingMilliseconds: Int32 {
+        let now = DispatchTime.now()
+        if now >= deadline { return 0 }
+        let nanos = deadline.uptimeNanoseconds &- now.uptimeNanoseconds
+        let millis = nanos / 1_000_000
+        if millis == 0 { return 1 }
+        if millis > UInt64(Int32.max) { return Int32.max }
+        return Int32(millis)
+    }
+}
+
 public enum HelperChannel {
     public static func connect(socketPath: String, timeoutSeconds: Int) throws -> Int32 {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -78,22 +108,86 @@ public enum HelperChannel {
     }
 
     public static func readLine(_ fd: Int32, limit: Int = 65_536) throws -> Data {
+        try readLine(fd, limit: limit, deadline: nil)
+    }
+
+    /// Reads one newline-terminated line, optionally bound by an absolute monotonic deadline.
+    /// When `deadline` is set, each wait uses the remaining time until that fixed deadline
+    /// (trickled bytes do not extend the budget).
+    public static func readLine(
+        _ fd: Int32,
+        limit: Int = 65_536,
+        deadline: HelperReadDeadline?
+    ) throws -> Data {
         var data = Data()
         var byte: UInt8 = 0
         while data.count < limit {
+            if let deadline {
+                let remaining = deadline.remainingMilliseconds
+                if remaining <= 0 {
+                    throw HelperError.unavailable("helper request read timed out")
+                }
+                var pollFD = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+                let ready = poll(&pollFD, 1, remaining)
+                if ready == 0 {
+                    throw HelperError.unavailable("helper request read timed out")
+                }
+                if ready < 0 {
+                    if errno == EINTR { continue }
+                    throw HelperError.unavailable("helper socket read failed")
+                }
+                if (pollFD.revents & Int16(POLLIN)) == 0 {
+                    if (pollFD.revents & Int16(POLLERR | POLLHUP | POLLNVAL)) != 0 {
+                        throw HelperError.unavailable("helper closed the connection")
+                    }
+                    if deadline.isExpired {
+                        throw HelperError.unavailable("helper request read timed out")
+                    }
+                    continue
+                }
+            }
             let n = Darwin.read(fd, &byte, 1)
             if n == 0 {
                 throw HelperError.unavailable("helper closed the connection")
             }
             if n < 0 {
+                if errno == EINTR { continue }
+                if let deadline, deadline.isExpired, errno == EAGAIN || errno == EWOULDBLOCK {
+                    throw HelperError.unavailable("helper request read timed out")
+                }
                 throw HelperError.unavailable("helper socket read failed")
             }
             if byte == 0x0A {
+                // Recheck absolute deadline after the successful read so a
+                // last-byte race cannot report success past the budget.
+                if let deadline, deadline.isExpired {
+                    throw HelperError.unavailable("helper request read timed out")
+                }
                 return data
             }
             data.append(byte)
         }
         throw HelperError.invalidRequest("helper request too large")
+    }
+
+    /// Bounds blocking writes / `sendmsg` on an accepted helper client socket.
+    /// Setup must succeed; a missing send timeout leaves response paths unbounded.
+    public static func setSendTimeout(_ fd: Int32, seconds: TimeInterval) throws {
+        let millis = max(1, Int((seconds * 1_000).rounded(.up)))
+        var timeout = timeval(
+            tv_sec: millis / 1_000,
+            tv_usec: Int32((millis % 1_000) * 1_000)
+        )
+        let rc = setsockopt(
+            fd,
+            SOL_SOCKET,
+            SO_SNDTIMEO,
+            &timeout,
+            socklen_t(MemoryLayout<timeval>.size)
+        )
+        guard rc == 0 else {
+            throw HelperError.unavailable("failed to set helper socket send timeout")
+        }
     }
 
     public static func peerUID(_ fd: Int32) -> uid_t? {

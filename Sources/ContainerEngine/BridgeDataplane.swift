@@ -174,14 +174,41 @@ final class BridgeDataplane: @unchecked Sendable {
         link?.send(ethernet)
     }
 
+    /// IPv4 data requires an assigned source peer owned by the ingress container.
+    static func allowsIPv4Source(ownerContainerID: String?, ingressContainerID: String) -> Bool {
+        ownerContainerID == ingressContainerID
+    }
+
+    /// IPv6 data requires ingress ownership when the source is assigned.
+    /// NS/RS may also use unassigned unspecified or link-local control sources.
+    static func allowsIPv6Source(
+        _ src: IPv6Key,
+        ownerContainerID: String?,
+        ingressContainerID: String,
+        isControlSolicitation: Bool
+    ) -> Bool {
+        if let ownerContainerID {
+            return ownerContainerID == ingressContainerID
+        }
+        guard isControlSolicitation else { return false }
+        let isUnspecified = src.high == 0 && src.low == 0
+        let isLinkLocal = (src.high & 0xFFC0_0000_0000_0000) == 0xFE80_0000_0000_0000
+        return isUnspecified || isLinkLocal
+    }
+
     private func handleIPv4(_ packet: UnsafeRawBufferPointer, from containerID: String) {
         guard let header = IPv4Peek.tuple(packet) else { return }
         let action = lock.withLock { state -> IPv4Action in
+            guard let src = state.peers[header.src],
+                Self.allowsIPv4Source(ownerContainerID: src.link.containerID, ingressContainerID: containerID)
+            else {
+                return .drop
+            }
             if state.gateways.contains(header.dst) {
                 return .toGateway(state)
             }
             if let dst = state.peers[header.dst] {
-                guard let src = state.peers[header.src], !src.networks.isDisjoint(with: dst.networks) else {
+                guard !src.networks.isDisjoint(with: dst.networks) else {
                     return .drop
                 }
                 return .sameNet(dst.link)
@@ -391,17 +418,29 @@ final class BridgeDataplane: @unchecked Sendable {
             && packet.count >= IPv6Peek.headerLength + 8
             && packet[IPv6Peek.headerLength] == NDP.typeRouterSolicitation
         let action = lock.withLock { state -> IPv6Action in
+            let srcPeer = state.peers6[header.src]
+            guard Self.allowsIPv6Source(
+                header.src,
+                ownerContainerID: srcPeer?.link.containerID,
+                ingressContainerID: containerID,
+                isControlSolicitation: isNS || isRS
+            ) else {
+                return .drop
+            }
             if isNS {
                 return .ndp(state)
             }
             if isRS {
                 return .rs(state)
             }
+            guard let src = srcPeer else {
+                return .drop
+            }
             if state.gateways6.contains(header.dst) {
                 return .toGateway(state)
             }
             if let dst = state.peers6[header.dst] {
-                guard let src = state.peers6[header.src], !src.networks.isDisjoint(with: dst.networks) else {
+                guard !src.networks.isDisjoint(with: dst.networks) else {
                     return .drop
                 }
                 return .sameNet(dst.link)

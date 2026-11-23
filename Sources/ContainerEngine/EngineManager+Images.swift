@@ -241,7 +241,8 @@ extension EngineManager {
     /// is a conflict, and a multi-tag image only gets the requested reference untagged.
     /// `noPrune` keeps orphaned layer blobs and the unpacked runtime cache.
     public func deleteImage(name: String, force: Bool = false, noPrune: Bool = false) async throws -> [EngineImageDeleteItem] {
-        let image = try await resolveImage(name)
+        let lookup = try await resolveImageLookup(name)
+        let image = lookup.image
         let digest = image.digest
         let reference = image.reference
         let siblings = (try? await imageStore.list().filter { $0.digest == digest }) ?? [image]
@@ -254,7 +255,8 @@ extension EngineManager {
                 )
             }
             let named = siblings.filter { !Self.isDigestReference($0.reference) }
-            let byID = Self.isDigestReference(name) || Self.isDigestReference(reference)
+            // Short ID / digest lookup must keep Docker's multi-tag protection; exact tag names do not.
+            let byID = lookup.byID
             if byID, named.count > 1 {
                 throw EngineError.conflict(
                     "conflict: unable to delete \(digest) (must force) - image is referenced in multiple repositories"
@@ -328,18 +330,33 @@ extension EngineManager {
     }
 
     func resolveImage(_ name: String) async throws -> Containerization.Image {
+        try await resolveImageLookup(name).image
+    }
+
+    /// Exact names and tags win. Bare hex / `sha256:` prefixes then select a unique digest.
+    func resolveImageLookup(_ name: String) async throws -> (image: Containerization.Image, byID: Bool) {
         let decoded = name.removingPercentEncoding ?? name
         for candidate in Self.lookupCandidates(decoded) {
             do {
-                return try await imageStore.get(reference: candidate)
+                let image = try await imageStore.get(reference: candidate)
+                // Classify by the actual match, not input syntax: a `sha256:<64-hex>` repository
+                // tag can resolve an image whose digest differs, and must stay a name lookup.
+                let byID = image.digest == decoded || image.digest == candidate
+                return (image, byID)
             } catch let error as ContainerizationError where error.code == .notFound {
                 continue
             }
         }
 
         let images = try await imageStore.list()
-        if let match = images.first(where: { Self.matches($0, name: decoded) }) {
-            return match
+        if let match = images.first(where: { Self.matchesName($0, name: decoded) }) {
+            return (match, match.digest == decoded)
+        }
+        if let prefix = Self.digestIDPrefix(decoded) {
+            let digest = try Self.resolveDigestPrefix(prefix, in: images.map(\.digest))
+            if let digest, let image = images.first(where: { $0.digest == digest }) {
+                return (image, true)
+            }
         }
         throw EngineError.imageNotFound("No such image: \(decoded)")
     }
@@ -373,12 +390,46 @@ extension EngineManager {
     }
 
     static func matches(_ image: Containerization.Image, name: String) -> Bool {
+        if matchesName(image, name: name) { return true }
+        guard let prefix = digestIDPrefix(name) else { return false }
+        return digestHex(image.digest).hasPrefix(prefix)
+    }
+
+    /// Tag / alias equality only. Digest ID prefixes are resolved separately so ambiguity can fail.
+    static func matchesName(_ image: Containerization.Image, name: String) -> Bool {
         if image.reference == name { return true }
         if image.digest == name { return true }
-        if image.digest.hasSuffix(name) { return true }
-        if Self.aliases(for: image.reference).contains(name) { return true }
-        if !name.contains(":"), Self.aliases(for: image.reference).contains("\(name):latest") { return true }
+        if aliases(for: image.reference).contains(name) { return true }
+        if !name.contains(":"), aliases(for: image.reference).contains("\(name):latest") { return true }
         return false
+    }
+
+    /// CLI short IDs and partial digests. Rejects non-hex names so repository paths stay names.
+    static func digestIDPrefix(_ name: String) -> String? {
+        let hex: Substring
+        if name.hasPrefix("sha256:") {
+            hex = name.dropFirst("sha256:".count)
+        } else if !name.isEmpty, !name.contains(":"), !name.contains("/"), !name.contains("@") {
+            hex = name[...]
+        } else {
+            return nil
+        }
+        guard (1...64).contains(hex.count), hex.allSatisfy({ $0.isASCII && $0.isHexDigit }) else { return nil }
+        return hex.lowercased()
+    }
+
+    static func digestHex(_ digest: String) -> String {
+        digest.hasPrefix("sha256:") ? String(digest.dropFirst("sha256:".count)) : digest
+    }
+
+    /// Unique digest for a hex prefix. Same digest under many tags is not ambiguous; distinct digests are.
+    static func resolveDigestPrefix(_ prefix: String, in digests: [String]) throws -> String? {
+        let matches = Set(digests.filter { digestHex($0).hasPrefix(prefix) })
+        switch matches.count {
+        case 0: return nil
+        case 1: return matches.first
+        default: throw EngineError.conflict("image \(prefix) is ambiguous (\(matches.count) matches)")
+        }
     }
 
     /// Names that resolve to this reference. Short Hub names stay valid for `run`/`rmi`;
@@ -415,7 +466,9 @@ extension EngineManager {
     }
 
     static func isDigestReference(_ reference: String) -> Bool {
-        reference.hasPrefix("sha256:") && !reference.contains("/")
+        guard reference.hasPrefix("sha256:"), !reference.contains("/") else { return false }
+        let hex = reference.dropFirst("sha256:".count)
+        return hex.count == 64 && hex.allSatisfy { $0.isASCII && $0.isHexDigit }
     }
 
     static func repository(from reference: String) -> String {

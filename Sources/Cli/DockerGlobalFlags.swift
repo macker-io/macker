@@ -126,29 +126,23 @@ public enum DockerGlobalFlags {
         return result
     }
 
-    /// `--host`, then `MACKER_HOST` / `DOCKER_HOST`, then the selected context, then the default socket.
+    /// Explicit targets are authoritative. Host environment overrides apply only without a target flag.
     static func socketPath(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> String {
-        if let host {
-            return try unixSocket(host)
+        if let context {
+            guard host == nil else { throw CLIError.io("--host and --context cannot be used together") }
+            guard !context.isEmpty else { throw CLIError.io("--context requires a name") }
+            return try unixSocket(ContextStore.load(context, environment: environment).host)
         }
-        if environmentHostSet(environment) {
-            return DaemonPaths.socketPath(from: environment)
+        if let host { return try unixSocket(host) }
+        for key in ["MACKER_HOST", "DOCKER_HOST"] {
+            if let value = environment[key], !value.isEmpty { return try unixSocket(value) }
         }
         if let endpoint = try ContextStore.currentEndpoint(environment: environment) {
             return try unixSocket(endpoint)
         }
         return DaemonPaths.defaultSocketPath
-    }
-
-    private static func environmentHostSet(_ environment: [String: String]) -> Bool {
-        for key in ["MACKER_HOST", "DOCKER_HOST"] {
-            if let value = environment[key], DaemonPaths.unixSocketPath(from: value) != nil {
-                return true
-            }
-        }
-        return false
     }
 
     static func unixSocket(_ host: String) throws -> String {

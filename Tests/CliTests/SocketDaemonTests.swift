@@ -79,6 +79,28 @@ struct SocketDaemonTests {
         }
     }
 
+    @Test func cliCreateWithAnonymousVolumeFlagCreatesAnonymousVolumeMount() async throws {
+        try await withSocketServer { socket, engine in
+            try await importAlpine(engine)
+            let encoded = try Create.encodeRequest(
+                ContainerCreateOptions.parse(["--name", "anon-vol", "-v", "/cache", "alpine:latest"]),
+                autoRemove: false
+            )
+            let created = try UnixHTTPClient.request(
+                method: "POST", path: "/v1.44" + encoded.path, socketPath: socket, body: encoded.body
+            )
+            try #require(created.statusCode == 201)
+            let inspected = try await engine.inspectContainer("anon-vol")
+            #expect(inspected.container.mounts.count == 1)
+            let mount = try #require(inspected.container.mounts.first)
+            #expect(mount.type == "volume")
+            #expect(mount.destination == "/cache")
+            #expect(mount.anonymous == true)
+            #expect(mount.rw == true)
+            #expect(!mount.name.isEmpty)
+        }
+    }
+
     /// `docker run` blocks on the `wait` response header before it calls `start`; the
     /// header must reach the client while the body is still pending.
     @Test func waitHeaderIsFlushedBeforeTheContainerExits() async throws {

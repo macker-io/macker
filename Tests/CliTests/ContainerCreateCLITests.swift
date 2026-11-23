@@ -124,6 +124,62 @@ struct ContainerCreateCLITests {
         #expect(networks["bridge"] != nil)
     }
 
+    @Test func encodeRequestSplitsAnonymousVolumesFromBindsAndRejectsRelativeDestination() throws {
+        let encoded = try Create.encodeRequest(
+            ContainerCreateOptions.parse([
+                "-v", "/cache",
+                "-v", "named:/data",
+                "-v", "/host/dir:/container/dir:ro",
+                "--mount", "type=volume,target=/anon-mount",
+                "alpine",
+            ]),
+            autoRemove: false
+        )
+        let body = try jsonObject(encoded.body)
+        let volumes = try jsonObject(body["Volumes"])
+        #expect(volumes.keys.sorted() == ["/cache"])
+        #expect(volumes["/cache"] != nil)
+
+        let host = try jsonObject(body["HostConfig"])
+        #expect(host["Binds"] as? [String] == ["named:/data", "/host/dir:/container/dir:ro"])
+        let mounts = host["Mounts"] as? [[String: Any]]
+        #expect(mounts?.contains { ($0["Type"] as? String) == "volume" && ($0["Target"] as? String) == "/anon-mount" } == true)
+
+        let anonymousOnly = try Create.encodeRequest(
+            ContainerCreateOptions.parse(["-v", "/cache", "alpine"]),
+            autoRemove: false
+        )
+        let anonymousHost = try jsonObject(try jsonObject(anonymousOnly.body)["HostConfig"])
+        #expect(anonymousHost["Binds"] == nil)
+        #expect(try jsonObject(try jsonObject(anonymousOnly.body)["Volumes"])["/cache"] != nil)
+
+        // Whitespace in paths is preserved verbatim (no trim).
+        let spaced = try Create.encodeRequest(
+            ContainerCreateOptions.parse([
+                "-v", "/cache ",
+                "-v", "/tmp/data :/data",
+                "alpine",
+            ]),
+            autoRemove: false
+        )
+        let spacedBody = try jsonObject(spaced.body)
+        #expect(try jsonObject(spacedBody["Volumes"])["/cache "] != nil)
+        #expect(try jsonObject(spacedBody["HostConfig"])["Binds"] as? [String] == ["/tmp/data :/data"])
+
+        expectCLIError("invalid volume specification") {
+            _ = try Create.encodeRequest(
+                ContainerCreateOptions.parse(["-v", "cache", "alpine"]),
+                autoRemove: false
+            )
+        }
+        expectCLIError("invalid volume specification") {
+            _ = try Create.encodeRequest(
+                ContainerCreateOptions.parse(["-v", "relative/path", "alpine"]),
+                autoRemove: false
+            )
+        }
+    }
+
     @Test func runStreamsHonorAttachAndInteractive() {
         #expect(Run.streams(attach: [], interactive: false) == (false, true, true))
         #expect(Run.streams(attach: [], interactive: true) == (true, true, true))

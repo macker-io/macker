@@ -288,7 +288,14 @@ case_commit_export() {
   x d commit ce compat/commit:1; rc 0
   x d run --rm compat/commit:1 cat /committed; eq c
   x d export -o "$STORE/ce.tar" ce; rc 0; tar tf "$STORE/ce.tar" | grep -q '^committed$' || fail "export lacks file"
-  x d rm ce; x d rmi compat/commit:1; rc 0
+  # A live guest tar loses mtimes: a same-length rewrite must still form a layer.
+  x d run -d --network none --name ce-live compat/commit:1 sleep 120; rc 0
+  x d exec ce-live sh -c 'echo d >/committed'; rc 0
+  x d diff ce-live; rc 0; out "C /committed"
+  x d commit ce-live compat/commit:2; rc 0
+  x d run --rm --network none compat/commit:2 cat /committed; rc 0; eq d
+  x d rm -f ce-live ce; rc 0
+  x d rmi compat/commit:2 compat/commit:1; rc 0
 }
 suite_cli() {
   for c in version_info api_version_policy pull_images run_stdout run_exit_code run_stdin run_config run_tty \

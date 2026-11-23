@@ -160,8 +160,11 @@ final class PortPublisher: @unchecked Sendable {
         remember(outgoing, key: key)
         switch transport {
         case .tcp:
-            pipeStream(incoming, to: outgoing)
-            pipeStream(outgoing, to: incoming)
+            // Shared finish counter: clean EOF half-closes one write side and leaves the
+            // opposite relay running until it finishes; errors/shutdown cancel both.
+            let relay = TCPRelayPair(a: incoming, b: outgoing)
+            pipeStream(incoming, to: outgoing, relay: relay)
+            pipeStream(outgoing, to: incoming, relay: relay)
         case .udp:
             pipeDatagrams(incoming, to: outgoing)
             pipeDatagrams(outgoing, to: incoming)
@@ -180,29 +183,97 @@ final class PortPublisher: @unchecked Sendable {
         to.cancel()
     }
 
-    private func pipeStream(_ from: NWConnection, to: NWConnection) {
+    /// Tracks both directions of one TCP bridge so a write-half close on one side does not
+    /// tear down the other until it also finishes (or an error forces cancel).
+    private final class TCPRelayPair: @unchecked Sendable {
+        private let a: NWConnection
+        private let b: NWConnection
+        private let lock = OSAllocatedUnfairLock(initialState: 2)
+
+        init(a: NWConnection, b: NWConnection) {
+            self.a = a
+            self.b = b
+        }
+
+        /// One direction finished cleanly (EOF propagated as write-half close).
+        func directionFinished() {
+            let remaining = lock.withLock { state -> Int in
+                guard state > 0 else { return -1 }
+                state -= 1
+                return state
+            }
+            if remaining == 0 {
+                a.cancel()
+                b.cancel()
+            }
+        }
+
+        /// Error or failed send: abort both sides immediately.
+        func fail() {
+            let shouldCancel = lock.withLock { state -> Bool in
+                guard state > 0 else { return false }
+                state = 0
+                return true
+            }
+            if shouldCancel {
+                a.cancel()
+                b.cancel()
+            }
+        }
+    }
+
+    private func pipeStream(_ from: NWConnection, to: NWConnection, relay: TCPRelayPair) {
         from.receive(minimumIncompleteLength: 1, maximumLength: 256 * 1024) { [weak self] data, _, isComplete, error in
             guard let publisher = self else { return }
+            if error != nil {
+                // Hard failure on receive — drop the pair; keep clean EOF separate.
+                relay.fail()
+                return
+            }
             if let data, !data.isEmpty {
-                to.send(content: data, completion: .contentProcessed { sendError in
-                    if sendError != nil || isComplete || error != nil {
-                        to.send(content: nil, isComplete: true, completion: .contentProcessed { _ in
-                            publisher.closePair(from, to)
-                        })
-                        return
+                // Stream chunks must not use defaultMessage/isComplete=true — that can FIN early.
+                to.send(
+                    content: data,
+                    contentContext: .defaultStream,
+                    isComplete: false,
+                    completion: .contentProcessed { sendError in
+                        if sendError != nil {
+                            relay.fail()
+                            return
+                        }
+                        if isComplete {
+                            publisher.halfCloseWrite(to, relay: relay)
+                            return
+                        }
+                        publisher.pipeStream(from, to: to, relay: relay)
                     }
-                    publisher.pipeStream(from, to: to)
-                })
+                )
                 return
             }
-            if isComplete || error != nil {
-                to.send(content: nil, isComplete: true, completion: .contentProcessed { _ in
-                    publisher.closePair(from, to)
-                })
+            if isComplete {
+                // Clean EOF: propagate as write-half close; leave the opposite relay alive.
+                publisher.halfCloseWrite(to, relay: relay)
                 return
             }
-            publisher.pipeStream(from, to: to)
+            publisher.pipeStream(from, to: to, relay: relay)
         }
+    }
+
+    private func halfCloseWrite(_ connection: NWConnection, relay: TCPRelayPair) {
+        // finalMessage + isComplete is what actually emits TCP FIN on NWConnection;
+        // nil content with the default context does not half-close the write side.
+        connection.send(
+            content: nil,
+            contentContext: .finalMessage,
+            isComplete: true,
+            completion: .contentProcessed { sendError in
+                if sendError != nil {
+                    relay.fail()
+                    return
+                }
+                relay.directionFinished()
+            }
+        )
     }
 
     /// `isComplete` marks the end of one datagram, not the end of the flow, so the only reason
